@@ -1,0 +1,18 @@
+[
+  "tests/test_api_smoke.py::test_create_execution_missing_required_input",
+  "tests/test_api_smoke.py::test_create_execution_queued_mocked",
+  "tests/test_api_smoke.py::test_create_execution_unknown_mission",
+  "tests/test_api_smoke.py::test_create_execution_validation_error",
+  "tests/test_api_smoke.py::test_health",
+  "tests/test_config.py::test_settings_defaults",
+  "tests/test_config.py::test_settings_load_from_env",
+  "tests/test_mission_graph.py::test_deterministic_run_with_stub_tools",
+  "tests/test_mission_graph.py::test_graph_compiles",
+  "tests/test_mission_graph.py::test_hybrid_run_with_stub_tools_succeeds_without_llm",
+  "tests/test_tool_registry.py::test_all_six_tools_registered",
+  "tests/test_tool_registry.py::test_list_for_context_returns_only_allowed",
+  "tests/test_tool_registry.py::test_permission_check_allows_listed_capability",
+  "tests/test_tool_registry.py::test_permission_check_denies_unlisted_capability",
+  "tests/test_tool_registry.py::test_permission_check_denies_unlisted_tool",
+  "tests/test_tool_registry.py::test_tool_schemas_valid"
+]

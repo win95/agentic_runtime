@@ -1,0 +1,42 @@
+# Example mission from the architecture design: equipment fault analysis.
+# A Mission is CONFIG, not a LangGraph.
+mission_id: fault_analysis
+version: 1
+name: Fault Analysis
+objective: >
+  Analyze equipment faults and identify root causes.
+
+input_schema:
+  type: object
+  properties:
+    asset_id:
+      type: string
+    start_date:
+      type: string
+      format: date
+    end_date:
+      type: string
+      format: date
+  required:
+    - asset_id
+    - start_date
+    - end_date
+
+execution:
+  mode: hybrid
+  agent_id: fault_investigator
+
+capabilities:
+  - fault_history
+  - maintenance_analysis
+  - knowledge_retrieval
+
+output_schema:
+  type: object
+  properties:
+    root_causes:
+      type: array
+    evidence:
+      type: array
+    recommendations:
+      type: array

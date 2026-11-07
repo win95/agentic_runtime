@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentic-runtime"
+version = "0.1.0"
+description = "Agentic runtime: FastAPI platform + Celery dispatch + LangGraph mission graphs + Deep Agents"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+dependencies = [
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.30,<1",
+    "celery[redis]>=5.4,<6",
+    "redis>=5.0,<6",
+    "sqlalchemy>=2.0,<3",
+    "psycopg[binary]>=3.2,<4",
+    "pydantic>=2.9,<3",
+    "pydantic-settings>=2.6,<3",
+    "langgraph>=0.2,<2",
+    "langchain>=0.3,<2",
+    "langchain-openai>=0.3,<2",
+    "deepagents>=0.2,<1",
+    "langchain-mcp-adapters>=0.1,<1",
+    "langsmith>=0.2,<1",
+    "qdrant-client>=1.11,<2",
+    "falkordb>=1.0,<2",
+    "minio>=7.2,<8",
+    "mlflow>=2.18,<4",
+    "httpx>=0.28,<1",
+    "pyyaml>=6.0,<7",
+]
+
+[project.optional-dependencies]
+# Dev/test tooling (pytest, ruff). httpx is already a main dep (TestClient).
+dev = [
+    "pytest>=8.0,<9",
+    "pytest-asyncio>=0.24,<1",
+    "ruff>=0.6,<1",
+]
+# Alternative LLM provider (primary is langchain-openai, see runtime/deep_agent.py).
+anthropic = ["langchain-anthropic>=0.3,<2"]
+# Optional Postgres checkpointer for LangGraph (runtime/mission_graph.py).
+# Without it, graphs run without persistent checkpoints (default).
+postgres-checkpoint = ["langgraph-checkpoint-postgres>=2.0,<4"]
+
+[tool.setuptools.packages.find]
+include = ["app*", "runtime*", "infra*", "seeds*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
