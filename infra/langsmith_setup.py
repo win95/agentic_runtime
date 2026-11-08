@@ -25,5 +25,5 @@ def setup_langsmith() -> bool:
     os.environ.setdefault("LANGSMITH_TRACING", "true")
     os.environ.setdefault("LANGSMITH_API_KEY", settings.langsmith_api_key)
     os.environ.setdefault("LANGSMITH_PROJECT", settings.langsmith_project)
-    os.environ.setdefault("LANGSMITH_ENDPOINT", "https://api.smith.langchain.com")
+    os.environ.setdefault("LANGSMITH_ENDPOINT", settings.langsmith_endpoint)
     return True

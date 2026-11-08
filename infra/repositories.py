@@ -1,18 +1,23 @@
 """Repository layer — data access for tools and capability graphs.
 
-Each function tries the real store first and falls back to clearly-marked
-stub data (`"stub": True` in the second return value) when the store is
-not configured, the table/collection is missing, or the query returns
-nothing usable. Stub data is demo data — replace it with real repositories
-once the data schema exists. Never silently present stub data as real.
+MVP rule: NO invented data. Every function queries a real store and
+returns what is actually there (possibly an empty list). When a store is
+unreachable or misconfigured the function raises a clear RuntimeError;
+callers (capability nodes, tools) surface that error in their result
+instead of fabricating rows.
 
-Return shape: (rows, is_stub).
+Return shape: (rows, is_stub) where is_stub is False for real data.
+`get_sensor_data` is the single documented exception: no sensor store
+exists yet, so it still returns clearly-marked stub data.
+
+Date/datetime values are converted to ISO strings so results stay JSON
+serializable (ExecutionResult stores evidence as JSON).
 """
 
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, datetime
 
 logger = logging.getLogger(__name__)
 
@@ -25,94 +30,88 @@ def _days(start_date: str, end_date: str) -> int:
         return 30
 
 
-def search_fault_history(asset_id: str, start_date: str, end_date: str):
-    """Fault history from PostgreSQL table `fault_history` (if it exists)."""
-    try:
-        from infra.postgres import run_query
+def _jsonable(row: dict) -> dict:
+    out = {}
+    for key, value in row.items():
+        if isinstance(value, (datetime, date)):
+            out[key] = value.isoformat()
+        else:
+            out[key] = value
+    return out
 
+
+def search_fault_history(asset_id: str, start_date: str, end_date: str):
+    """Fault history from PostgreSQL table `fault_history`.
+
+    Raises RuntimeError when the DB/table is unreachable. Returns
+    ([], False) when the asset simply has no faults in the range.
+    """
+    from infra.postgres import run_query
+
+    # A bare date end ("2026-10-31") means the whole day, not midnight.
+    end_inclusive = end_date
+    if end_date and len(end_date) == 10:
+        end_inclusive = f"{end_date}T23:59:59"
+    try:
         rows = run_query(
-            "SELECT code, title, occurred_at, severity FROM fault_history "
+            "SELECT id, asset_id, code, title, description, severity, "
+            "occurred_at, resolved_at, technician, action FROM fault_history "
             "WHERE asset_id = :asset_id AND occurred_at >= :start_date "
             "AND occurred_at <= :end_date ORDER BY occurred_at DESC LIMIT 50",
-            {"asset_id": asset_id, "start_date": start_date, "end_date": end_date},
+            {"asset_id": asset_id, "start_date": start_date, "end_date": end_inclusive},
         )
-        return rows, False
-    except Exception as exc:  # noqa: BLE001 — stub fallback is the design
-        logger.debug("fault_history fallback to stub: %s", exc)
-        return [
-            {
-                "code": "F-101",
-                "title": f"Door sensor intermittent fault on {asset_id}",
-                "occurred_at": start_date or "2026-10-05",
-                "severity": "medium",
-            },
-            {
-                "code": "F-204",
-                "title": f"Traction motor overheating on {asset_id}",
-                "occurred_at": start_date or "2026-10-12",
-                "severity": "high",
-            },
-        ], True
+    except Exception as exc:  # noqa: BLE001 — wrapped with a clear message
+        raise RuntimeError(
+            f"Could not read fault_history from PostgreSQL: {exc}. "
+            "Is the database up and seeded? Run `make seed`."
+        ) from exc
+    return [_jsonable(r) for r in rows], False
 
 
 def get_maintenance_records(asset_id: str):
     """Maintenance records from PostgreSQL table `maintenance_records`."""
-    try:
-        from infra.postgres import run_query
+    from infra.postgres import run_query
 
+    try:
         rows = run_query(
-            "SELECT date, action, technician FROM maintenance_records "
-            "WHERE asset_id = :asset_id ORDER BY date DESC LIMIT 20",
+            "SELECT id, asset_id, date, action, technician, notes "
+            "FROM maintenance_records WHERE asset_id = :asset_id "
+            "ORDER BY date DESC LIMIT 20",
             {"asset_id": asset_id},
         )
-        return rows, False
-    except Exception as exc:  # noqa: BLE001 — stub fallback is the design
-        logger.debug("maintenance_records fallback to stub: %s", exc)
-        return [
-            {
-                "date": "2026-09-20",
-                "action": f"Routine inspection of {asset_id}",
-                "technician": "demo-team",
-            },
-            {
-                "date": "2026-10-08",
-                "action": f"Door sensor replaced on {asset_id}",
-                "technician": "demo-team",
-            },
-        ], True
+    except Exception as exc:  # noqa: BLE001 — wrapped with a clear message
+        raise RuntimeError(
+            f"Could not read maintenance_records from PostgreSQL: {exc}. "
+            "Is the database up and seeded? Run `make seed`."
+        ) from exc
+    return [_jsonable(r) for r in rows], False
 
 
 def search_documents(query: str, limit: int = 5):
-    """Technical documents via Qdrant vector search."""
-    try:
-        from infra.qdrant_client import search_documents as qdrant_search
+    """Technical documents via real Qdrant vector search.
 
-        docs = qdrant_search(query, limit=limit)
-        return docs, False
-    except Exception as exc:  # noqa: BLE001 — stub fallback is the design
-        logger.debug("Qdrant search fallback to stub: %s", exc)
-        return [
-            {
-                "title": "Elevator Maintenance Manual (demo)",
-                "content": f"Demo document matching query: {query}",
-                "score": 0.0,
-            }
-        ], True
+    Raises RuntimeError when Qdrant or the embedding model is unreachable,
+    or when the collection has not been seeded yet. Never returns
+    invented documents.
+    """
+    from infra.qdrant_client import search_documents as qdrant_search
+
+    docs = qdrant_search(query, limit=limit)
+    return docs, False
 
 
 def query_asset_relationships(asset_id: str):
     """Asset relationships from the FalkorDB knowledge graph."""
-    try:
-        from infra.falkor_client import query_asset_relationships as falkor_query
+    from infra.falkor_client import query_asset_relationships as falkor_query
 
+    try:
         relations = falkor_query(asset_id)
-        return relations, False
-    except Exception as exc:  # noqa: BLE001 — stub fallback is the design
-        logger.debug("FalkorDB query fallback to stub: %s", exc)
-        return [
-            {"from": asset_id, "type": "PART_OF", "to": "building-B1"},
-            {"from": asset_id, "type": "USES", "to": "motor-M2"},
-        ], True
+    except Exception as exc:  # noqa: BLE001 — wrapped with a clear message
+        raise RuntimeError(
+            f"Could not query FalkorDB for asset {asset_id}: {exc}. "
+            "Is FalkorDB up and seeded? Run `make seed`."
+        ) from exc
+    return relations, False
 
 
 def get_sensor_data(asset_id: str, start_date: str, end_date: str):

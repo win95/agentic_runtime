@@ -5,8 +5,9 @@ Pipeline: fault_history (SQL) → maintenance (SQL) → knowledge_retrieval
 
 Each node appends evidence items; the aggregation node drafts the mission
 result (root_causes / evidence / recommendations). Repository calls go
-through infra/repositories, which return clearly-marked stub data when the
-real store is not configured or has no rows.
+through infra/repositories, which query the real stores. When a store is
+unreachable the node records an error evidence item instead of inventing
+data — the run still completes and validation reports what is missing.
 """
 
 from __future__ import annotations
@@ -31,9 +32,18 @@ def _evidence(source: str, kind: str, asset_id: str, summary: str, data=None, st
 def fault_history_node(state: MissionState) -> dict:
     inp = state.get("input") or {}
     asset_id = inp.get("asset_id", "")
-    rows, is_stub = repositories.search_fault_history(
-        asset_id, inp.get("start_date", ""), inp.get("end_date", "")
-    )
+    try:
+        rows, is_stub = repositories.search_fault_history(
+            asset_id, inp.get("start_date", ""), inp.get("end_date", "")
+        )
+    except Exception as exc:  # noqa: BLE001 — any store failure is error evidence
+        return {
+            "evidence": [
+                _evidence(
+                    "fault_history", "error", asset_id, f"Fault history unavailable: {exc}"
+                )
+            ]
+        }
     items = [
         _evidence(
             "fault_history",
@@ -57,7 +67,16 @@ def fault_history_node(state: MissionState) -> dict:
 def maintenance_node(state: MissionState) -> dict:
     inp = state.get("input") or {}
     asset_id = inp.get("asset_id", "")
-    rows, is_stub = repositories.get_maintenance_records(asset_id)
+    try:
+        rows, is_stub = repositories.get_maintenance_records(asset_id)
+    except Exception as exc:  # noqa: BLE001 — any store failure is error evidence
+        return {
+            "evidence": [
+                _evidence(
+                    "maintenance", "error", asset_id, f"Maintenance records unavailable: {exc}"
+                )
+            ]
+        }
     items = [
         _evidence(
             "maintenance",
@@ -81,9 +100,22 @@ def maintenance_node(state: MissionState) -> dict:
 def knowledge_retrieval_node(state: MissionState) -> dict:
     inp = state.get("input") or {}
     asset_id = inp.get("asset_id", "")
-    docs, is_stub = repositories.search_documents(
-        f"faults maintenance {asset_id}", limit=5
-    )
+    try:
+        docs, is_stub = repositories.search_documents(
+            f"faults maintenance {asset_id}", limit=5
+        )
+    except Exception as exc:  # noqa: BLE001 — any store failure is error evidence
+        # No invented documents: record the failure as evidence.
+        return {
+            "evidence": [
+                _evidence(
+                    "knowledge_retrieval",
+                    "error",
+                    asset_id,
+                    f"Technical documents unavailable: {exc}",
+                )
+            ]
+        }
     items = [
         _evidence(
             "knowledge_retrieval",
@@ -112,7 +144,16 @@ def knowledge_retrieval_node(state: MissionState) -> dict:
 def asset_relations_node(state: MissionState) -> dict:
     inp = state.get("input") or {}
     asset_id = inp.get("asset_id", "")
-    relations, is_stub = repositories.query_asset_relationships(asset_id)
+    try:
+        relations, is_stub = repositories.query_asset_relationships(asset_id)
+    except Exception as exc:  # noqa: BLE001 — any store failure is error evidence
+        return {
+            "evidence": [
+                _evidence(
+                    "asset_relations", "error", asset_id, f"Asset relations unavailable: {exc}"
+                )
+            ]
+        }
     items = [
         _evidence(
             "asset_relations",

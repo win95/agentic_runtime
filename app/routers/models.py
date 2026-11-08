@@ -1,8 +1,10 @@
 """Model Registry — which LLM models the runtime is configured to use.
 
-Primary provider is OpenAI (langchain-openai). Anthropic is the documented
-alternative and needs the `anthropic` extra:
-`pip install -e ".[anthropic]"` + LLM_PROVIDER=anthropic.
+All models go through the user's LiteLLM proxy (OpenAI-compatible).
+The proxy URL, key and model names come from env (LLM_API_BASE /
+LLM_API_KEY / LLM_MODEL / EMBEDDING_MODEL). Anthropic is only a
+documented alternative: point the proxy at it and register the model
+name on the proxy — no code change is needed.
 """
 
 from __future__ import annotations
@@ -20,22 +22,17 @@ router = APIRouter(
 
 @router.get("", response_model=list[schemas.ModelInfo])
 def list_models():
-    provider = settings.llm_provider
-    configured = [
+    return [
         schemas.ModelInfo(
-            provider=provider,
+            provider="litellm (openai-compatible)",
             model=settings.llm_model,
             default=True,
-            note="Configured via LLM_PROVIDER / LLM_MODEL.",
-        )
+            note="Chat model, via LLM_API_BASE / LLM_MODEL.",
+        ),
+        schemas.ModelInfo(
+            provider="litellm (openai-compatible)",
+            model=settings.embedding_model,
+            default=False,
+            note="Embedding model, via EMBEDDING_MODEL.",
+        ),
     ]
-    if provider != "anthropic":
-        configured.append(
-            schemas.ModelInfo(
-                provider="anthropic",
-                model="claude-sonnet-4-5",
-                default=False,
-                note="Alternative provider; requires the anthropic extra and ANTHROPIC_API_KEY.",
-            )
-        )
-    return configured

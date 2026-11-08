@@ -34,10 +34,13 @@ dependencies = [
 
 [project.optional-dependencies]
 # Dev/test tooling (pytest, ruff). httpx is already a main dep (TestClient).
+# langgraph-cli powers `langgraph dev --allow-blocking` (see langgraph.json);
+# the [inmem] extra provides the langgraph-api server it needs.
 dev = [
     "pytest>=8.0,<9",
     "pytest-asyncio>=0.24,<1",
     "ruff>=0.6,<1",
+    "langgraph-cli[inmem]>=0.4,<1",
 ]
 # Alternative LLM provider (primary is langchain-openai, see runtime/deep_agent.py).
 anthropic = ["langchain-anthropic>=0.3,<2"]

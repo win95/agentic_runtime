@@ -30,8 +30,15 @@ def get_maintenance_records(asset_id: str) -> dict:
 
 @tool
 def search_technical_documents(query: str, limit: int = 5) -> dict:
-    """Search technical documents (RAG / Qdrant)."""
-    docs, is_stub = repositories.search_documents(query, limit=limit)
+    """Search technical documents (RAG / Qdrant).
+
+    When Qdrant or the embedding model is unreachable, returns a clear
+    error instead of invented documents.
+    """
+    try:
+        docs, is_stub = repositories.search_documents(query, limit=limit)
+    except RuntimeError as exc:
+        return {"query": query, "documents": [], "error": str(exc), "stub": False}
     return {"query": query, "documents": docs, "stub": is_stub}
 
 

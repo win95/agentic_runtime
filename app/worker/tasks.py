@@ -53,8 +53,10 @@ def run_execution(self, execution_id: str) -> dict:
 
         # Imported here so the worker process (not the API process) pays the
         # LangGraph import cost.
+        from infra.langsmith_setup import setup_langsmith
         from runtime.mission_graph import run_mission
 
+        setup_langsmith()  # tracing for the worker process (no-op without key)
         final_state = run_mission(mission_dict, execution.input or {}, execution_id)
 
         # A cancellation that arrived mid-run wins over the graph result.
@@ -69,6 +71,24 @@ def run_execution(self, execution_id: str) -> dict:
         errors = final_state.get("errors") or []
         if status != "SUCCEEDED":
             output = {**output, "errors": errors}
+
+        # Save the Markdown report: MinIO `reports` bucket when reachable,
+        # otherwise inline in the result (see runtime/report.py).
+        from infra.minio_client import report_location, upload_report
+        from runtime.report import build_markdown_report
+
+        report_markdown = build_markdown_report(
+            execution_id, mission_dict, execution.input or {}, final_state
+        )
+        report_key = f"executions/{execution.id}/report.md"
+        try:
+            upload_report(report_key, report_markdown)
+            output["report_location"] = report_location(report_key)
+            output["report_storage"] = "minio"
+        except Exception as exc:  # noqa: BLE001 — report storage is best-effort
+            logger.warning("Could not store report in MinIO, keeping inline: %s", exc)
+            output["report_markdown"] = report_markdown
+            output["report_storage"] = "inline"
 
         db.add(
             models.ExecutionResult(

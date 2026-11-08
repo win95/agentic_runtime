@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 
-from app.config import settings
+from runtime.llm_factory import build_chat_model
 
 logger = logging.getLogger(__name__)
 
@@ -26,26 +26,13 @@ DEFAULT_SYSTEM_PROMPT = (
 
 
 def get_chat_model():
-    """Model factory from env. Primary: OpenAI (langchain-openai).
-    Alternative: LLM_PROVIDER=anthropic (+ the `anthropic` extra)."""
-    provider = settings.llm_provider
-    if provider == "openai":
-        from langchain_openai import ChatOpenAI
+    """Chat model via the LiteLLM proxy (OpenAI-compatible).
 
-        return ChatOpenAI(
-            model=settings.llm_model,
-            api_key=settings.openai_api_key or None,
-            temperature=0,
-        )
-    if provider == "anthropic":
-        from langchain_anthropic import ChatAnthropic
-
-        return ChatAnthropic(
-            model=settings.llm_model,
-            api_key=settings.anthropic_api_key or None,
-            temperature=0,
-        )
-    raise ValueError(f"Unknown LLM_PROVIDER: {provider!r} (expected 'openai' or 'anthropic')")
+    See `runtime.llm_factory`: base URL, key and model name come from env
+    (LLM_API_BASE / LLM_API_KEY / LLM_MODEL). Missing config raises a
+    clear RuntimeError when the agent is built, never at import time.
+    """
+    return build_chat_model()
 
 
 def build_deep_agent(tools: list, system_prompt: str | None = None):

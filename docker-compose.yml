@@ -34,6 +34,11 @@ services:
       - "6333:6333"
     volumes:
       - qdrant-data:/qdrant/storage
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   falkordb:
     image: falkordb/falkordb:latest
@@ -41,6 +46,11 @@ services:
       - "6380:6379"
     volumes:
       - falkor-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
 
   minio:
     image: minio/minio:latest
@@ -53,6 +63,11 @@ services:
       - "9001:9001"
     volumes:
       - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   # Creates the default bucket once MinIO is up.
   minio-setup:
@@ -64,6 +79,7 @@ services:
       sleep 5;
       /usr/bin/mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin};
       /usr/bin/mc mb --ignore-existing local/${MINIO_BUCKET:-agentic-runtime};
+      /usr/bin/mc mb --ignore-existing local/${MINIO_REPORTS_BUCKET:-reports};
       "
 
   # Optional: start with `docker compose --profile observability up`.
@@ -81,6 +97,11 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   api:
     build: .
@@ -95,6 +116,7 @@ services:
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
       MINIO_BUCKET: ${MINIO_BUCKET:-agentic-runtime}
+      MINIO_REPORTS_BUCKET: ${MINIO_REPORTS_BUCKET:-reports}
       MLFLOW_TRACKING_URI: http://mlflow:5000
     env_file:
       - path: .env
@@ -105,6 +127,12 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      falkordb:
+        condition: service_healthy
+      minio:
         condition: service_healthy
 
   worker:
@@ -121,6 +149,7 @@ services:
       MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
       MINIO_BUCKET: ${MINIO_BUCKET:-agentic-runtime}
+      MINIO_REPORTS_BUCKET: ${MINIO_REPORTS_BUCKET:-reports}
       MLFLOW_TRACKING_URI: http://mlflow:5000
     env_file:
       - path: .env
@@ -129,6 +158,41 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      falkordb:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  # One-shot seed: missions + Postgres demo rows + Qdrant docs + FalkorDB.
+  # Run with: docker compose --profile setup run --rm seed
+  seed:
+    profiles: ["setup"]
+    build: .
+    command: python -m seeds.seed_demo_data
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-agentic_runtime}
+      QDRANT_URL: http://qdrant:6333
+      FALKOR_HOST: falkordb
+      FALKOR_PORT: 6379
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-agentic-runtime}
+      MINIO_REPORTS_BUCKET: ${MINIO_REPORTS_BUCKET:-reports}
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      falkordb:
+        condition: service_healthy
+      minio:
         condition: service_healthy
 
 volumes:

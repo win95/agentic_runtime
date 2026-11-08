@@ -21,12 +21,45 @@ def get_client():
     )
 
 
-def ensure_bucket() -> None:
+def ensure_bucket(bucket: str | None = None) -> None:
     client = get_client()
     if client is None:
         raise RuntimeError("MinIO not configured (MINIO_ACCESS_KEY/SECRET_KEY empty)")
-    if not client.bucket_exists(settings.minio_bucket):
-        client.make_bucket(settings.minio_bucket)
+    bucket = bucket or settings.minio_bucket
+    if not client.bucket_exists(bucket):
+        client.make_bucket(bucket)
+
+
+def ensure_reports_bucket() -> None:
+    """Create the `reports` bucket (used for execution reports) if missing."""
+    ensure_bucket(settings.minio_reports_bucket)
+
+
+def upload_report(key: str, markdown: str) -> str:
+    """Upload an execution report to the reports bucket.
+
+    Returns the object key. Raises RuntimeError when MinIO is not
+    configured or unreachable — the caller stores the report inline
+    instead.
+    """
+    client = get_client()
+    if client is None:
+        raise RuntimeError("MinIO not configured (MINIO_ACCESS_KEY/SECRET_KEY empty)")
+    ensure_reports_bucket()
+    data = markdown.encode("utf-8")
+    client.put_object(
+        settings.minio_reports_bucket,
+        key,
+        io.BytesIO(data),
+        len(data),
+        content_type="text/markdown",
+    )
+    return key
+
+
+def report_location(key: str) -> str:
+    """MinIO-style location string for a stored report object."""
+    return f"minio://{settings.minio_reports_bucket}/{key}"
 
 
 def upload_bytes(key: str, data: bytes, content_type: str = "application/octet-stream") -> str:

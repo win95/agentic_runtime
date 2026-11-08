@@ -126,3 +126,37 @@ class ExecutionResult(Base):
     output: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     evidence: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class FaultHistory(Base):
+    """One recorded equipment fault. Seeded with demo data for asset O21
+    (see seeds/demo_data.py); production rows come from the real fault
+    ingestion pipeline."""
+
+    __tablename__ = "fault_history"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    asset_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    code: Mapped[str] = mapped_column(String(64), nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    severity: Mapped[str] = mapped_column(String(32), nullable=False, default="medium")
+    occurred_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    technician: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    action: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class MaintenanceRecord(Base):
+    """One maintenance action on an asset (seeded demo data for O21)."""
+
+    __tablename__ = "maintenance_records"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    asset_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    date: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    technician: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)

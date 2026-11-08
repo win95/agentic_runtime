@@ -196,6 +196,12 @@ def build_mission_graph(checkpointer=None):
     return graph.compile(checkpointer=checkpointer)
 
 
+# Module-level compiled graph — the entry point for `langgraph dev`
+# (see langgraph.json) and the default graph the worker runs. Building it
+# is pure graph construction: no LLM call, no DB access, no checkpoint.
+mission_graph = build_mission_graph()
+
+
 def get_checkpointer():
     """Postgres checkpointer (optional, off by default).
 
@@ -223,9 +229,18 @@ def get_checkpointer():
 
 
 def run_mission(mission: dict, input_data: dict, execution_id: str) -> dict:
-    """Run one execution through the Mission Graph and return final state."""
+    """Run one execution through the Mission Graph and return final state.
+
+    Reuses the module-level compiled `mission_graph` unless a Postgres
+    checkpointer is enabled (then a graph is built with it).
+    """
+    # Tracing for direct callers (worker, eval, langgraph dev): the API
+    # lifespan already calls this for its own process. No-op without a key.
+    from infra.langsmith_setup import setup_langsmith
+
+    setup_langsmith()
     checkpointer = get_checkpointer()
-    graph = build_mission_graph(checkpointer=checkpointer)
+    graph = build_mission_graph(checkpointer=checkpointer) if checkpointer else mission_graph
     initial_state: MissionState = {
         "execution_id": execution_id,
         "mission_id": mission.get("mission_id", ""),

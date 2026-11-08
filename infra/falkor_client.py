@@ -35,3 +35,18 @@ def query_asset_relationships(asset_id: str, limit: int = 20) -> list[dict]:
     return [
         {"from": row[0], "type": row[1], "to": row[2]} for row in result.result_set
     ]
+
+
+def merge_asset_relations(relations: list[tuple]) -> None:
+    """Idempotently create nodes + relationships with MERGE.
+
+    Each relation is (from_id, from_label, rel_type, to_id, to_label).
+    """
+    graph = get_graph()
+    for from_id, from_label, rel_type, to_id, to_label in relations:
+        graph.query(
+            f"MERGE (a:{from_label} {{id: $from_id}}) "
+            f"MERGE (b:{to_label} {{id: $to_id}}) "
+            f"MERGE (a)-[:{rel_type}]->(b)",
+            {"from_id": from_id, "to_id": to_id},
+        )

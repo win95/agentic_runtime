@@ -21,6 +21,8 @@ htmlcov/
 data/
 *.db
 *.sqlite3
+.langgraph_api/
+mlruns/
 
 # IDE
 .idea/
