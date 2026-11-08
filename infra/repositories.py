@@ -63,7 +63,8 @@ def search_fault_history(asset_id: str, start_date: str, end_date: str):
     except Exception as exc:  # noqa: BLE001 — wrapped with a clear message
         raise RuntimeError(
             f"Could not read fault_history from PostgreSQL: {exc}. "
-            "Is the database up and seeded? Run `make seed`."
+            "Is the database up? Load real fault data into the "
+            "`fault_history` table."
         ) from exc
     return [_jsonable(r) for r in rows], False
 
@@ -82,7 +83,8 @@ def get_maintenance_records(asset_id: str):
     except Exception as exc:  # noqa: BLE001 — wrapped with a clear message
         raise RuntimeError(
             f"Could not read maintenance_records from PostgreSQL: {exc}. "
-            "Is the database up and seeded? Run `make seed`."
+            "Is the database up? Load real maintenance data into the "
+            "`maintenance_records` table."
         ) from exc
     return [_jsonable(r) for r in rows], False
 
@@ -109,7 +111,7 @@ def query_asset_relationships(asset_id: str):
     except Exception as exc:  # noqa: BLE001 — wrapped with a clear message
         raise RuntimeError(
             f"Could not query FalkorDB for asset {asset_id}: {exc}. "
-            "Is FalkorDB up and seeded? Run `make seed`."
+            "Is FalkorDB up? Load real asset relations into the graph."
         ) from exc
     return relations, False
 

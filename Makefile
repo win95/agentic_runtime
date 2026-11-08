@@ -1,4 +1,4 @@
-.PHONY: install run-api run-worker test lint docker-up docker-down seed demo eval eval-real langgraph-dev
+.PHONY: install run-api run-worker test lint docker-up docker-down demo eval eval-real langgraph-dev
 
 install:
 	pip install -e ".[dev]"
@@ -20,9 +20,6 @@ docker-up:
 
 docker-down:
 	docker compose down
-
-seed:
-	python -m seeds.seed_demo_data
 
 # End-to-end smoke test against a running API (needs the 4 LiteLLM vars).
 demo:

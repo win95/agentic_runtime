@@ -1,6 +1,6 @@
-"""MVP tests — LiteLLM factory, seed idempotency, Qdrant helpers, report,
-langgraph.json and the MLflow eval harness (mock mode). No infra, no real
-key, no network calls anywhere in this file."""
+"""MVP tests — LiteLLM factory, Qdrant helpers, report, langgraph.json
+and the MLflow eval harness (mock mode). No infra, no real key, no
+network calls anywhere in this file."""
 
 import importlib.util
 import json
@@ -53,19 +53,6 @@ def test_factory_fails_fast_without_key():
         build_chat_model(_dummy_settings(llm_api_key=""))
     with pytest.raises(ValueError, match="EMBEDDING_MODEL"):
         build_embeddings(_dummy_settings(embedding_model=""))
-
-
-def test_seed_postgres_idempotent(db_session):
-    from app.models import FaultHistory, MaintenanceRecord
-    from seeds.demo_data import seed_postgres_demo
-
-    seed_postgres_demo(db_session)
-    seed_postgres_demo(db_session)  # second run must change nothing
-    assert db_session.query(FaultHistory).count() == 8
-    assert db_session.query(MaintenanceRecord).count() == 6
-    faults = db_session.query(FaultHistory).filter_by(asset_id="O21").all()
-    assert all(f.code for f in faults)
-    assert {f.severity for f in faults} <= {"low", "medium", "high"}
 
 
 def test_qdrant_helpers_with_mocked_client(monkeypatch):

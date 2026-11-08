@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     embedding_api_key: str = ""
     # Embedding model name AS REGISTERED ON THE USER'S LiteLLM PROXY
     # (e.g. text-embedding-3-small). The vector dimension is detected
-    # from a probe embedding at seed time, never hardcoded.
+    # from a probe embedding at collection-creation time, never hardcoded.
     embedding_model: str = "text-embedding-3-small"
 
     # LangSmith — observability only, never the source of execution state.

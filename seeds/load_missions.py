@@ -1,4 +1,4 @@
-"""Seed loader — upsert YAML missions from seeds/missions into PostgreSQL.
+"""Mission loader — upsert YAML missions from seeds/missions into PostgreSQL.
 
 Usage:
     python -m seeds.load_missions

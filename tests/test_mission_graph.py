@@ -1,10 +1,10 @@
 """Mission Graph tests — compile + deterministic run.
 
 No LLM, no live DB, no API keys: the repository boundary is monkeypatched
-to return the same shape of rows the seed produces (fault history,
-maintenance records, Qdrant documents, FalkorDB relations), so the graph
-runs end-to-end with no infra. Repositories themselves never return fake
-data in production — see tests/test_mvp.py for the seed idempotency test.
+to return rows in the shape of real FaultHistory / MaintenanceRecord /
+Qdrant document / FalkorDB relation rows, so the graph runs end-to-end
+with no infra. Repositories themselves never return fake data in
+production.
 """
 
 import pytest
@@ -39,7 +39,7 @@ INPUT = {"asset_id": "O21", "start_date": "2026-10-01", "end_date": "2026-10-31"
 
 @pytest.fixture(autouse=True)
 def _seeded_repositories(monkeypatch):
-    """Repository-shaped demo rows (same shape as seeds/demo_data.py)."""
+    """Repository-shaped demo rows (same shape as real store rows)."""
     monkeypatch.setattr(
         repositories,
         "search_fault_history",

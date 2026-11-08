@@ -129,9 +129,8 @@ class ExecutionResult(Base):
 
 
 class FaultHistory(Base):
-    """One recorded equipment fault. Seeded with demo data for asset O21
-    (see seeds/demo_data.py); production rows come from the real fault
-    ingestion pipeline."""
+    """One recorded equipment fault. Production rows come from the real
+    fault ingestion pipeline."""
 
     __tablename__ = "fault_history"
 
@@ -149,7 +148,7 @@ class FaultHistory(Base):
 
 
 class MaintenanceRecord(Base):
-    """One maintenance action on an asset (seeded demo data for O21)."""
+    """One maintenance action on an asset."""
 
     __tablename__ = "maintenance_records"
 

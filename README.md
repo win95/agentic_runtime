@@ -104,23 +104,28 @@ docker compose up -d --build
 Compose có healthcheck cho postgres, redis, qdrant, falkordb, minio;
 `api` và `worker` chỉ chạy khi các service hạ tầng đã healthy.
 
-### Bước 3: seed dữ liệu demo
+### Bước 3: nạp mission mẫu + dữ liệu thật
+
+Mission mẫu `fault_analysis` (định nghĩa trong
+`seeds/missions/fault_analysis.yaml`) được nạp bằng:
 
 ```bash
-docker compose --profile setup run --rm seed
-# hoặc chạy local: make seed
+python -m seeds.load_missions
 ```
 
-Lệnh này nạp (idempotent — chạy lại không bị trùng):
-- Mission `fault_analysis` (từ `seeds/missions/fault_analysis.yaml`)
-- PostgreSQL: 8 lỗi + 6 bản ghi bảo trì của thang máy **O21**, tháng 10/2026
-- Qdrant: 6 tài liệu kỹ thuật, embed bằng model embedding đã cấu hình
-  (vector dim được đo từ probe embedding, không hardcode 1536/3072)
-- FalkorDB: quan hệ O21 `PART_OF` tòa nhà B1, `HAS_COMPONENT` motor /
-  door sensor / controller / brake
+Dữ liệu chạy mission **phải là dữ liệu thật** từ nguồn của bạn — repo không
+còn chứa dữ liệu demo nào:
 
-Nếu Qdrant/FalkorDB seed bị skip, lệnh in `WARNING` kèm lý do (thường là
-chưa điền key LiteLLM hoặc service chưa lên) — sửa rồi chạy lại seed.
+- PostgreSQL: ghi lỗi vào bảng `fault_history`, bảo trì vào
+  `maintenance_records` (schema trong `app/models.py`).
+- Qdrant: index tài liệu kỹ thuật thật vào collection
+  `technical_documents` (vector dim được đo từ probe embedding của model
+  bạn cấu hình, không hardcode 1536/3072).
+- FalkorDB: ghi quan hệ tài sản thật vào graph (ví dụ `PART_OF`,
+  `HAS_COMPONENT`).
+
+Chưa có dữ liệu thì mission vẫn chạy được, nhưng evidence sẽ rỗng và kết
+quả phân tích không có căn cứ — hệ thống không tự bịa dữ liệu thay thế.
 
 ### Bước 4: chạy thử end-to-end
 
@@ -173,8 +178,8 @@ make lint              # ruff check
 | ----------- | ---------------------- | ---------- |
 | `make demo` báo thiếu biến env | Chưa điền `.env` | Điền đủ 4 biến `LLM_API_BASE`, `LLM_API_KEY`, `LLM_MODEL`, `EMBEDDING_MODEL` |
 | Execution FAILED, lỗi kết nối proxy | LiteLLM proxy chưa chạy / sai URL/key | Kiểm tra `LLM_API_BASE` có tới được proxy không, key đúng không |
-| Qdrant seed báo dimension mismatch | Đổi `EMBEDDING_MODEL` sang model có dim khác sau khi đã seed | Đổi lại đúng model cũ, hoặc xóa collection `technical_documents` rồi seed lại |
-| Qdrant trống / retrieval trả lỗi | Chưa seed, hoặc seed bị skip | Chạy lại `make seed` và đọc dòng `WARNING` |
+| Qdrant báo dimension mismatch | Đổi `EMBEDDING_MODEL` sang model có dim khác sau khi collection đã tạo | Đổi lại đúng model cũ, hoặc xóa collection `technical_documents` rồi index lại tài liệu thật |
+| Qdrant trống / retrieval trả lỗi | Chưa có tài liệu thật trong Qdrant | Index tài liệu kỹ thuật thật vào collection `technical_documents` |
 | Report lưu inline thay vì MinIO | MinIO chưa lên hoặc sai key | Kiểm tra MinIO console http://localhost:9001; kết quả vẫn có trong `report_markdown` của ExecutionResult |
 
 ## 4. Debug bằng LangGraph dev server
@@ -293,8 +298,7 @@ runtime/              LangGraph runtime: state, mission_graph, deep_agent,
                       fault_analysis, tools/registry + fault_tools + mcp_adapter
 infra/                Thin clients: postgres (reuse app core), qdrant, falkor,
                       minio, langsmith_setup, repositories (Postgres/RAG/KG thật)
-seeds/                Mission mẫu (fault_analysis.yaml) + loader + demo_data
-                      (Postgres/Qdrant/FalkorDB seed) + seed_demo_data
+seeds/                Mission mẫu (fault_analysis.yaml) + loader nạp mission
 scripts/              smoke_e2e.py (make demo), eval_mission.py (make eval)
 tests/                Pytest, không cần infra thật hay API key thật
 langgraph.json        Expose mission_graph cho `langgraph dev`

@@ -166,35 +166,6 @@ services:
       minio:
         condition: service_healthy
 
-  # One-shot seed: missions + Postgres demo rows + Qdrant docs + FalkorDB.
-  # Run with: docker compose --profile setup run --rm seed
-  seed:
-    profiles: ["setup"]
-    build: .
-    command: python -m seeds.seed_demo_data
-    environment:
-      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-agentic_runtime}
-      QDRANT_URL: http://qdrant:6333
-      FALKOR_HOST: falkordb
-      FALKOR_PORT: 6379
-      MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
-      MINIO_BUCKET: ${MINIO_BUCKET:-agentic-runtime}
-      MINIO_REPORTS_BUCKET: ${MINIO_REPORTS_BUCKET:-reports}
-    env_file:
-      - path: .env
-        required: false
-    depends_on:
-      postgres:
-        condition: service_healthy
-      qdrant:
-        condition: service_healthy
-      falkordb:
-        condition: service_healthy
-      minio:
-        condition: service_healthy
-
 volumes:
   postgres-data:
   qdrant-data:

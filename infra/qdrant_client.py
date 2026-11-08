@@ -2,7 +2,7 @@
 
 Embeddings come from the user's LiteLLM proxy via `runtime.llm_factory`
 (OpenAI-compatible). The vector dimension is NEVER hardcoded: it is
-detected from a probe embedding at seed time and stored on the
+detected from a probe embedding at collection-creation time and stored on the
 collection; a mismatch between the configured embedding model and an
 existing collection raises a clear error instead of silently corrupting
 results.
@@ -133,7 +133,7 @@ def ensure_collection(dim: int, client=None, collection_name: str | None = None)
                 f"Qdrant collection {name!r} has vector size {existing_dim} but the "
                 f"configured embedding model ({settings.embedding_model}) produces "
                 f"size {dim}. Change EMBEDDING_MODEL back, or delete the "
-                f"collection and re-seed."
+                f"collection and re-index real documents."
             )
         return "exists"
     client.create_collection(
@@ -199,7 +199,7 @@ def search_documents(
     """Vector search over the technical-documents collection.
 
     Raises RuntimeError when Qdrant or the embedding model is unreachable,
-    or when the collection does not exist yet (run the seed first).
+    or when the collection does not exist yet (index real documents first).
     """
     client = client or get_client()
     if client is None:
@@ -207,8 +207,7 @@ def search_documents(
     if get_collection_dim(client) is None:
         raise RuntimeError(
             f"Qdrant collection {settings.qdrant_collection!r} does not exist yet. "
-            "Run the seed first: `make seed` or "
-            "`docker compose --profile setup run --rm seed`."
+            "Index real documents into it first (see README §3)."
         )
     vector = embed_query(query_text, embeddings=embeddings)
     try:
