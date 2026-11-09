@@ -269,8 +269,19 @@ def main() -> int:
             run_id = log_to_mlflow(result, args.tracking_uri)
         except Exception as exc:  # noqa: BLE001 — MLflow server down, etc.
             print(f"ERROR: could not log to MLflow at {args.tracking_uri}: {exc}")
-            print("Start it with `docker compose --profile observability up -d mlflow` "
-                  "or `mlflow ui`, or pass --tracking-uri sqlite:///tmp/mlflow-test/mlflow.db")
+            if isinstance(exc, ModuleNotFoundError) and exc.name == "boto3":
+                # The server is reachable, but uploading the report artifact
+                # to its S3 (MinIO) artifact root needs boto3 on this machine.
+                print("The MLflow server is up, but this machine is missing boto3,")
+                print("which the MLflow client needs to upload artifacts to the")
+                print("server's S3 (MinIO) artifact root.")
+                print("Fix: pip install boto3  (or: pip install -r requirements.txt)")
+                print("Then set MLFLOW_S3_ENDPOINT_URL=http://localhost:9000 and")
+                print("AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY to the MinIO")
+                print("credentials (see .env.example).")
+            else:
+                print("Start it with `docker compose --profile observability up -d mlflow` "
+                      "or `mlflow ui`, or pass --tracking-uri sqlite:///tmp/mlflow-test/mlflow.db")
             return 3
         print(
             f"  {result['name']}: status={result['status']} "

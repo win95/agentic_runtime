@@ -231,6 +231,16 @@ make demo             # smoke test end-to-end qua API (cần 4 biến LiteLLM)
 python scripts/register_prompts.py   # đăng prompt fault_investigator lên MLflow (cần MLflow server chạy)
 ```
 
+> `make eval` ghi kết quả lên MLflow server ở `MLFLOW_TRACKING_URI`
+> (mặc định `http://localhost:5000`). Server compose lưu artifact trên
+> MinIO (S3), nên máy chạy eval cần `boto3` (đã có trong
+> `requirements.txt`) và 3 biến `MLFLOW_S3_ENDPOINT_URL`,
+> `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY` trong `.env` (xem
+> `.env.example`). Thiếu `boto3` sẽ báo `No module named 'boto3'` và
+> dừng ở exit 3 — lỗi này là ở máy client, không phải server.
+> Không muốn dùng server: `python scripts/eval_mission.py --mock-llm
+> --tracking-uri sqlite:///tmp/mlflow-test/mlflow.db` (lưu local, không cần S3).
+
 **Bảng lệnh nhanh:**
 
 | Việc | Lệnh |
