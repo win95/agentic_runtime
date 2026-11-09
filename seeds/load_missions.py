@@ -1,4 +1,4 @@
-"""Mission loader — upsert YAML missions from seeds/missions into PostgreSQL.
+"""Mission + agent loader — upsert YAML missions and agents into PostgreSQL.
 
 Usage:
     python -m seeds.load_missions
@@ -11,6 +11,7 @@ import pathlib
 
 import yaml
 
+from app import models
 from app.core.db import SessionLocal, init_db
 from app.services.mission_service import upsert_mission
 
@@ -34,6 +35,21 @@ def load_mission_file(path: pathlib.Path) -> dict:
     }
 
 
+def load_agent_file(path: pathlib.Path) -> dict:
+    """Agent config row (models.Agent). No agent service exists, so the
+    loader upserts directly with db.merge (insert-or-update by id)."""
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    return {
+        "id": data["id"],
+        "name": data.get("name", data["id"]),
+        "provider": data.get("provider", "openai"),
+        "model": data.get("model", "gpt-4o-mini"),
+        "system_prompt": data.get("system_prompt", ""),
+        "temperature": float(data.get("temperature", 0.0)),
+        "allowed_tools": data.get("allowed_tools") or [],
+    }
+
+
 def main() -> None:
     init_db()
     db = SessionLocal()
@@ -42,6 +58,13 @@ def main() -> None:
             mission = upsert_mission(db, load_mission_file(path))
             logger.info("Seeded mission %s (v%s)", mission.id, mission.version)
             print(f"Seeded mission {mission.id} (v{mission.version})")
+        agents_dir = BASE / "agents"
+        if agents_dir.is_dir():
+            for path in sorted(agents_dir.glob("*.yaml")):
+                agent = db.merge(models.Agent(**load_agent_file(path)))
+                db.commit()
+                logger.info("Seeded agent %s", agent.id)
+                print(f"Seeded agent {agent.id}")
     finally:
         db.close()
 

@@ -36,6 +36,16 @@ def get_mission(mission_id: str, db: Session = Depends(get_db)):
 
 @router.delete("/{mission_id}", status_code=204)
 def delete_mission(mission_id: str, db: Session = Depends(get_db)):
-    if not mission_service.delete_mission(db, mission_id):
+    try:
+        deleted = mission_service.delete_mission(db, mission_id)
+    except mission_service.MissionHasExecutionsError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Mission has {exc.execution_count} execution(s) "
+                "and cannot be deleted"
+            ),
+        ) from exc
+    if not deleted:
         raise HTTPException(status_code=404, detail="Mission not found")
     return None

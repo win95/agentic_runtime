@@ -15,6 +15,7 @@ directly — a Deep Agent is not required for fixed workflows.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 
 from langgraph.graph import END, START, StateGraph
@@ -130,13 +131,45 @@ def deep_agent_node(state: MissionState) -> dict:
         from runtime.tools.mcp_adapter import load_mcp_tools
         from runtime.tools.registry import registry
 
+        # Built-in tools go through the registry permission check
+        # (get_langchain_tools filters by the mission's capabilities; admin
+        # tools carry capability="system_admin" and are only visible to
+        # missions that declare it). MCP tools are appended unfiltered —
+        # a known audit finding, unchanged here.
         tools = registry.get_langchain_tools(context)
         tools.extend(load_mcp_tools())
-        agent = build_deep_agent(tools)
+        if (mission.get("agent_id") or "") == "admin_bot":
+            from runtime.deep_agent import ADMIN_SYSTEM_PROMPT
+            from runtime.prompts import get_system_prompt
+
+            agent = build_deep_agent(
+                tools,
+                system_prompt=get_system_prompt(ADMIN_SYSTEM_PROMPT, prompt_name="admin_bot"),
+            )
+        else:
+            agent = build_deep_agent(tools)
         outcome = run_deep_agent(agent, mission, input_data)
         notes = [f"Deep agent: {outcome.get('summary', '')}"] if outcome.get("summary") else []
+        # Fill the mission's declared output-schema keys from the agent
+        # outcome so an autonomous run can validate: without this, an
+        # autonomous mission could never SUCCEED, because validate_results
+        # requires every output key to be present and nothing ever set
+        # them. Keys the outcome cannot fill (e.g. root_causes) stay
+        # missing and validation still fails honestly.
+        result: dict = {}
+        required_keys = list((mission.get("output_schema") or {}).get("properties", {}).keys())
+        summary = outcome.get("summary", "")
+        if "answer" in required_keys:
+            result["answer"] = summary
+        if "summary" in required_keys:
+            result["summary"] = summary
+        if "actions_taken" in required_keys:
+            result["actions_taken"] = outcome.get("actions_taken") or []
+        if "evidence" in required_keys:
+            result["evidence"] = outcome.get("evidence") or []
         return {
             "evidence": outcome.get("evidence") or [],
+            "result": result,
             "notes": notes,
             "errors": outcome.get("errors") or [],
         }
@@ -208,15 +241,23 @@ def build_mission_graph(checkpointer=None):
 mission_graph = build_mission_graph()
 
 
+@contextlib.contextmanager
 def get_checkpointer():
-    """Postgres checkpointer (optional, off by default).
+    """Postgres checkpointer (optional, off by default), as a context manager.
 
     Needs CHECKPOINT_ENABLED=true and the `postgres-checkpoint` extra.
-    Returns None when unavailable — the graph then runs without persistent
+    Yields None when unavailable — the graph then runs without persistent
     checkpoints.
+
+    In langgraph-checkpoint-postgres >= 3, `PostgresSaver.from_conn_string`
+    is itself a context manager: the saver is only usable while that
+    context is open, so callers must hold this context for the whole graph
+    run (see run_mission). Entering it opens the connection and `setup()`
+    creates the checkpoint tables.
     """
     if not settings.checkpoint_enabled:
-        return None
+        yield None
+        return
     try:
         from langgraph.checkpoint.postgres import PostgresSaver
     except ImportError:
@@ -224,14 +265,20 @@ def get_checkpointer():
             from langgraph_checkpoint_postgres import PostgresSaver
         except ImportError:
             logger.warning("Postgres checkpointer package not installed; running without it.")
-            return None
+            yield None
+            return
     try:
-        checkpointer = PostgresSaver.from_conn_string(settings.database_url)
-        checkpointer.setup()
-        return checkpointer
+        with PostgresSaver.from_conn_string(settings.database_url) as checkpointer:
+            try:
+                checkpointer.setup()
+            except Exception as exc:  # noqa: BLE001 — checkpoint is best-effort
+                logger.warning("Could not set up Postgres checkpointer: %s", exc)
+                yield None
+                return
+            yield checkpointer
     except Exception as exc:  # noqa: BLE001 — checkpoint is best-effort
         logger.warning("Could not set up Postgres checkpointer: %s", exc)
-        return None
+        yield None
 
 
 def run_mission(mission: dict, input_data: dict, execution_id: str) -> dict:
@@ -246,8 +293,6 @@ def run_mission(mission: dict, input_data: dict, execution_id: str) -> dict:
 
     setup_langsmith()
     setup_mlflow_tracing()
-    checkpointer = get_checkpointer()
-    graph = build_mission_graph(checkpointer=checkpointer) if checkpointer else mission_graph
     initial_state: MissionState = {
         "execution_id": execution_id,
         "mission_id": mission.get("mission_id", ""),
@@ -261,6 +306,16 @@ def run_mission(mission: dict, input_data: dict, execution_id: str) -> dict:
         "errors": [],
         "notes": [],
     }
-    config = {"configurable": {"thread_id": execution_id}} if checkpointer else None
-    final_state = graph.invoke(initial_state, config=config)
+    # The checkpointer context must stay open for the whole invoke: the
+    # saver borrows the connection from PostgresSaver.from_conn_string.
+    with get_checkpointer() as checkpointer:
+        graph = (
+            build_mission_graph(checkpointer=checkpointer)
+            if checkpointer
+            else mission_graph
+        )
+        config = (
+            {"configurable": {"thread_id": execution_id}} if checkpointer else None
+        )
+        final_state = graph.invoke(initial_state, config=config)
     return dict(final_state)

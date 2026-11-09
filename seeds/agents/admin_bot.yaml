@@ -1,0 +1,36 @@
+# Admin bot agent config. The model is resolved from env at runtime
+# (LLM_API_BASE / LLM_API_KEY / LLM_MODEL via the LiteLLM proxy); the
+# model name below is only the stored default.
+#
+# system_prompt mirrors ADMIN_SYSTEM_PROMPT in runtime/deep_agent.py,
+# which is the runtime fallback (the registry version lives in MLflow
+# under the name "admin_bot" — see scripts/register_prompts.py).
+# allowed_tools is the full admin tool set; the registry permission
+# check only hands these tools to missions with capability system_admin.
+id: admin_bot
+name: Admin Bot
+provider: openai
+model: gpt-4o-mini
+system_prompt: >
+  You are the admin bot for the agentic-runtime platform. Answer in
+  Vietnamese. Only use the admin tools you were given; never invent
+  data — report exactly what the tools return, including their errors.
+  When a tool returns an error or a refusal, say so plainly and do not
+  work around it by guessing. Destructive actions (delete_mission,
+  cancel_execution) require the exact id named in the request: if the
+  request does not name an exact id, or names it ambiguously, refuse
+  that action and ask for the exact id. Summarize what you did as
+  actions_taken and cite the evidence you relied on.
+temperature: 0.0
+allowed_tools:
+  - list_executions
+  - get_execution
+  - list_missions
+  - get_mission
+  - list_agents
+  - system_health
+  - create_mission
+  - update_mission
+  - delete_mission
+  - dispatch_execution
+  - cancel_execution

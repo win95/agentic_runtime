@@ -10,6 +10,18 @@ EXPECTED_TOOLS = {
     "query_asset_relationships",
     "get_sensor_data",
     "calculate_failure_rate",
+    # Admin tools (runtime/tools/admin_tools.py).
+    "list_executions",
+    "get_execution",
+    "list_missions",
+    "get_mission",
+    "list_agents",
+    "system_health",
+    "create_mission",
+    "update_mission",
+    "delete_mission",
+    "dispatch_execution",
+    "cancel_execution",
 }
 
 FAULT_CONTEXT = {
@@ -20,7 +32,7 @@ FAULT_CONTEXT = {
 }
 
 
-def test_all_six_tools_registered():
+def test_all_tools_registered():
     names = {entry.name for entry in registry.list()}
     assert names == EXPECTED_TOOLS
 
@@ -31,9 +43,10 @@ def test_tool_schemas_valid():
         assert entry.description
         assert entry.capability
         assert entry.tool is not None
-        # LangChain infers a non-empty args schema from the typed signature.
+        # LangChain infers the args schema from the typed signature; it is
+        # legitimately empty for parameterless tools (list_missions,
+        # list_agents, system_health).
         assert isinstance(entry.input_schema, dict)
-        assert len(entry.input_schema) > 0
 
 
 def test_permission_check_allows_listed_capability():

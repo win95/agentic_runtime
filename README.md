@@ -491,3 +491,28 @@ make train-embedding      # cần torch/GPU + base model thật trong config
 make train-llm            # cần torch/GPU + base model thật trong config
 make eval-retrieval MODEL=<model> [BASELINE=<model>]
 ```
+
+## 12. Admin bot (system_admin) — quản trị chính hệ thống
+
+Bot admin (`admin_bot` + mission `system_admin`, mode autonomous) dùng
+Deep Agent để trả lời yêu cầu quản trị bằng tiếng Việt: xem execution
+lỗi, xem missions/agents, kiểm tra sức khỏe hạ tầng, tạo/sửa/xóa mission,
+dispatch và cancel execution. Nạp seed rồi gọi như mọi mission khác:
+
+```bash
+python -m seeds.load_missions   # nạp cả system_admin + admin_bot
+python scripts/register_prompts.py --prompt admin_bot  # đăng ký prompt (cần MLflow server)
+
+# Gọi thử API bằng tay (cần API_KEY nếu đã cấu hình, header X-API-Key)
+curl -X POST localhost:8000/executions \
+  -H 'Content-Type: application/json' \
+  -d '{"mission_id": "system_admin", "input": {"request": "execution nào lỗi hôm nay?"}}'
+```
+
+Phạm vi **đọc + ghi** — bot có 11 admin tool trong
+`runtime/tools/admin_tools.py`, tất cả `permission="admin"`. Registry chỉ
+đưa các tool này cho mission nào khai `capabilities: [system_admin]`
+(mission `fault_analysis` không bao giờ thấy chúng). Hành động phá hủy
+(`delete_mission`, `cancel_execution`) cần đúng id trong yêu cầu; yêu cầu
+mơ hồ thì bot từ chối và hỏi lại id. `delete_mission` không cascade: mission
+còn execution thì bị từ chối (409) thay vì xóa lịch sử chạy.

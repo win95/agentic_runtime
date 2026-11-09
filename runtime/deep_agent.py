@@ -25,6 +25,18 @@ DEFAULT_SYSTEM_PROMPT = (
     "findings and the evidence you relied on."
 )
 
+ADMIN_SYSTEM_PROMPT = (
+    "You are the admin bot for the agentic-runtime platform. Answer in "
+    "Vietnamese. Only use the admin tools you were given; never invent "
+    "data — report exactly what the tools return, including their errors. "
+    "When a tool returns an error or a refusal, say so plainly and do not "
+    "work around it by guessing. Destructive actions (delete_mission, "
+    "cancel_execution) require the exact id named in the request: if the "
+    "request does not name an exact id, or names it ambiguously, refuse "
+    "that action and ask for the exact id. Summarize what you did as "
+    "actions_taken and cite the evidence you relied on."
+)
+
 
 def get_chat_model():
     """Chat model via the LiteLLM proxy (OpenAI-compatible).
@@ -55,9 +67,12 @@ def build_deep_agent(tools: list, system_prompt: str | None = None):
 def run_deep_agent(agent, mission: dict, input_data: dict) -> dict:
     """Invoke the deep agent for one mission input.
 
-    Returns {"summary": str, "evidence": [...], "errors": [...]}.
-    Evidence here is the agent's own summary; the structured evidence
-    still comes from the Capability Graphs and tool outputs.
+    Returns {"summary": str, "evidence": [...], "actions_taken": [...],
+    "errors": [...]}. Evidence here is the agent's own summary; the
+    structured evidence still comes from the Capability Graphs and tool
+    outputs. ``actions_taken`` lists the tool names the agent called, in
+    order — the Mission Graph uses it to fill the result of autonomous
+    missions (see ``deep_agent_node``).
     """
     objective = mission.get("objective", "")
     prompt = (
@@ -80,9 +95,15 @@ def run_deep_agent(agent, mission: dict, input_data: dict) -> dict:
             summary = " ".join(t for t in texts if t)
             if summary:
                 break
+    actions_taken: list[str] = []
+    for message in messages:
+        for call in getattr(message, "tool_calls", None) or []:
+            name = call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
+            if name and name not in actions_taken:
+                actions_taken.append(name)
     evidence = []
     if summary:
         evidence.append(
             {"source": "deep_agent", "kind": "summary", "summary": summary, "stub": False}
         )
-    return {"summary": summary, "evidence": evidence, "errors": []}
+    return {"summary": summary, "evidence": evidence, "actions_taken": actions_taken, "errors": []}

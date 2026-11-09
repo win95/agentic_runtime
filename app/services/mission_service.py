@@ -7,9 +7,26 @@ uses (it snapshots the version into the Execution row).
 
 from __future__ import annotations
 
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import models
+
+
+class MissionHasExecutionsError(Exception):
+    """A mission with executions cannot be deleted (would break the
+    executions_mission_id_fkey foreign key and destroy run history).
+
+    The API maps this to 409 Conflict; callers should delete or archive
+    the executions first if the mission really must go.
+    """
+
+    def __init__(self, mission_id: str, execution_count: int):
+        super().__init__(
+            f"Mission {mission_id} has {execution_count} execution(s)"
+        )
+        self.mission_id = mission_id
+        self.execution_count = execution_count
 
 
 def create_mission(db: Session, data: dict) -> models.Mission:
@@ -46,11 +63,35 @@ def get_mission(db: Session, mission_id: str) -> models.Mission | None:
 
 
 def delete_mission(db: Session, mission_id: str) -> bool:
+    """Delete a mission. Returns False when it does not exist.
+
+    Raises MissionHasExecutionsError (mapped to 409 by the router) when
+    the mission still has executions. The count check runs first so the
+    failure is deterministic on every backend (SQLite does not enforce
+    foreign keys by default); the IntegrityError catch below is the
+    safety net for an execution created between the check and the commit.
+    """
     mission = db.get(models.Mission, mission_id)
     if mission is None:
         return False
+    execution_count = (
+        db.query(models.Execution)
+        .filter(models.Execution.mission_id == mission_id)
+        .count()
+    )
+    if execution_count > 0:
+        raise MissionHasExecutionsError(mission_id, execution_count)
     db.delete(mission)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        count = (
+            db.query(models.Execution)
+            .filter(models.Execution.mission_id == mission_id)
+            .count()
+        )
+        raise MissionHasExecutionsError(mission_id, count) from None
     return True
 
 
