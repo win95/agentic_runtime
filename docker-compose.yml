@@ -35,7 +35,8 @@ services:
     volumes:
       - qdrant-data:/qdrant/storage
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:6333/healthz"]
+      # The qdrant image has no curl/wget, so probe the HTTP endpoint with bash.
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/6333 && printf \"GET /healthz HTTP/1.0\\r\\n\\r\\n\" >&3 && grep -q \"200 OK\" <&3'"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -53,16 +54,17 @@ services:
       retries: 10
 
   minio:
-    image: minio/minio:latest
+    # Bitnami's final MinIO build (Docker Hub retired the official minio/minio images).
+    image: bitnamilegacy/minio:latest
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-minioadmin}
-    command: server /data --console-address ":9001"
+      MINIO_BROWSER: "on"
     ports:
       - "9000:9000"
       - "9001:9001"
     volumes:
-      - minio-data:/data
+      - minio-data:/bitnami/minio/data
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
       interval: 5s
@@ -71,15 +73,15 @@ services:
 
   # Creates the default bucket once MinIO is up.
   minio-setup:
-    image: minio/mc:latest
+    image: bitnamilegacy/minio-client:latest
     depends_on:
       - minio
     entrypoint: >
       /bin/sh -c "
       sleep 5;
-      /usr/bin/mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin};
-      /usr/bin/mc mb --ignore-existing local/${MINIO_BUCKET:-agentic-runtime};
-      /usr/bin/mc mb --ignore-existing local/${MINIO_REPORTS_BUCKET:-reports};
+      mc alias set local http://minio:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin};
+      mc mb --ignore-existing local/${MINIO_BUCKET:-agentic-runtime};
+      mc mb --ignore-existing local/${MINIO_REPORTS_BUCKET:-reports};
       "
 
   # Optional: start with `docker compose --profile observability up`.
