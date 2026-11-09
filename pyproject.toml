@@ -16,6 +16,11 @@ dependencies = [
     # at <=5.2.1; celery 5.6+ needs kombu>=5.6. Keep <5.5.3 so redis 5.3.x
     # and the kombu<5.6 cap below both hold.
     "celery[redis]>=5.4,<5.5.3",
+    # croniter: used directly by the schedule service (cron validation
+    # and next-run computation). It also comes in transitively via celery,
+    # but it is a direct dependency of ours — declare it explicitly.
+    # 7.x is untested here, so stay on 6.x (installed: 6.2.4).
+    "croniter>=6.0,<7",
     # kombu 5.6+ requires redis-py>=6.4, but falkordb below (and our redis pin) cap it at <6.
     "kombu>=5.3.4,<5.6",
     "redis>=5.0,<6",

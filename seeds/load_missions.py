@@ -13,6 +13,7 @@ import yaml
 
 from app import models
 from app.core.db import SessionLocal, init_db
+from app.services import schedule_service
 from app.services.mission_service import upsert_mission
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,46 @@ def load_agent_file(path: pathlib.Path) -> dict:
     }
 
 
+def load_schedule_file(path: pathlib.Path) -> dict:
+    """Schedule row (models.Schedule)."""
+    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    return {
+        "id": data["id"],
+        "mission_id": data["mission_id"],
+        "cron": data["cron"],
+        "input_data": data.get("input_data") or {},
+        "enabled": bool(data.get("enabled", True)),
+        "tenant": data.get("tenant", "default"),
+    }
+
+
+def seed_schedules(db) -> None:
+    """Upsert schedules from seeds/schedules/*.yaml.
+
+    A re-seed never flips a schedule the user enabled: the stored
+    ``enabled`` value wins over the YAML one.
+    """
+    schedules_dir = BASE / "schedules"
+    if not schedules_dir.is_dir():
+        return
+    for path in sorted(schedules_dir.glob("*.yaml")):
+        data = load_schedule_file(path)
+        existing = schedule_service.get_schedule(db, data["id"])
+        if existing is not None:
+            data["enabled"] = existing.enabled
+        schedule = schedule_service.upsert_schedule(db, data)
+        logger.info(
+            "Seeded schedule %s (cron=%s, enabled=%s)",
+            schedule.id,
+            schedule.cron,
+            schedule.enabled,
+        )
+        print(
+            f"Seeded schedule {schedule.id} "
+            f"(cron={schedule.cron}, enabled={schedule.enabled})"
+        )
+
+
 def main() -> None:
     init_db()
     db = SessionLocal()
@@ -65,6 +106,7 @@ def main() -> None:
                 db.commit()
                 logger.info("Seeded agent %s", agent.id)
                 print(f"Seeded agent {agent.id}")
+        seed_schedules(db)
     finally:
         db.close()
 

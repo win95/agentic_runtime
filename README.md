@@ -432,7 +432,11 @@ app/                  FastAPI platform (main, config, models, schemas, routers,
 runtime/              LangGraph runtime: state, mission_graph, deep_agent,
                       llm_factory (LiteLLM), report (Markdown), prompts
                       (MLflow Prompt Registry), capabilities/
-                      fault_analysis, tools/registry + fault_tools + mcp_adapter
+                      fault_analysis, tools/registry + fault_tools + admin_tools
+                      + mcp_adapter, middleware/ (token + audit callbacks),
+                      skills/ (skill loader: SKILL.md selection)
+skills/               Skill playbooks (SKILL.md): fault-investigation,
+                      admin-operations, report-writing + README
 infra/                Thin clients: postgres (reuse app core), qdrant, falkor,
                       minio, langsmith_setup, mlflow_setup (tracing MLflow 3.x),
                       repositories (Postgres/RAG/KG thật)
@@ -516,3 +520,97 @@ Phạm vi **đọc + ghi** — bot có 11 admin tool trong
 (`delete_mission`, `cancel_execution`) cần đúng id trong yêu cầu; yêu cầu
 mơ hồ thì bot từ chối và hỏi lại id. `delete_mission` không cascade: mission
 còn execution thì bị từ chối (409) thay vì xóa lịch sử chạy.
+
+## 13. Middleware — log token + audit (không tính chi phí)
+
+Mỗi lần Deep Agent chạy, `deep_agent_node` gắn một `TokenAuditCallbackHandler`
+(`runtime/middleware/`) qua config của `agent.invoke` — một instance cho mỗi
+execution, mang theo `execution_id` / `mission_id` / `tenant`, không dùng
+global. Hai bảng mới (tạo cùng `Base.metadata.create_all`, không có migration
+riêng — repo chưa dùng alembic):
+
+- `llm_usage`: một dòng cho mỗi lần gọi LLM — model, `prompt_tokens` /
+  `completion_tokens` / `total_tokens`, `usage_source`. Số token chỉ lấy từ
+  `response.llm_output["token_usage"]` của provider; provider không báo thì
+  các cột để NULL và `usage_source="missing"` — không ước lượng, không bịa số.
+- `audit_logs`: một dòng cho mỗi lần gọi tool — `tool_name`, input đã redact
+  và cắt 2000 ký tự, `status` (`started` / `success` / `error`), `error`,
+  `duration_ms`.
+
+**Quy tắc không tính chi phí:** chỉ log token, không có cột chi phí, không tra
+bảng giá LiteLLM — bạn tự host LiteLLM → vLLM và tự quản chi phí. **Bảo mật:**
+giá trị của các key chứa `key` / `token` / `password` / `secret` trong input
+tool được thay bằng `[redacted]` trước khi ghi; ghi log là best-effort — lỗi
+ghi log không bao giờ làm hỏng execution. Đọc số liệu bằng helper trong
+`runtime/middleware/queries.py` (`get_usage_for_execution`,
+`get_usage_totals`, `get_audit_for_execution`, `get_tool_call_counts`):
+
+```python
+from app.core.db import SessionLocal
+from runtime.middleware import get_usage_totals, get_audit_for_execution
+
+db = SessionLocal()
+print(get_usage_totals(db, mission_id="system_admin"))
+print(len(get_audit_for_execution(db, "exec-123")))
+```
+
+## 14. Skills — playbook nạp cho Deep Agent khi liên quan
+
+Skills là playbook dạng markdown (`skills/<tên>/SKILL.md`: frontmatter
+`name` / `description` / `keywords` + các mục When to Use / Steps /
+What NOT to Do), tương đương phần "skills" trong LangSmith Managed Deep
+Agents nhưng tự host — không dùng LangSmith. `deep_agent_node` chọn skill
+một cách xác định, không gọi LLM chỉ để chọn: mission khai `skills:` trong
+`execution:` (seed YAML) thì lấy đúng các skill đó; nếu không thì chấm
+điểm keyword (≥1 keyword riêng biệt xuất hiện trong mission id +
+objective + capabilities + request, đã đưa về dạng số ít) và lấy các
+skill đạt ngưỡng, log điểm ở mức debug. Chỉ skill được chọn mới được đưa
+cho agent — dùng cơ chế native của `deepagents` 0.7.34
+(`create_deep_agent(skills=["/skills/"])` + `invoke(files={...})` qua
+`StateBackend` mặc định, vẫn chạy trong bộ nhớ, không cấp quyền đọc/ghi
+filesystem thật). Run nào không khớp skill nào thì chạy y như trước
+(không có `skills=`, không có `files`).
+
+3 skill có sẵn: `fault-investigation` (thứ tự thu thập evidence, không
+bịa dữ liệu, root cause chỉ từ evidence fault/maintenance),
+`admin-operations` (đọc trước khi ghi, id chính xác cho thao tác phá
+hủy, luật 409 khi xóa mission), `report-writing` (answer +
+actions_taken + evidence, trích dẫn đúng evidence đã dùng, "unknown"
+trung thực khi evidence toàn lỗi). Thêm skill mới chỉ cần tạo
+`skills/<tên>/SKILL.md` theo format trong `skills/README.md`; gán skill
+cho mission bằng `skills: [...]` dưới `execution:` trong seed YAML.
+
+## 15. Schedules — mission chạy định kỳ (cron)
+
+Một Schedule là "chạy mission này, với input này, theo cron này". Beat
+(`docker compose` service `beat`, `celery -A app.worker.celery_app beat`)
+gọi task `run_due_schedules` mỗi 60 giây; task này tạo một Execution
+(QUEUED) cho mỗi schedule đang đến hạn rồi worker chạy như thường.
+Cron là 5 trường, giờ UTC naive (07:00 UTC = 14:00 giờ Sài Gòn).
+
+```bash
+# Tạo schedule qua API (cần X-API-Key nếu đã cấu hình)
+curl -X POST localhost:8000/schedules \
+  -H 'Content-Type: application/json' \
+  -d '{"mission_id": "system_admin", "cron": "0 7 * * *",
+       "input_data": {"request": "kiểm tra sức khỏe hệ thống"},
+       "enabled": true}'
+
+# Bật / tắt / xóa
+curl -X POST localhost:8000/schedules/<id>/enable
+curl -X POST localhost:8000/schedules/<id>/disable
+curl -X DELETE localhost:8000/schedules/<id>
+```
+
+Luật an toàn của dispatcher: schedule đến hạn được đẩy `next_run_at`
+lên lần chạy kế tiếp và commit **trước** khi dispatch, nên hai tick
+beat chồng nhau không dispatch trùng. Dispatch lỗi thì ghi vào
+`last_error` của schedule và vẫn đẩy lịch tiếp — không retry vô hạn.
+Không có catch-up: schedule tắt lâu ngày khi bật lại chỉ chạy một lần
+ở lần tới, không replay các lần đã lỡ. Mission có schedule thì không
+xóa được (409, như luật xóa mission có execution).
+
+Seed mẫu: `seeds/schedules/system_admin_daily_health.yaml` — health
+check hàng ngày lúc 07:00 UTC cho mission `system_admin`, được nạp ở
+trạng thái **tắt** (`enabled: false`); nạp lại seed không tắt schedule
+mà bạn đã bật. Bật nó lên bằng `POST /schedules/sched_system_admin_daily_health/enable`.

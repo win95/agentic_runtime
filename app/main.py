@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from app import __version__, schemas
 from app.config import settings
 from app.core.db import init_db
-from app.routers import agents, executions, missions, models, policies, results, tools
+from app.routers import agents, executions, missions, models, policies, results, schedules, tools
 from infra.langsmith_setup import setup_langsmith
 from infra.mlflow_setup import setup_mlflow_tracing
 
@@ -56,6 +56,7 @@ def create_app() -> FastAPI:
     app.include_router(policies.router)
     app.include_router(executions.router)
     app.include_router(results.router)
+    app.include_router(schedules.router)
     return app
 
 

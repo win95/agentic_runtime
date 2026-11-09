@@ -46,6 +46,14 @@ def delete_mission(mission_id: str, db: Session = Depends(get_db)):
                 "and cannot be deleted"
             ),
         ) from exc
+    except mission_service.MissionHasSchedulesError as exc:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Mission has {exc.schedule_count} schedule(s) "
+                "and cannot be deleted"
+            ),
+        ) from exc
     if not deleted:
         raise HTTPException(status_code=404, detail="Mission not found")
     return None

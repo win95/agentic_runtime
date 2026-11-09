@@ -25,6 +25,9 @@ input_schema:
 execution:
   mode: hybrid
   agent_id: fault_investigator
+  skills:
+    - fault-investigation
+    - report-writing
 
 capabilities:
   - fault_history

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -158,4 +158,80 @@ class MaintenanceRecord(Base):
     action: Mapped[str] = mapped_column(Text, nullable=False)
     technician: Mapped[str | None] = mapped_column(String(128), nullable=True)
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class Schedule(Base):
+    """A recurring mission run (cron).
+
+    The dispatcher (app/services/schedule_service.py, driven every minute
+    by the Celery beat task ``run_due_schedules``) creates one Execution
+    per due schedule. Cron times are naive UTC, like every other datetime
+    in this codebase. ``next_run_at`` is always set by the service (never
+    left NULL by normal writes); a NULL there means the schedule is never
+    due. ``last_error`` records the latest dispatch failure so a broken
+    schedule is visible instead of silently skipped.
+    """
+
+    __tablename__ = "schedules"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    mission_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey("missions.id"), nullable=False, index=True
+    )
+    cron: Mapped[str] = mapped_column(String(64), nullable=False)
+    input_data: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    enabled: Mapped[bool] = mapped_column(default=True)
+    tenant: Mapped[str] = mapped_column(String(128), nullable=False, default="default")
+    next_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class LLMUsage(Base):
+    """One LLM call's token usage, as reported by the provider.
+
+    Written by the middleware callback handler (runtime/middleware).
+    Tokens come only from ``response.llm_output["token_usage"]``; when the
+    provider reports no usage the counts stay NULL and ``usage_source``
+    is "missing" — counts are never estimated or invented. No cost is
+    recorded here by design (see README section 13).
+    """
+
+    __tablename__ = "llm_usage"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    execution_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    mission_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    tenant: Mapped[str] = mapped_column(String(128), nullable=False, default="default")
+    model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    usage_source: Mapped[str] = mapped_column(String(32), nullable=False, default="provider")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class AuditLog(Base):
+    """One tool call, for the audit trail (runtime/middleware).
+
+    ``args_truncated`` is the tool input with secrets redacted and cut to
+    2000 chars; ``status`` is "started" (call began, no end seen yet),
+    "success" or "error". The handler writes rows best-effort and never
+    raises, so a logging failure cannot fail an execution.
+    """
+
+    __tablename__ = "audit_logs"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    execution_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    mission_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    tenant: Mapped[str] = mapped_column(String(128), nullable=False, default="default")
+    tool_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    args_truncated: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="started")
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)

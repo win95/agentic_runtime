@@ -29,4 +29,14 @@ celery_app.conf.update(
     task_time_limit=settings.execution_timeout_seconds + 300,
     task_soft_time_limit=settings.execution_timeout_seconds,
     result_expires=86400,
+    # Beat: every 60s dispatch executions for due schedules (see
+    # app.worker.tasks.run_due_schedules). The schedule lives in code;
+    # beat's local state file only remembers last-run times, and losing
+    # it is harmless — due checks live in PostgreSQL.
+    beat_schedule={
+        "run-due-schedules-every-minute": {
+            "task": "app.worker.tasks.run_due_schedules",
+            "schedule": 60.0,
+        },
+    },
 )

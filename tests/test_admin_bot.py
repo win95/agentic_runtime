@@ -276,11 +276,11 @@ def test_autonomous_system_admin_run_succeeds(db_session, monkeypatch):
 
     seen_prompts: list[str | None] = []
 
-    def fake_build_deep_agent(tools, system_prompt=None):
+    def fake_build_deep_agent(tools, system_prompt=None, skills=None):
         seen_prompts.append(system_prompt)
         return object()
 
-    def fake_run_deep_agent(agent, mission_arg, input_data):
+    def fake_run_deep_agent(agent, mission_arg, input_data, callbacks=None, files=None):
         return {
             "summary": "Có 1 execution lỗi hôm nay.",
             "evidence": [{

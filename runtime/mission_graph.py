@@ -128,6 +128,7 @@ def deep_agent_node(state: MissionState) -> dict:
     }
     try:
         from runtime.deep_agent import build_deep_agent, run_deep_agent
+        from runtime.middleware import TokenAuditCallbackHandler
         from runtime.tools.mcp_adapter import load_mcp_tools
         from runtime.tools.registry import registry
 
@@ -138,6 +139,30 @@ def deep_agent_node(state: MissionState) -> dict:
         # a known audit finding, unchanged here.
         tools = registry.get_langchain_tools(context)
         tools.extend(load_mcp_tools())
+        # Middleware: one handler instance per run, carrying this run's
+        # execution context — it logs token usage + tool calls to the DB
+        # (best-effort; a logging failure never fails the run). It is
+        # passed through the invoke config so it sees the agent's LLM and
+        # tool calls; the eval script's mock agent ignores the config, so
+        # mock evals keep working with no rows written.
+        handler = TokenAuditCallbackHandler(
+            execution_id=state.get("execution_id") or "",
+            mission_id=state.get("mission_id") or "",
+            tenant=context.get("tenant") or "default",
+            model=settings.llm_model,
+        )
+        # Skills: deterministic selection (explicit mission declaration
+        # wins, else keyword matching over mission + request — see
+        # runtime/skills/). Only the selected skill files are handed to
+        # the agent via invoke(files=...); the native deepagents
+        # SkillsMiddleware discloses them, and the default in-memory
+        # backend stays in use. No matching skill means no skills
+        # argument at all — the run behaves exactly as before.
+        from runtime.skills import SKILLS_SOURCE, select_skills, skill_files_for_run
+
+        selected_skills = select_skills(mission, input_data)
+        skill_sources = [SKILLS_SOURCE] if selected_skills else None
+        skill_files = skill_files_for_run(selected_skills) if selected_skills else None
         if (mission.get("agent_id") or "") == "admin_bot":
             from runtime.deep_agent import ADMIN_SYSTEM_PROMPT
             from runtime.prompts import get_system_prompt
@@ -145,10 +170,11 @@ def deep_agent_node(state: MissionState) -> dict:
             agent = build_deep_agent(
                 tools,
                 system_prompt=get_system_prompt(ADMIN_SYSTEM_PROMPT, prompt_name="admin_bot"),
+                skills=skill_sources,
             )
         else:
-            agent = build_deep_agent(tools)
-        outcome = run_deep_agent(agent, mission, input_data)
+            agent = build_deep_agent(tools, skills=skill_sources)
+        outcome = run_deep_agent(agent, mission, input_data, callbacks=[handler], files=skill_files)
         notes = [f"Deep agent: {outcome.get('summary', '')}"] if outcome.get("summary") else []
         # Fill the mission's declared output-schema keys from the agent
         # outcome so an autonomous run can validate: without this, an

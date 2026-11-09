@@ -23,6 +23,9 @@ input_schema:
 execution:
   mode: autonomous
   agent_id: admin_bot
+  skills:
+    - admin-operations
+    - report-writing
 
 capabilities:
   - system_admin

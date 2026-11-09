@@ -29,6 +29,20 @@ class MissionHasExecutionsError(Exception):
         self.execution_count = execution_count
 
 
+class MissionHasSchedulesError(Exception):
+    """A mission with schedules cannot be deleted (would break the
+    schedules_mission_id_fkey foreign key). The API maps this to 409
+    Conflict; delete the schedules first if the mission really must go.
+    """
+
+    def __init__(self, mission_id: str, schedule_count: int):
+        super().__init__(
+            f"Mission {mission_id} has {schedule_count} schedule(s)"
+        )
+        self.mission_id = mission_id
+        self.schedule_count = schedule_count
+
+
 def create_mission(db: Session, data: dict) -> models.Mission:
     mission = models.Mission(**data)
     db.add(mission)
@@ -66,10 +80,12 @@ def delete_mission(db: Session, mission_id: str) -> bool:
     """Delete a mission. Returns False when it does not exist.
 
     Raises MissionHasExecutionsError (mapped to 409 by the router) when
-    the mission still has executions. The count check runs first so the
-    failure is deterministic on every backend (SQLite does not enforce
-    foreign keys by default); the IntegrityError catch below is the
-    safety net for an execution created between the check and the commit.
+    the mission still has executions, and MissionHasSchedulesError when
+    it still has schedules (same 409 mapping). The count checks run
+    first so the failure is deterministic on every backend (SQLite does
+    not enforce foreign keys by default); the IntegrityError catch below
+    is the safety net for an execution or schedule created between the
+    check and the commit.
     """
     mission = db.get(models.Mission, mission_id)
     if mission is None:
@@ -81,6 +97,13 @@ def delete_mission(db: Session, mission_id: str) -> bool:
     )
     if execution_count > 0:
         raise MissionHasExecutionsError(mission_id, execution_count)
+    schedule_count = (
+        db.query(models.Schedule)
+        .filter(models.Schedule.mission_id == mission_id)
+        .count()
+    )
+    if schedule_count > 0:
+        raise MissionHasSchedulesError(mission_id, schedule_count)
     db.delete(mission)
     try:
         db.commit()
@@ -91,7 +114,16 @@ def delete_mission(db: Session, mission_id: str) -> bool:
             .filter(models.Execution.mission_id == mission_id)
             .count()
         )
-        raise MissionHasExecutionsError(mission_id, count) from None
+        if count > 0:
+            raise MissionHasExecutionsError(mission_id, count) from None
+        scount = (
+            db.query(models.Schedule)
+            .filter(models.Schedule.mission_id == mission_id)
+            .count()
+        )
+        if scount > 0:
+            raise MissionHasSchedulesError(mission_id, scount) from None
+        raise
     return True
 
 

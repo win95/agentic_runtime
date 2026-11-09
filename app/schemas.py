@@ -95,6 +95,31 @@ class ExecutionResultRead(BaseModel):
     created_at: datetime | None = None
 
 
+# --- Schedule ---
+class ScheduleCreate(BaseModel):
+    mission_id: str
+    cron: str
+    input_data: dict[str, Any] = Field(default_factory=dict)
+    enabled: bool = True
+    tenant: str = "default"
+
+
+class ScheduleRead(ScheduleCreate):
+    id: str
+    next_run_at: datetime | None = None
+    last_run_at: datetime | None = None
+    last_error: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class ScheduleUpdate(BaseModel):
+    cron: str | None = None
+    input_data: dict[str, Any] | None = None
+    enabled: bool | None = None
+    tenant: str | None = None
+
+
 # --- Misc ---
 class HealthResponse(BaseModel):
     status: str = "ok"

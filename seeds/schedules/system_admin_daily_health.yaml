@@ -1,0 +1,13 @@
+# Example schedule: daily admin health check.
+# Seeded DISABLED — enable it via the API when ready, so nothing runs
+# unexpectedly on a fresh machine.
+#
+# Cron times are naive UTC (like every other datetime in this codebase):
+# 07:00 UTC is 14:00 in Asia/Saigon. For 07:00 Saigon time use "0 0 * * *".
+id: sched_system_admin_daily_health
+mission_id: system_admin
+cron: "0 7 * * *"
+input_data:
+  request: "kiểm tra sức khỏe hệ thống và báo cáo execution lỗi trong 24h qua"
+enabled: false
+tenant: default

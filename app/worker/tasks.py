@@ -128,3 +128,26 @@ def run_execution(self, execution_id: str) -> dict:
         raise
     finally:
         db.close()
+
+
+@celery_app.task(name="app.worker.tasks.run_due_schedules")
+def run_due_schedules() -> dict:
+    """Beat task (every minute): dispatch executions for due schedules.
+
+    Thin wrapper — the logic lives in
+    ``app.services.schedule_service.run_due_schedules`` so it is testable
+    without Celery. No retries here: beat re-fires every minute anyway,
+    and the service itself never retry-loops a broken schedule.
+    """
+    db = SessionLocal()
+    try:
+        from app.services import schedule_service
+
+        summary = schedule_service.run_due_schedules(db)
+        if summary["dispatched"]:
+            logger.info("Due schedules dispatched: %s", summary["dispatched"])
+        if summary["failed"]:
+            logger.warning("Due schedules failed: %s", summary["failed"])
+        return summary
+    finally:
+        db.close()

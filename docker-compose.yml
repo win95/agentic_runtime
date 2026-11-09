@@ -172,6 +172,42 @@ services:
       minio:
         condition: service_healthy
 
+  # Celery beat — fires run_due_schedules every 60s (see beat_schedule in
+  # app/worker/celery_app.py). Same image/env as the worker; beat only
+  # schedules, the worker executes. Beat's local state file is ephemeral
+  # (no volume): losing it is harmless because due checks live in
+  # PostgreSQL, and the dispatcher never double-dispatches.
+  beat:
+    build: .
+    command: celery -A app.worker.celery_app beat --loglevel=info
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-agentic_runtime}
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      QDRANT_URL: http://qdrant:6333
+      FALKOR_HOST: falkordb
+      FALKOR_PORT: 6379
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-agentic-runtime}
+      MINIO_REPORTS_BUCKET: ${MINIO_REPORTS_BUCKET:-reports}
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    env_file:
+      - path: .env
+        required: false  # optional: create from .env.example to inject secrets
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      falkordb:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
 volumes:
   postgres-data:
   qdrant-data:

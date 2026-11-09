@@ -48,12 +48,16 @@ def get_chat_model():
     return build_chat_model()
 
 
-def build_deep_agent(tools: list, system_prompt: str | None = None):
+def build_deep_agent(tools: list, system_prompt: str | None = None, skills: list | None = None):
     """Create a Deep Agent (compiled LangGraph) over the given tools.
 
     The system prompt defaults to the ``fault_investigator`` prompt from
     the MLflow Prompt Registry, falling back to DEFAULT_SYSTEM_PROMPT when
     the registry is unavailable (see ``runtime/prompts.py``).
+
+    ``skills`` is a list of skill source paths (e.g. ``["/skills/"]``)
+    for the native ``deepagents`` SkillsMiddleware — see
+    ``runtime/skills/``. ``None`` means no skills middleware at all.
     """
     from deepagents import create_deep_agent
 
@@ -61,10 +65,11 @@ def build_deep_agent(tools: list, system_prompt: str | None = None):
         model=get_chat_model(),
         tools=tools,
         system_prompt=system_prompt or get_system_prompt(DEFAULT_SYSTEM_PROMPT),
+        skills=skills,
     )
 
 
-def run_deep_agent(agent, mission: dict, input_data: dict) -> dict:
+def run_deep_agent(agent, mission: dict, input_data: dict, callbacks=None, files=None) -> dict:
     """Invoke the deep agent for one mission input.
 
     Returns {"summary": str, "evidence": [...], "actions_taken": [...],
@@ -73,6 +78,12 @@ def run_deep_agent(agent, mission: dict, input_data: dict) -> dict:
     outputs. ``actions_taken`` lists the tool names the agent called, in
     order — the Mission Graph uses it to fill the result of autonomous
     missions (see ``deep_agent_node``).
+
+    ``callbacks`` (e.g. the middleware token/audit handler built per run
+    by ``deep_agent_node``) are passed through the invoke config so the
+    handler sees the agent's LLM and tool calls. ``files`` (e.g. the
+    selected skill files from ``runtime/skills/``) are passed through the
+    invoke input so the native SkillsMiddleware can disclose them.
     """
     objective = mission.get("objective", "")
     prompt = (
@@ -82,7 +93,16 @@ def run_deep_agent(agent, mission: dict, input_data: dict) -> dict:
         "Investigate and return a concise summary of your findings, "
         "citing the evidence you gathered."
     )
-    result = agent.invoke({"messages": [{"role": "user", "content": prompt}]})
+    input_payload: dict = {"messages": [{"role": "user", "content": prompt}]}
+    if files:
+        input_payload["files"] = files
+    config = {"callbacks": callbacks} if callbacks else None
+    if config is not None:
+        result = agent.invoke(input_payload, config=config)
+    else:
+        # No callbacks: keep the plain call so mock agents with a
+        # one-argument invoke() (eval script) keep working.
+        result = agent.invoke(input_payload)
     messages = result.get("messages") or []
     summary = ""
     for message in reversed(messages):
