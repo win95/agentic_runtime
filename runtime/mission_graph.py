@@ -20,10 +20,16 @@ import logging
 from langgraph.graph import END, START, StateGraph
 
 from app.config import settings
+from infra.mlflow_setup import setup_mlflow_tracing
 from runtime.capabilities.fault_analysis import build_fault_analysis_graph
 from runtime.state import MissionState
 
 logger = logging.getLogger(__name__)
+
+# MLflow tracing for this process (API worker, eval script, langgraph dev
+# server — all import this module). Never raises; logs and continues
+# without tracing when the server is down.
+setup_mlflow_tracing()
 
 # Below this much evidence after the Capability Graph, a hybrid mission
 # escalates to the Deep Agent for further investigation.
@@ -239,6 +245,7 @@ def run_mission(mission: dict, input_data: dict, execution_id: str) -> dict:
     from infra.langsmith_setup import setup_langsmith
 
     setup_langsmith()
+    setup_mlflow_tracing()
     checkpointer = get_checkpointer()
     graph = build_mission_graph(checkpointer=checkpointer) if checkpointer else mission_graph
     initial_state: MissionState = {

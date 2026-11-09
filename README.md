@@ -30,7 +30,7 @@ tự hành, **Capability Graphs / Tools** cung cấp năng lực nghiệp vụ,
 | Qdrant | Document embeddings, vector retrieval (`technical_documents`) |
 | FalkorDB | Knowledge Graph, entity relationships |
 | MinIO | File, tài liệu, artifact, report (`reports` bucket) |
-| MLflow | Eval runs của mission (`agentic-runtime-eval`) |
+| MLflow | Observability chính: trace LangGraph, Prompt Registry, eval runs (`agentic-runtime-eval`) |
 | LangSmith | Agent trace, graph execution, tool calls |
 
 ## 2. Một Execution chạy như thế nào?
@@ -162,15 +162,90 @@ curl http://localhost:8000/executions/<execution_id>
 curl http://localhost:8000/executions/<execution_id>/result
 ```
 
-### Chạy local không qua compose
+### Chạy ngoài Docker (local)
+
+Cách này dùng Python trên máy bạn, không cần Docker cho app/worker
+(chỉ Redis/Postgres/Qdrant… vẫn cần chạy ở đâu đó — xem ghi chú bên dưới).
+Yêu cầu Python **3.12** (tối thiểu 3.11, xem `requires-python` trong
+`pyproject.toml`).
+
+**Bước 1 — tạo venv và kích hoạt:**
 
 ```bash
-make install           # pip install -e ".[dev]"
-make run-api           # uvicorn app.main:app --reload
-make run-worker        # celery -A app.worker.celery_app worker
-make test              # pytest -q
-make lint              # ruff check
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .\.venv\Scripts\activate
 ```
+
+**Bước 2 — cài dependencies:**
+
+```bash
+pip install -r requirements.txt   # 188 package đã pin sẵn, khớp .venv đang chạy tốt
+pip install -e .                  # cài chính project agentic-runtime (editable)
+```
+
+Hai bước riêng vì `requirements.txt` chỉ pin thư viện ngoài; bản thân
+project cài bằng `pip install -e .`. Muốn cài nhanh bằng range trong
+`pyproject.toml` thay vì pin cứng thì dùng `make install`
+(`pip install -e ".[dev]"`). `make install-requirements` chỉ chạy bước
+`pip install -r requirements.txt`.
+
+**Bước 3 — cấu hình `.env`:**
+
+```bash
+cp .env.example .env
+```
+
+Điền các giá trị vào `.env` (chỉ tên biến, không có giá trị mẫu ở đây).
+Để chạy LLM thật cần đủ 4 biến LiteLLM: `LLM_API_BASE`, `LLM_API_KEY`,
+`LLM_MODEL`, `EMBEDDING_MODEL`. Key tuyệt đối không đưa lên Git hay gửi
+qua chat. Muốn chạy thử offline không cần key thì dùng chế độ mock
+(`make eval`).
+
+**Bước 4 — chạy API và worker (2 terminal riêng):**
+
+```bash
+make run-api      # uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+make run-worker   # celery -A app.worker.celery_app worker --loglevel=info
+```
+
+Worker cần Redis đang chạy: cài local rồi chạy `redis-server`, hoặc dùng
+compose chỉ cho Redis: `docker compose up -d redis`. API/DB cũng vậy:
+Postgres (`DATABASE_URL`), Qdrant, FalkorDB, MinIO đều có thể lấy từ
+compose (`docker compose up -d postgres redis qdrant falkordb minio`)
+trong khi API + worker chạy local — cách lai này tiện khi debug.
+
+**Bước 5 — debug bằng LangGraph dev server:**
+
+```bash
+make langgraph-dev   # langgraph dev --allow-blocking → http://localhost:8123
+```
+
+**Kiểm tra, eval, demo:**
+
+```bash
+make test             # pytest -q
+make lint             # ruff check app runtime infra tests seeds scripts
+make eval             # eval mock LLM, offline, không cần key/proxy
+make eval-real        # eval với model thật (cần 4 biến LiteLLM)
+make demo             # smoke test end-to-end qua API (cần 4 biến LiteLLM)
+python scripts/register_prompts.py   # đăng prompt fault_investigator lên MLflow (cần MLflow server chạy)
+```
+
+**Bảng lệnh nhanh:**
+
+| Việc | Lệnh |
+| ---- | ---- |
+| Tạo venv | `python3 -m venv .venv && source .venv/bin/activate` |
+| Cài deps pin sẵn | `pip install -r requirements.txt && pip install -e .` |
+| Cài deps theo range | `make install` |
+| Cấu hình | `cp .env.example .env` rồi điền giá trị |
+| Chạy API | `make run-api` |
+| Chạy worker | `make run-worker` (cần Redis) |
+| LangGraph dev | `make langgraph-dev` |
+| Test / lint | `make test` / `make lint` |
+| Eval mock (offline) | `make eval` |
+| Eval + demo thật | `make eval-real` / `make demo` |
+| Đăng prompt lên MLflow | `python scripts/register_prompts.py` |
 
 ### Troubleshooting
 
@@ -223,7 +298,49 @@ Nếu không thấy trace: kiểm tra `LANGSMITH_TRACING=true` và `LANGSMITH_AP
 đã điền chưa; nếu tracing bật mà không có key, log sẽ cảnh báo và tracing
 tắt (không crash).
 
-## 6. Eval / test bằng MLflow
+## 6. Observability chính & Eval bằng MLflow 3.x
+
+MLflow 3.x là hệ thống observability chính (trace + eval + prompt), còn
+LangSmith (mục 5) giữ lại để debug trong lúc dev. MLflow không tính chi
+phí LLM bằng bảng giá LiteLLM (bạn tự host LiteLLM gọi vLLM) — chỉ token
+usage mà tracing ghi lại được giữ lại.
+
+### Tracing
+
+`infra/mlflow_setup.py` bật `mlflow.langchain.autolog()` cho cả API, worker
+và `langgraph dev` (server MLflow 3.x phải chạy, xem bên dưới). Mỗi
+execution được trace thành các span lồng nhau: node của Mission Graph
+(understand → capability → deep_agent → validate), từng lần gọi LLM, từng
+tool call, từng lần retrieval — kèm latency và token usage khi upstream
+trả về. Xem tại **http://localhost:5000** → experiment `agentic-runtime`
+→ tab Traces. Nếu server chưa chạy hoặc tắt tracing
+(`MLFLOW_TRACING_ENABLED=false`), app vẫn chạy bình thường, chỉ không có
+trace.
+
+**Nâng cấp server lên 3.x:** service `mlflow` trong compose build từ
+`docker/mlflow/Dockerfile` (`ghcr.io/mlflow/mlflow:v3.18.0` +
+`mlflow[genai]`). Nếu đang chạy server 2.x, backup rồi chạy một lần trước
+khi start server mới:
+
+```bash
+docker compose run --rm mlflow mlflow db upgrade postgresql://postgres:postgres@postgres:5432/agentic_runtime
+```
+
+### Prompt Registry
+
+System prompt của Deep Agent (`fault_investigator`) nằm trong Prompt
+Registry của MLflow — đổi prompt không cần deploy lại code:
+
+```bash
+python scripts/register_prompts.py            # đăng ký version mới + gắn alias production
+python scripts/register_prompts.py --alias staging   # gắn alias khác
+```
+
+`runtime/prompts.py` load theo thứ tự `@production` → `@latest` → fallback
+là hằng số `DEFAULT_SYSTEM_PROMPT` trong `runtime/deep_agent.py`. Chưa đăng
+ký prompt hoặc server không tới được thì agent vẫn chạy bằng fallback.
+
+### Eval
 
 Harness `scripts/eval_mission.py` chạy mission `fault_analysis` trên 3 test
 case cố định (O21 tháng 10/2026: deterministic, autonomous, tuần đầu hybrid)
@@ -235,9 +352,17 @@ và log kết quả thật đo được vào MLflow experiment **`agentic-runtim
 - artifact: report Markdown (`report.md`)
 
 ```bash
-make eval        # mock LLM — KHÔNG cần key/proxy, chạy được ngay
-make eval-real   # LLM thật qua LiteLLM (cần 4 biến env)
+make eval            # mock LLM — KHÔNG cần key/proxy, chạy được ngay
+make eval-real       # LLM thật qua LiteLLM (cần 4 biến env)
+make eval-genai      # + mlflow.genai.evaluate, judge qua LiteLLM proxy
+make eval-genai-real # judge + prediction đều dùng LLM thật
 ```
+
+`--genai` chạy thêm `mlflow.genai.evaluate()` trên cùng 3 case với một
+judge `evidence_grounding` (đi qua LiteLLM proxy bằng `make_judge(...,
+base_url=<proxy>/v1)`), chấm xem root cause có căn cứ trong evidence
+không. Nếu chưa cấu hình LiteLLM thì `--genai` in `SKIPPED` và bỏ qua phần
+này, kết quả eval cổ điển không bị ảnh hưởng.
 
 Xem kết quả:
 
@@ -269,7 +394,8 @@ Xem đầy đủ trong `.env.example`. Các biến quan trọng:
 | `QDRANT_URL` / `QDRANT_COLLECTION` | localhost:6333 / `technical_documents` | RAG retrieval |
 | `FALKOR_HOST` / `FALKOR_PORT` | localhost / 6379 | Knowledge Graph |
 | `MINIO_ENDPOINT` / `MINIO_BUCKET` / `MINIO_REPORTS_BUCKET` | localhost:9000 / `agentic-runtime` / `reports` | Artifacts, reports |
-| `MLFLOW_TRACKING_URI` | `http://localhost:5000` | MLflow server (compose service `mlflow`, profile `observability`) |
+| `MLFLOW_TRACKING_URI` | `http://localhost:5000` | MLflow server 3.x (compose service `mlflow`, profile `observability`) |
+| `MLFLOW_EXPERIMENT` / `MLFLOW_TRACING_ENABLED` | `agentic-runtime` / `true` | Experiment cho trace + eval; `false` = tắt tracing MLflow |
 | `MCP_SERVER_URL` / `MCP_TRANSPORT` | *(trống)* | URL MCP server generic, không hardcode. Trống = không load MCP tools. |
 | `CHECKPOINT_ENABLED` | `false` | Bật checkpoint Postgres cho LangGraph (cần `pip install -e ".[postgres-checkpoint]"`). |
 | `EXECUTION_TIMEOUT_SECONDS` | `3600` | Timeout task Celery |
@@ -283,7 +409,7 @@ Xem đầy đủ trong `.env.example`. Các biến quan trọng:
 | Deep Agent nằm ở đâu? | Bên trong Mission Graph |
 | Capability là gì? | LangGraph subgraph hoặc nhóm năng lực có thể tái sử dụng |
 | Tool là gì? | Đơn vị hành động được Agent gọi |
-| Có cần tự xây Trace không? | Không, dùng LangSmith |
+| Có cần tự xây Trace không? | Không, dùng MLflow 3.x làm observability chính (trace + eval + prompt); LangSmith giữ lại để debug dev |
 | Execution có cần state riêng không? | Có, mỗi execution có state riêng |
 | Có dùng Celery không? | Có, cho async dispatch |
 | Có cần conversation memory không? | Không, mỗi execution độc lập |
@@ -294,12 +420,16 @@ Xem đầy đủ trong `.env.example`. Các biến quan trọng:
 app/                  FastAPI platform (main, config, models, schemas, routers,
                       services, core/db + security, worker/celery_app + tasks)
 runtime/              LangGraph runtime: state, mission_graph, deep_agent,
-                      llm_factory (LiteLLM), report (Markdown), capabilities/
+                      llm_factory (LiteLLM), report (Markdown), prompts
+                      (MLflow Prompt Registry), capabilities/
                       fault_analysis, tools/registry + fault_tools + mcp_adapter
 infra/                Thin clients: postgres (reuse app core), qdrant, falkor,
-                      minio, langsmith_setup, repositories (Postgres/RAG/KG thật)
+                      minio, langsmith_setup, mlflow_setup (tracing MLflow 3.x),
+                      repositories (Postgres/RAG/KG thật)
 seeds/                Mission mẫu (fault_analysis.yaml) + loader nạp mission
-scripts/              smoke_e2e.py (make demo), eval_mission.py (make eval)
+scripts/              smoke_e2e.py (make demo), eval_mission.py (make eval),
+                      register_prompts.py (MLflow Prompt Registry)
+docker/mlflow/        Dockerfile cho MLflow 3.x server (genai extras)
 tests/                Pytest, không cần infra thật hay API key thật
 langgraph.json        Expose mission_graph cho `langgraph dev`
 ```
@@ -318,8 +448,10 @@ langgraph.json        Expose mission_graph cho `langgraph dev`
   giới hạn rate/quota theo policy chưa triển khai.
 - **Checkpoint**: mặc định tắt. Bật bằng `CHECKPOINT_ENABLED=true` + extra
   `postgres-checkpoint`.
-- **MLflow**: service trong compose ở profile `observability`, mặc định không
-  chạy; eval harness (`scripts/eval_mission.py`) là nơi gọi MLflow API.
+- **MLflow 3.x**: observability chính — tracing (autolog LangGraph),
+  Prompt Registry (`fault_investigator`), eval (`agentic-runtime-eval`).
+  Service trong compose ở profile `observability`, build từ
+  `docker/mlflow/Dockerfile` (image 3.18.0 + `mlflow[genai]`).
 - **Chưa verify live**: không có Docker daemon và không có LiteLLM endpoint/key
   ở môi trường build này, nên `docker compose up` và một execution LLM thật
   chưa được chạy — cần chạy `make demo` sau khi điền `.env`.

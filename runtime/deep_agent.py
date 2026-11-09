@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 
 from runtime.llm_factory import build_chat_model
+from runtime.prompts import get_system_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -36,13 +37,18 @@ def get_chat_model():
 
 
 def build_deep_agent(tools: list, system_prompt: str | None = None):
-    """Create a Deep Agent (compiled LangGraph) over the given tools."""
+    """Create a Deep Agent (compiled LangGraph) over the given tools.
+
+    The system prompt defaults to the ``fault_investigator`` prompt from
+    the MLflow Prompt Registry, falling back to DEFAULT_SYSTEM_PROMPT when
+    the registry is unavailable (see ``runtime/prompts.py``).
+    """
     from deepagents import create_deep_agent
 
     return create_deep_agent(
         model=get_chat_model(),
         tools=tools,
-        system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT,
+        system_prompt=system_prompt or get_system_prompt(DEFAULT_SYSTEM_PROMPT),
     )
 
 

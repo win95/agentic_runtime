@@ -16,6 +16,7 @@ from app.config import settings
 from app.core.db import init_db
 from app.routers import agents, executions, missions, models, policies, results, tools
 from infra.langsmith_setup import setup_langsmith
+from infra.mlflow_setup import setup_mlflow_tracing
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +31,10 @@ async def lifespan(app: FastAPI):
         logger.info("LangSmith tracing enabled (project=%s)", settings.langsmith_project)
     else:
         logger.info("LangSmith tracing disabled.")
+    if setup_mlflow_tracing():
+        logger.info("MLflow tracing enabled (experiment=%s)", settings.mlflow_experiment)
+    else:
+        logger.info("MLflow tracing disabled.")
     yield
 
 

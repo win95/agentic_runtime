@@ -14,14 +14,16 @@ View results: `mlflow ui` (or the compose mlflow service at
 http://localhost:5000 when the observability profile is up).
 
 Usage:
-    python scripts/eval_mission.py [--mock-llm|--real] [--tracking-uri URI]
+    python scripts/eval_mission.py [--mock-llm|--real] [--genai] [--tracking-uri URI]
     make eval        # mock mode
     make eval-real   # real mode (needs the 4 LiteLLM env vars)
+    make eval-genai  # + mlflow.genai.evaluate with a judge via the LiteLLM proxy
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import logging
 import os
 import sys
@@ -152,6 +154,80 @@ def log_to_mlflow(result: dict, tracking_uri: str) -> str:
         return run.info.run_id
 
 
+JUDGE_NAME = "evidence_grounding"
+
+
+def _proxy_base_url() -> str:
+    """OpenAI-compatible base URL of the LiteLLM proxy (with /v1)."""
+    from app.config import settings
+
+    base = settings.llm_api_base.rstrip("/")
+    return base if base.endswith("/v1") else base + "/v1"
+
+
+def run_genai_eval(cases: list[dict], mock_llm: bool, tracking_uri: str) -> int | None:
+    """Run mlflow.genai.evaluate with a judge routed through the LiteLLM proxy.
+
+    Returns 0 on success, 1 on failure, or None when skipped because the
+    judge cannot be routed (LiteLLM proxy not configured) — the classic
+    eval results are unaffected in that case.
+    """
+    from app.config import settings
+
+    if not settings.llm_api_key or not settings.llm_api_base:
+        print("SKIPPED: genai eval needs judge routing through the LiteLLM proxy "
+              "(LLM_API_BASE/LLM_API_KEY not configured); classic eval results "
+              "above are unaffected.")
+        return None
+    # The judge's OpenAI-compatible client needs the proxy key + base URL.
+    # No cost estimation is done here (see docs: LiteLLM price-table lookup
+    # is deliberately skipped — the user owns the LiteLLM/vLLM setup).
+    proxy_base = _proxy_base_url()
+    os.environ.setdefault("OPENAI_API_KEY", settings.llm_api_key)
+    os.environ.setdefault("OPENAI_API_BASE", proxy_base)
+    try:
+        import mlflow
+        from mlflow.genai import evaluate, make_judge
+
+        mlflow.set_tracking_uri(tracking_uri)
+        mlflow.set_experiment(EXPERIMENT)
+        judge = make_judge(
+            name=JUDGE_NAME,
+            instructions=(
+                "You judge whether the agent's root-cause summary is grounded "
+                "in the evidence it collected. The mission input is {{ inputs }} "
+                "and the agent's output summary is {{ outputs }}. Answer 'yes' "
+                "when every root cause stated in the summary is supported by "
+                "the evidence described, otherwise answer 'no'."
+            ),
+            model=f"openai:/{settings.llm_model}",
+            base_url=proxy_base,
+        )
+
+        def predict_fn(asset_id: str, start_date: str, end_date: str, mode: str = "hybrid") -> dict:
+            from runtime.mission_graph import run_mission
+
+            mission = load_fault_analysis_mission()
+            mission = copy.deepcopy(mission)
+            mission.setdefault("execution", {})["mode"] = mode
+            final_state = run_mission(
+                mission,
+                {"asset_id": asset_id, "start_date": start_date, "end_date": end_date},
+                f"eval-genai-{asset_id}-{mode}",
+            )
+            result = final_state.get("result") or {}
+            causes = result.get("root_causes") or []
+            return {"summary": "; ".join(str(c) for c in causes)}
+
+        data = [{"inputs": {**case["input"], "mode": case["mode"]}} for case in cases]
+        result = evaluate(data=data, scorers=[judge], predict_fn=predict_fn)
+        print(f"GenAI eval done. metrics={getattr(result, 'metrics', None)}")
+        return 0
+    except Exception as exc:  # noqa: BLE001 — proxy down, judge model missing, ...
+        print(f"ERROR: genai eval failed: {exc}")
+        return 1
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Evaluate fault_analysis and log to MLflow.")
     group = parser.add_mutually_exclusive_group()
@@ -161,6 +237,9 @@ def main() -> int:
                        help="run with the LiteLLM factory (needs the 4 LiteLLM env vars)")
     parser.add_argument("--tracking-uri", default=os.environ.get("MLFLOW_TRACKING_URI", "http://localhost:5000"),
                         help="MLflow tracking URI (default: $MLFLOW_TRACKING_URI or http://localhost:5000)")
+    parser.add_argument("--genai", action="store_true",
+                        help="also run mlflow.genai.evaluate with a judge routed through "
+                             "the LiteLLM proxy (needs LLM_API_BASE/LLM_API_KEY)")
     parser.add_argument("--case", dest="cases", action="append", default=None,
                         help="run only this case name (repeatable)")
     args = parser.parse_args()
@@ -204,6 +283,10 @@ def main() -> int:
             exit_code = 1
     print("Eval done. View results in MLflow (experiment "
           f"'{EXPERIMENT}').")
+    if args.genai:
+        genai_code = run_genai_eval(cases, mock_llm=mock_llm, tracking_uri=args.tracking_uri)
+        if genai_code is not None and genai_code != 0:
+            exit_code = genai_code
     return exit_code
 
 

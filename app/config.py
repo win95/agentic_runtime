@@ -71,8 +71,10 @@ class Settings(BaseSettings):
     minio_reports_bucket: str = "reports"
     minio_secure: bool = False
 
-    # MLflow (experiments, optional)
+    # MLflow (primary observability: tracing, eval, prompt registry)
     mlflow_tracking_uri: str = "http://localhost:5000"
+    mlflow_experiment: str = "agentic-runtime"
+    mlflow_tracing_enabled: bool = True
 
     # MCP — generic server URL, configured by env only. Empty = no MCP tools.
     mcp_server_url: str = ""

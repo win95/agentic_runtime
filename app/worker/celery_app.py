@@ -11,8 +11,10 @@ from celery import Celery
 
 from app.config import settings
 from infra.langsmith_setup import setup_langsmith
+from infra.mlflow_setup import setup_mlflow_tracing
 
 setup_langsmith()
+setup_mlflow_tracing()
 
 celery_app = Celery(
     "agentic_runtime",
