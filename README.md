@@ -439,6 +439,12 @@ infra/                Thin clients: postgres (reuse app core), qdrant, falkor,
 seeds/                Mission mẫu (fault_analysis.yaml) + loader nạp mission
 scripts/              smoke_e2e.py (make demo), eval_mission.py (make eval),
                       register_prompts.py (MLflow Prompt Registry)
+training/             Vòng đời fine-tune: common/ (schemas, dữ liệu tổng
+                      hợp, hook thu thập), embedding/ (train + eval
+                      retrieval), llm/ (train SFT + eval tool-use),
+                      configs/, requirements-training.txt
+docs/                 security-cost-roadmap.md, prompt-injection-defense.md,
+                      fine-tuning-lifecycle.md
 docker/mlflow/        Dockerfile cho MLflow 3.x server (genai extras)
 tests/                Pytest, không cần infra thật hay API key thật
 langgraph.json        Expose mission_graph cho `langgraph dev`
@@ -465,3 +471,23 @@ langgraph.json        Expose mission_graph cho `langgraph dev`
 - **Chưa verify live**: không có Docker daemon và không có LiteLLM endpoint/key
   ở môi trường build này, nên `docker compose up` và một execution LLM thật
   chưa được chạy — cần chạy `make demo` sau khi điền `.env`.
+
+## 11. Fine-tuning lifecycle (chuẩn bị — chưa train thật)
+
+Quy trình đầy đủ: [`docs/fine-tuning-lifecycle.md`](docs/fine-tuning-lifecycle.md).
+Scaffold: [`training/`](training/) (xem `training/README.md`).
+
+Ba track — embedding (retrieval Qdrant), LLM chính (Deep Agent), tool-use —
+chạy qua 6 giai đoạn: thu thập dữ liệu → chuẩn hóa dataset → train →
+eval offline (phải thắng baseline) → registry + deploy qua vLLM →
+giám sát + retrain. Hiện chưa có dữ liệu hoạt động thật nên scaffold
+chạy bằng dữ liệu tổng hợp (`source: "synthetic"`, 20 ví dụ/track) và
+hook thu thập để dữ liệu thật tích lũy dần.
+
+```bash
+make gen-synthetic-data   # sinh dữ liệu tổng hợp vào training/data/
+make eval-tool-use        # eval tool-use bằng mock predictor (chạy được ngay)
+make train-embedding      # cần torch/GPU + base model thật trong config
+make train-llm            # cần torch/GPU + base model thật trong config
+make eval-retrieval MODEL=<model> [BASELINE=<model>]
+```

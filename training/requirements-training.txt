@@ -1,0 +1,20 @@
+# Training-only dependencies (NOT installed in the main venv).
+#
+# Install on the TRAINING machine (which needs a GPU for real runs):
+#   pip install -r training/requirements-training.txt
+#
+# torch: pick the build for the target machine. CPU-only (smoke tests):
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+# CUDA (real training) — example for CUDA 12.4, adjust to the machine:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu124
+# The plain `torch` line below resolves to the default (CUDA) build on
+# most machines; override it with the index URL above when needed.
+# DO NOT install this file in the main project venv (no GPU here).
+
+torch>=2.4,<3
+transformers>=4.44,<5
+datasets>=3.0,<4
+accelerate>=0.34,<1
+peft>=0.12,<1
+trl>=0.12,<1
+sentence-transformers>=3.0,<5

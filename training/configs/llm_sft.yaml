@@ -1,0 +1,21 @@
+# Main-LLM SFT config (track B) — LoRA first.
+# Model name is a PLACEHOLDER — replace with the real main LLM
+# (see docs/fine-tuning-lifecycle.md, open decision 2) before training.
+
+base_model: "PLACEHOLDER-MAIN-LLM"
+data: "training/data/synthetic_sft.jsonl"
+output_dir: "training/output/llm-sft-v1"
+
+epochs: 3
+batch_size: 4
+gradient_accumulation_steps: 4
+learning_rate: 0.0002
+logging_steps: 10
+
+lora:
+  r: 16
+  alpha: 32
+  dropout: 0.05
+
+mlflow_tracking_uri: "http://localhost:5000"
+mlflow_experiment: "agentic-runtime-finetune"

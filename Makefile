@@ -1,4 +1,4 @@
-.PHONY: install install-requirements run-api run-worker test lint docker-up docker-down demo eval eval-real eval-genai eval-genai-real langgraph-dev
+.PHONY: install install-requirements run-api run-worker test lint docker-up docker-down demo eval eval-real eval-genai eval-genai-real langgraph-dev gen-synthetic-data eval-tool-use eval-retrieval train-embedding train-llm
 
 # Prefer the project venv when it exists (this checkout), else system python.
 PYTHON := $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python)
@@ -53,3 +53,25 @@ eval-genai-real:
 # LangGraph dev server (Studio + traces) — http://localhost:8123
 langgraph-dev:
 	langgraph dev --allow-blocking
+
+# --- Fine-tuning lifecycle (docs/fine-tuning-lifecycle.md) ---
+# Synthetic data only — no real data yet. Train targets need torch/GPU
+# (pip install -r training/requirements-training.txt on the training
+# machine) and a real base model in training/configs/*.yaml; without
+# them they stop with a clear message.
+
+gen-synthetic-data:
+	$(PYTHON) -m training.common.synthetic --out-dir training/data
+
+eval-tool-use:
+	$(PYTHON) -m training.llm.eval_tool_use --data training/data/synthetic_tool_use.jsonl --mock-predictions --no-mlflow
+
+eval-retrieval:
+	@test -n "$(MODEL)" || (echo "Usage: make eval-retrieval MODEL=<model> [BASELINE=<model>]" && exit 2)
+	$(PYTHON) -m training.embedding.eval_retrieval --data training/data/synthetic_embedding.jsonl --model $(MODEL) $(if $(BASELINE),--baseline-model $(BASELINE)) --no-mlflow
+
+train-embedding:
+	$(PYTHON) -m training.embedding.train --config training/configs/embedding.yaml
+
+train-llm:
+	$(PYTHON) -m training.llm.train_sft --config training/configs/llm_sft.yaml

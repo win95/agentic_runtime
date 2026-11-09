@@ -1,0 +1,15 @@
+# Embedding fine-tune config (track A).
+# Model name is a PLACEHOLDER — replace with the real embedding model
+# (see docs/fine-tuning-lifecycle.md, open decision 1) before training.
+
+base_model: "PLACEHOLDER-EMBEDDING-MODEL"
+data: "training/data/synthetic_embedding.jsonl"
+output_dir: "training/output/embedding-v1"
+
+epochs: 3
+batch_size: 16
+learning_rate: 0.00002
+max_seq_length: 512
+
+mlflow_tracking_uri: "http://localhost:5000"
+mlflow_experiment: "agentic-runtime-finetune"

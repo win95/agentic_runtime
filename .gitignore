@@ -19,6 +19,8 @@ htmlcov/
 
 # Data / local services
 data/
+training/data/
+training/output/
 *.db
 *.sqlite3
 .langgraph_api/
