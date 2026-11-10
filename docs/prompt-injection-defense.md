@@ -1,11 +1,12 @@
 # Phân tích phòng thủ prompt injection — Agentic Runtime
 
 Ngày phân tích: 2026-11-08, trên code ở `main` (sau khi xóa seed data).
-Trạng thái hiện tại: **không có bất kỳ lớp phòng thủ nào** — grep toàn repo
-không có `sanitize`, `escape`, `delimiter`, `instruction hierarchy` hay
-`max_tokens`/`max_iterations` nào. Tài liệu này phân tích bề mặt tấn công,
-mức độ thiệt hại nếu bị khai thác, và từng lớp phòng thủ nên làm theo thứ
-tự nào.
+Trạng thái triển khai (cập nhật 2026-11-10): **Lớp 1–6 đã triển khai**
+(commit xem `README.md` §16) — còn **Lớp 7** (trần token, tách tenant)
+thuộc Bước lớn 2 và 3 của roadmap, chờ 3 quyết định (phương thức đăng
+nhập, hosting, trần chi phí LLM mỗi user). **Chưa làm:** node xác nhận
+của người (human-in-the-loop) trước tool ghi — cần quyết định kênh phê
+duyệt. Phân tích gốc bên dưới giữ nguyên để đối chiếu.
 
 ## 1. Mô hình đe dọa (threat model)
 
@@ -233,13 +234,13 @@ Vị trí: `runtime/mission_graph.py` (`validate_results`), `runtime/report.py`.
 
 | # | Lớp | Quy mô | Làm khi nào |
 | --- | --- | --- | --- |
-| 1 | Validate & giới hạn input (Lớp 1) | Nhỏ | Đầu tiên, cùng Bước lớn 2 |
-| 2 | Tách instruction/dữ liệu trong prompt (Lớp 2) | Nhỏ | Ngay sau Lớp 1 |
-| 3 | MCP qua registry check + nhãn đọc/ghi (Lớp 4) | Vừa | Cùng lúc với Lớp 2 |
-| 4 | Vệ sinh output tool (Lớp 3) | Vừa | Sau Lớp 2 |
-| 5 | Grounding check ở validate (Lớp 5) | Vừa | Sau Lớp 3 |
-| 6 | Eval adversarial + phát hiện (Lớp 6) | Vừa | Cuối, làm cửa kiểm CI |
-| 7 | Trần token + tách tenant (Lớp 7) | Theo roadmap | Thuộc Bước lớn 2 và 3 |
+| 1 | Validate & giới hạn input (Lớp 1) | Nhỏ | ✅ Đã làm (2026-11-10) |
+| 2 | Tách instruction/dữ liệu trong prompt (Lớp 2) | Nhỏ | ✅ Đã làm (2026-11-10) |
+| 3 | MCP qua registry check + nhãn đọc/ghi (Lớp 4) | Vừa | ✅ Đã làm (2026-11-10); HITL chưa làm |
+| 4 | Vệ sinh output tool (Lớp 3) | Vừa | ✅ Đã làm (2026-11-10) |
+| 5 | Grounding check ở validate (Lớp 5) | Vừa | ✅ Đã làm (2026-11-10) |
+| 6 | Eval adversarial + phát hiện (Lớp 6) | Vừa | ✅ Đã làm (2026-11-10): `make eval-adversarial`, 14 case pass |
+| 7 | Trần token + tách tenant (Lớp 7) | Theo roadmap | ⏳ Thuộc Bước lớn 2 và 3 — chờ quyết định |
 
 ## 6. Giới hạn cần nói thẳng
 

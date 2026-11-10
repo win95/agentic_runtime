@@ -53,6 +53,8 @@ class ToolRead(BaseModel):
     implementation: str = ""
     timeout_seconds: int = 60
     retry_count: int = 1
+    # Layer 4: False = the tool writes, deletes or dispatches.
+    read_only: bool = True
     is_active: bool = True
 
 

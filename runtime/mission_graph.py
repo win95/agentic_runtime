@@ -16,13 +16,16 @@ directly — a Deep Agent is not required for fixed workflows.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
+import re
 
 from langgraph.graph import END, START, StateGraph
 
 from app.config import settings
 from infra.mlflow_setup import setup_mlflow_tracing
 from runtime.capabilities.fault_analysis import build_fault_analysis_graph
+from runtime.security import detect_injection_signals
 from runtime.state import MissionState
 
 logger = logging.getLogger(__name__)
@@ -120,11 +123,17 @@ def deep_agent_node(state: MissionState) -> dict:
     """
     mission = state.get("mission") or {}
     input_data = state.get("input") or {}
+    # "input" + "execution_config" feed Layer 4 execution scoping in the
+    # registry: tools taking asset_id are wrapped to refuse any asset
+    # other than this execution's, unless the mission opts out with
+    # execution_config.allow_cross_asset.
     context = {
         "mission_id": state.get("mission_id"),
         "execution_id": state.get("execution_id"),
         "tenant": "default",
         "capabilities": mission.get("capabilities") or [],
+        "input": input_data,
+        "execution_config": mission.get("execution") or {},
     }
     try:
         from runtime.deep_agent import build_deep_agent, run_deep_agent
@@ -132,13 +141,14 @@ def deep_agent_node(state: MissionState) -> dict:
         from runtime.tools.mcp_adapter import load_mcp_tools
         from runtime.tools.registry import registry
 
-        # Built-in tools go through the registry permission check
-        # (get_langchain_tools filters by the mission's capabilities; admin
-        # tools carry capability="system_admin" and are only visible to
-        # missions that declare it). MCP tools are appended unfiltered —
-        # a known audit finding, unchanged here.
+        # Layer 4: MCP tools go through the registry permission check
+        # like built-in tools. load_mcp_tools() registers only the MCP
+        # tools mapped to a capability (default deny for the rest);
+        # get_langchain_tools() then filters everything — built-in and
+        # MCP — by the mission's capabilities. Previously MCP tools were
+        # appended unfiltered (audit finding, now closed).
+        load_mcp_tools()
         tools = registry.get_langchain_tools(context)
-        tools.extend(load_mcp_tools())
         # Middleware: one handler instance per run, carrying this run's
         # execution context — it logs token usage + tool calls to the DB
         # (best-effort; a logging failure never fails the run). It is
@@ -204,8 +214,64 @@ def deep_agent_node(state: MissionState) -> dict:
         return {"errors": [f"Deep agent unavailable: {exc}"]}
 
 
+def _grounding_tokens(text: str) -> set[str]:
+    """Distinctive words of a root-cause claim (len >= 4)."""
+    return {w for w in re.findall(r"[a-z0-9]+", text.lower()) if len(w) >= 4}
+
+
+def _is_grounded(cause: str, evidence: list) -> bool:
+    """True when a root cause is supported by at least one evidence item:
+    it shares a distinctive token with an evidence summary, or an
+    evidence item's id appears in it. The honest "unknown — insufficient
+    evidence" fallback is not a claim, so it counts as grounded. A cause
+    with no checkable tokens (e.g. a bare code) is not punished."""
+    lowered = cause.strip().lower()
+    if lowered.startswith("unknown"):
+        return True
+    tokens = _grounding_tokens(cause)
+    for item in evidence:
+        summary = str((item or {}).get("summary") or "").lower()
+        if tokens and any(token in summary for token in tokens):
+            return True
+        item_id = str(((item or {}).get("data") or {}).get("id") or "")
+        if item_id and item_id in cause:
+            return True
+    return not tokens
+
+
+def _allowed_tool_names(mission: dict) -> set[str] | None:
+    """Tool names this mission's capabilities allow (None = cannot tell,
+    e.g. the tool modules failed to import — the trace check is then
+    skipped instead of flagging everything)."""
+    try:
+        import runtime.tools  # noqa: F401 — registers built-in tools
+        from runtime.tools.registry import registry
+    except Exception:  # noqa: BLE001 — validation must never crash
+        return None
+    allowed = {
+        e.name
+        for e in registry.list_for_context(
+            {"capabilities": mission.get("capabilities") or []}
+        )
+    }
+    return allowed or None
+
+
 def validate_results(state: MissionState) -> dict:
-    """Check evidence, output schema and success criteria."""
+    """Check evidence, output schema and success criteria.
+
+    Layer 5 (prompt-injection defense) adds three checks that FLAG but
+    never fail a run — flags live in result["validation_flags"] and mark
+    the execution for review:
+    - grounding: each root_causes item must be supported by some
+      collected evidence; ungrounded causes move to
+      result["ungrounded_root_causes"] and never reach the official
+      report.
+    - tool trace: actions_taken must be a subset of the tools this
+      mission's capabilities allow.
+    - detection: evidence/root-cause text matching instruction-like
+      patterns (Layer 6) is flagged with the matched signal.
+    """
     errors = list(state.get("errors") or [])
     evidence = state.get("evidence") or []
     result = dict(state.get("result") or {})
@@ -219,6 +285,53 @@ def validate_results(state: MissionState) -> dict:
     missing_keys = [k for k in required_keys if k not in result]
     if missing_keys:
         errors.append(f"Result missing output-schema keys: {missing_keys}")
+
+    flags: list[dict] = list(result.get("validation_flags") or [])
+    causes = result.get("root_causes")
+    if isinstance(causes, list) and causes:
+        grounded = [c for c in causes if _is_grounded(str(c), evidence)]
+        ungrounded = [c for c in causes if not _is_grounded(str(c), evidence)]
+        if ungrounded:
+            result["root_causes"] = grounded
+            result["ungrounded_root_causes"] = ungrounded
+            for cause in ungrounded:
+                flags.append(
+                    {"type": "ungrounded_root_cause", "cause": str(cause)[:200]}
+                )
+    actions = result.get("actions_taken")
+    if isinstance(actions, list) and actions:
+        allowed = _allowed_tool_names(mission)
+        if allowed is not None:
+            for name in actions:
+                if name not in allowed:
+                    flags.append(
+                        {"type": "tool_outside_allowed_list", "tool": str(name)}
+                    )
+    for item in evidence:
+        text = str((item or {}).get("summary") or "") + "\n" + json.dumps(
+            (item or {}).get("data") or {}, ensure_ascii=False, default=str
+        )[:8000]
+        for signal in detect_injection_signals(text):
+            flag = {
+                "type": "injection_signal",
+                "signal": signal,
+                "source": str((item or {}).get("source") or ""),
+            }
+            if flag not in flags:
+                flags.append(flag)
+    for cause in (result.get("root_causes") or []) + (
+        result.get("ungrounded_root_causes") or []
+    ):
+        for signal in detect_injection_signals(str(cause)):
+            flag = {
+                "type": "injection_signal",
+                "signal": signal,
+                "source": "root_causes",
+            }
+            if flag not in flags:
+                flags.append(flag)
+    if flags:
+        result["validation_flags"] = flags
     if errors:
         return {"result": result, "status": "FAILED", "errors": errors}
     return {"result": result, "status": "SUCCEEDED"}

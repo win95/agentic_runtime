@@ -255,6 +255,19 @@ def test_seed_loads_system_admin_mission_and_agent(db_session):
     agent = db_session.get(models.Agent, "admin_bot")
     assert agent is not None
     assert set(agent.allowed_tools or []) == ADMIN_TOOL_NAMES
+    # The fault_investigator agent is seeded from its own YAML as well.
+    investigator = db_session.get(models.Agent, "fault_investigator")
+    assert investigator is not None
+    assert investigator.provider == "openai"
+    assert investigator.model == "gpt-4o-mini"
+    assert set(investigator.allowed_tools or []) == {
+        "calculate_failure_rate",
+        "get_maintenance_records",
+        "get_sensor_data",
+        "query_asset_relationships",
+        "search_fault_history",
+        "search_technical_documents",
+    }
     # The existing seed is untouched.
     assert mission_service.get_mission(db_session, "fault_analysis") is not None
 
@@ -266,6 +279,20 @@ def test_seed_files_parse():
     agent = load_missions.load_agent_file(BASE / "agents" / "admin_bot.yaml")
     assert agent["id"] == "admin_bot"
     assert set(agent["allowed_tools"]) == ADMIN_TOOL_NAMES
+    investigator = load_missions.load_agent_file(
+        BASE / "agents" / "fault_investigator.yaml"
+    )
+    assert investigator["id"] == "fault_investigator"
+    assert investigator["model"] == "gpt-4o-mini"
+    assert investigator["temperature"] == 0.0
+    assert set(investigator["allowed_tools"]) == {
+        "calculate_failure_rate",
+        "get_maintenance_records",
+        "get_sensor_data",
+        "query_asset_relationships",
+        "search_fault_history",
+        "search_technical_documents",
+    }
 
 
 # --- Autonomous run (mocked Deep Agent — no LLM) ---

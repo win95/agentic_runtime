@@ -343,18 +343,24 @@ def dispatch_execution(mission_id: str, input_data: dict | None = None) -> dict:
     db = SessionLocal()
     try:
         try:
-            execution, missing = execution_service.create_execution(
+            execution, problems = execution_service.create_execution(
                 db, mission_id, input_data or {}
             )
         except Exception as exc:  # noqa: BLE001 — dispatch failure is a result
             return {"error": f"dispatch failed: {exc}", "mission_id": mission_id}
         if execution is None:
-            if missing == ["__mission_not_found__"]:
+            if problems == ["__mission_not_found__"]:
                 return {"error": "Mission not found", "mission_id": mission_id}
+            # Layer 1 returns full problem strings; the tool's contract
+            # keeps missing_fields as the plain field names.
+            mission = mission_service.resolve_mission(db, mission_id)
+            required = ((mission.input_schema or {}).get("required", [])
+                        if mission is not None else [])
+            missing_fields = [f for f in required if f not in (input_data or {})]
             return {
-                "error": f"Missing required input fields: {missing}",
+                "error": f"Invalid execution input: {problems}",
                 "mission_id": mission_id,
-                "missing_fields": missing,
+                "missing_fields": missing_fields,
             }
         return {
             "execution_id": execution.id,
@@ -388,25 +394,30 @@ def cancel_execution(execution_id: str) -> dict:
 # NOTE: create_agent is deliberately NOT here — no agent service exists
 # (agents are created directly by the API router), so there is no safe
 # service to delegate to.
+# Layer 4: the six read tools are read_only=True; the five write tools
+# (create/update/delete mission, dispatch/cancel execution) are
+# read_only=False — they are only visible to missions whose capability
+# matches, and a human-in-the-loop confirmation step is still required
+# before a write tool may run unsupervised (not built yet).
 registry.register(list_executions, capability="system_admin",
-                  permission="admin", timeout_seconds=30)
+                  permission="admin", timeout_seconds=30, read_only=True)
 registry.register(get_execution, capability="system_admin",
-                  permission="admin", timeout_seconds=30)
+                  permission="admin", timeout_seconds=30, read_only=True)
 registry.register(list_missions, capability="system_admin",
-                  permission="admin", timeout_seconds=30)
+                  permission="admin", timeout_seconds=30, read_only=True)
 registry.register(get_mission, capability="system_admin",
-                  permission="admin", timeout_seconds=30)
+                  permission="admin", timeout_seconds=30, read_only=True)
 registry.register(list_agents, capability="system_admin",
-                  permission="admin", timeout_seconds=30)
+                  permission="admin", timeout_seconds=30, read_only=True)
 registry.register(system_health, capability="system_admin",
-                  permission="admin", timeout_seconds=30)
+                  permission="admin", timeout_seconds=30, read_only=True)
 registry.register(create_mission, capability="system_admin",
-                  permission="admin", timeout_seconds=30)
+                  permission="admin", timeout_seconds=30, read_only=False)
 registry.register(update_mission, capability="system_admin",
-                  permission="admin", timeout_seconds=30)
+                  permission="admin", timeout_seconds=30, read_only=False)
 registry.register(delete_mission, capability="system_admin",
-                  permission="admin", timeout_seconds=30)
+                  permission="admin", timeout_seconds=30, read_only=False)
 registry.register(dispatch_execution, capability="system_admin",
-                  permission="admin", timeout_seconds=60)
+                  permission="admin", timeout_seconds=60, read_only=False)
 registry.register(cancel_execution, capability="system_admin",
-                  permission="admin", timeout_seconds=30)
+                  permission="admin", timeout_seconds=30, read_only=False)

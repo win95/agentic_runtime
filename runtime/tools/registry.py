@@ -20,6 +20,13 @@ class ToolEntry:
     description: str
     capability: str
     permission: str = ""
+    # Layer 4 (prompt-injection defense): a tool that writes, deletes or
+    # dispatches is read_only=False. Default True — least privilege.
+    # Write tools are only visible to missions whose capability matches,
+    # and a human-in-the-loop confirmation step is still required before
+    # a write tool may run unsupervised (not built yet — see
+    # docs/prompt-injection-defense.md).
+    read_only: bool = True
     implementation: str = ""
     timeout_seconds: int = 60
     retry_count: int = 1
@@ -32,13 +39,15 @@ class ToolRegistry:
         self._tools: dict[str, ToolEntry] = {}
 
     def register(self, tool, capability: str, permission: str = "",
-                 timeout_seconds: int = 60, retry_count: int = 1) -> ToolEntry:
+                 timeout_seconds: int = 60, retry_count: int = 1,
+                 read_only: bool = True) -> ToolEntry:
         """Register a langchain @tool under a business capability."""
         entry = ToolEntry(
             name=tool.name,
             description=tool.description or "",
             capability=capability,
             permission=permission,
+            read_only=read_only,
             implementation=f"{tool.__module__}.{tool.name}",
             timeout_seconds=timeout_seconds,
             retry_count=retry_count,
@@ -88,8 +97,61 @@ class ToolRegistry:
         return [e for e in self.list() if self.check(e.name, context)]
 
     def get_langchain_tools(self, context: dict) -> list:
-        """Langchain tool objects the agent may actually call in this context."""
-        return [e.tool for e in self.list_for_context(context) if e.tool is not None]
+        """Langchain tool objects the agent may actually call in this context.
+
+        Layer 4 (execution scoping): when the context carries the
+        execution's input ``asset_id`` and the mission does not opt out
+        via ``execution_config.allow_cross_asset``, a tool that takes an
+        ``asset_id`` argument is wrapped so calls for any other asset are
+        refused with a structured error instead of running. The wrapper
+        is a copy — the registered tool itself is never mutated.
+        """
+        scope_asset = (context.get("input") or {}).get("asset_id")
+        allow_cross = bool(
+            (context.get("execution_config") or {}).get("allow_cross_asset")
+        )
+        tools = []
+        for entry in self.list_for_context(context):
+            if entry.tool is None:
+                continue
+            tool = entry.tool
+            if scope_asset and not allow_cross and _takes_asset_id(tool):
+                tool = _scoped_tool(tool, str(scope_asset))
+            tools.append(tool)
+        return tools
+
+
+def _takes_asset_id(tool) -> bool:
+    """True when the langchain tool accepts an ``asset_id`` argument."""
+    schema = getattr(tool, "args_schema", None)
+    if schema is not None:
+        try:
+            return "asset_id" in (schema.model_fields or {})
+        except Exception:  # noqa: BLE001 — fall through to the args dict
+            pass
+    return "asset_id" in (getattr(tool, "args", None) or {})
+
+
+def _scoped_tool(tool, scope_asset_id: str):
+    """Copy a langchain tool, refusing calls for another ``asset_id``.
+
+    The refusal is a structured error dict (the codebase's pattern for
+    tool failures), so the agent sees it as a tool result, not a crash.
+    """
+    def _guarded(**kwargs):
+        requested = kwargs.get("asset_id")
+        if requested is not None and str(requested) != scope_asset_id:
+            return {
+                "error": (
+                    f"asset_id '{requested}' is outside this execution's "
+                    f"scope (asset_id '{scope_asset_id}'); refused"
+                ),
+                "asset_id": requested,
+                "stub": False,
+            }
+        return tool.invoke(kwargs)
+
+    return tool.model_copy(update={"func": _guarded})
 
 
 # Global registry — tools register themselves on import (see fault_tools).

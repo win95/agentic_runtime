@@ -19,6 +19,8 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime
 
+from runtime.security import clean_text_fields
+
 logger = logging.getLogger(__name__)
 
 
@@ -66,7 +68,9 @@ def search_fault_history(asset_id: str, start_date: str, end_date: str):
             "Is the database up? Load real fault data into the "
             "`fault_history` table."
         ) from exc
-    return [_jsonable(r) for r in rows], False
+    # Layer 3: free-text fields are normalized + truncated at the store
+    # boundary so one poisoned row cannot flood the agent's context.
+    return [clean_text_fields(_jsonable(r)) for r in rows], False
 
 
 def get_maintenance_records(asset_id: str):
@@ -86,7 +90,7 @@ def get_maintenance_records(asset_id: str):
             "Is the database up? Load real maintenance data into the "
             "`maintenance_records` table."
         ) from exc
-    return [_jsonable(r) for r in rows], False
+    return [clean_text_fields(_jsonable(r)) for r in rows], False
 
 
 def search_documents(query: str, limit: int = 5):
@@ -99,7 +103,9 @@ def search_documents(query: str, limit: int = 5):
     from infra.qdrant_client import search_documents as qdrant_search
 
     docs = qdrant_search(query, limit=limit)
-    return docs, False
+    # Layer 3: document bodies are truncated at the store boundary
+    # (content up to 4.000 chars, other text up to 2.000).
+    return [clean_text_fields(d) for d in docs], False
 
 
 def query_asset_relationships(asset_id: str):
@@ -113,7 +119,7 @@ def query_asset_relationships(asset_id: str):
             f"Could not query FalkorDB for asset {asset_id}: {exc}. "
             "Is FalkorDB up? Load real asset relations into the graph."
         ) from exc
-    return relations, False
+    return [clean_text_fields(r) for r in relations], False
 
 
 def get_sensor_data(asset_id: str, start_date: str, end_date: str):

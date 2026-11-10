@@ -224,7 +224,7 @@ def run_due_schedules(db: Session, now: datetime | None = None) -> dict:
         schedule.last_run_at = now
         db.commit()  # advance committed BEFORE dispatch (double-dispatch guard)
         try:
-            execution, missing = execution_service.create_execution(
+            execution, problems = execution_service.create_execution(
                 db, schedule.mission_id, schedule.input_data or {}
             )
         except Exception as exc:  # noqa: BLE001 — dispatch failure is a result
@@ -234,10 +234,10 @@ def run_due_schedules(db: Session, now: datetime | None = None) -> dict:
             logger.warning("Schedule %s dispatch failed: %s", schedule.id, exc)
             continue
         if execution is None:
-            if missing == ["__mission_not_found__"]:
+            if problems == ["__mission_not_found__"]:
                 schedule.last_error = f"Mission {schedule.mission_id} not found"
             else:
-                schedule.last_error = f"Missing required input fields: {missing}"
+                schedule.last_error = f"Invalid execution input: {problems}"
             db.commit()
             failed.append({"schedule_id": schedule.id, "error": schedule.last_error})
             continue

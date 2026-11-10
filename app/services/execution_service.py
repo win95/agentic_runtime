@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.services import mission_service
+from runtime.security import sanitize_input_value, validate_execution_input_data
 
 
 def new_execution_id() -> str:
@@ -21,9 +22,15 @@ def new_execution_id() -> str:
 
 
 def validate_execution_input(mission: models.Mission, input_data: dict) -> list[str]:
-    """Return a list of missing required input fields (empty = valid)."""
-    required = (mission.input_schema or {}).get("required", []) or []
-    return [field for field in required if field not in input_data]
+    """Validate one execution input (Layer 1 of the prompt-injection
+    defense). Returns a list of problems (empty = valid): missing
+    required fields, oversized input, overlong string fields, an
+    ``asset_id`` outside the allowlist, or malformed/out-of-order dates.
+    """
+    mission_dict = {
+        "input_schema": mission.input_schema or {},
+    }
+    return validate_execution_input_data(mission_dict, input_data)
 
 
 def dispatch_execution(execution_id: str) -> None:
@@ -38,17 +45,20 @@ def dispatch_execution(execution_id: str) -> None:
 def create_execution(
     db: Session, mission_id: str, input_data: dict
 ) -> tuple[models.Execution | None, list[str]]:
-    """Create a QUEUED execution. Returns (execution, missing_fields).
+    """Create a QUEUED execution. Returns (execution, problems).
 
     If the mission does not exist, returns (None, ["__mission_not_found__"]).
-    If required inputs are missing, returns (None, missing_fields).
+    If the input fails Layer 1 validation, returns (None, problems).
+    Control characters are stripped from the stored input before it is
+    persisted or handed to the agent.
     """
     mission = mission_service.resolve_mission(db, mission_id)
     if mission is None:
         return None, ["__mission_not_found__"]
-    missing = validate_execution_input(mission, input_data)
-    if missing:
-        return None, missing
+    input_data = sanitize_input_value(input_data)
+    problems = validate_execution_input(mission, input_data)
+    if problems:
+        return None, problems
 
     execution = models.Execution(
         id=new_execution_id(),

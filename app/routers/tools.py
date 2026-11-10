@@ -35,6 +35,7 @@ def list_tools(db: Session = Depends(get_db)):
             implementation=entry.implementation,
             timeout_seconds=entry.timeout_seconds,
             retry_count=entry.retry_count,
+            read_only=entry.read_only,
             is_active=True,
         )
         for entry in registry.list()

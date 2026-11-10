@@ -79,6 +79,13 @@ class Settings(BaseSettings):
     # MCP — generic server URL, configured by env only. Empty = no MCP tools.
     mcp_server_url: str = ""
     mcp_transport: str = "streamable_http"
+    # Layer 4: which capability each MCP tool belongs to, as a JSON
+    # object {"tool_name": "capability"}. An MCP tool with no mapping
+    # here is DENIED (never handed to an agent) — MCP tool descriptions
+    # are untrusted prompt content, so unknown tools are not trusted.
+    # MCP tools are treated as writes (read_only=False) because their
+    # side effects are unknown to this codebase.
+    mcp_tool_capabilities: str = ""
 
     # Runtime
     checkpoint_enabled: bool = False

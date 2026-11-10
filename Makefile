@@ -36,6 +36,10 @@ demo:
 eval:
 	$(PYTHON) scripts/eval_mission.py --mock-llm
 
+# Adversarial eval (Layer 6 prompt-injection cases, mock mode, no MLflow).
+eval-adversarial:
+	$(PYTHON) scripts/eval_mission.py --mock-llm --adversarial
+
 # MLflow eval with the real LiteLLM model (needs the 4 LiteLLM vars).
 eval-real:
 	$(PYTHON) scripts/eval_mission.py --real

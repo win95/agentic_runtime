@@ -614,3 +614,59 @@ Seed mẫu: `seeds/schedules/system_admin_daily_health.yaml` — health
 check hàng ngày lúc 07:00 UTC cho mission `system_admin`, được nạp ở
 trạng thái **tắt** (`enabled: false`); nạp lại seed không tắt schedule
 mà bạn đã bật. Bật nó lên bằng `POST /schedules/sched_system_admin_daily_health/enable`.
+
+## 16. Prompt-injection defense — 6 lớp đã triển khai (Lớp 7 chờ quyết định)
+
+Chi tiết đầy đủ: `docs/prompt-injection-defense.md`. Phòng thủ là xác
+suất, không tuyệt đối — các lớp dưới đây chặn phần lớn, phát hiện phần
+còn lại, và giới hạn thiệt hại.
+
+- **Lớp 1 — Validate input ở API** (`runtime/security.py`,
+  `app/services/execution_service.py`): input JSON tối đa 8 KB, field
+  chuỗi tối đa 500 ký tự, `asset_id` chỉ nhận `^[A-Za-z0-9_-]{1,64}$`,
+  `start_date`/`end_date` đúng định dạng ngày và `end_date >= start_date`,
+  ký tự điều khiển bị lược trước khi lưu. Vi phạm → 422.
+- **Lớp 2 — Tách instruction/dữ liệu** (`runtime/deep_agent.py`):
+  system prompt nêu thứ bậc (chỉ system prompt + objective mới là lệnh;
+  mọi thứ trong `<data>...</data>` là dữ liệu, gặp lệnh trong dữ liệu thì
+  bỏ qua và ghi nhận), input của execution được bọc trong thẻ `<data>`.
+  Prompt của hai agent trong seed YAML đồng bộ với hằng số trong code.
+- **Lớp 3 — Vệ sinh output tool** (`infra/repositories.py`,
+  `runtime/tools/fault_tools.py`): field text chuẩn hóa khoảng trắng và
+  cắt ngắn ở ranh giới kho (`description`/`notes` tối đa 2.000 ký tự,
+  `content` tài liệu tối đa 4.000), tool output kèm `provenance` ghi rõ
+  nguồn (`postgres:fault_history`, `qdrant:technical_documents`, ...).
+- **Lớp 4 — Least privilege** (`runtime/tools/registry.py`,
+  `runtime/tools/mcp_adapter.py`): tool MCP phải map capability trong
+  `MCP_TOOL_CAPABILITIES` (JSON) mới được đăng ký — không map là bị từ
+  chối mặc định; mọi tool (built-in + MCP) đều qua `registry.check()`.
+  Registry gắn nhãn `read_only` (6 tool fault + 6 tool admin đọc là
+  `True`; 5 tool admin ghi là `False`, chỉ hiện với mission khai
+  `system_admin`). Tool nhận `asset_id` chỉ được gọi với `asset_id` của
+  execution hiện tại (trừ khi mission khai
+  `execution_config.allow_cross_asset`); gọi lệch trả lỗi có cấu trúc.
+  **Chưa làm:** node xác nhận của người (human-in-the-loop) trước khi
+  tool ghi chạy không giám sát — cần quyết định kênh phê duyệt.
+- **Lớp 5 — Kiểm chứng đầu ra** (`runtime/mission_graph.py`,
+  `runtime/report.py`): `validate_results` kiểm tra grounding (mỗi
+  `root_causes` phải có căn cứ trong evidence, không thì chuyển sang
+  `ungrounded_root_causes` và không vào báo cáo chính thức), trace gọi
+  tool (chỉ flag khi gọi tool ngoài danh sách cho phép), và quét tín
+  hiệu injection trong evidence. Các flag nằm trong
+  `result["validation_flags"]` — chỉ để xem lại, không làm fail run.
+  Báo cáo render tối đa 50 evidence và có mục "Flagged".
+- **Lớp 6 — Phát hiện & eval** (`runtime/security.py`,
+  `scripts/eval_mission.py`): heuristic phát hiện cụm mệnh lệnh
+  (`ignore previous instructions`, `disregard`, `you must`, ... kể cả
+  tiếng Việt) — chỉ để gắn cờ, không chặn. Eval adversarial:
+  `make eval-adversarial` (14 case: injection trực tiếp trong input,
+  gián tiếp trong title lỗi / nội dung tài liệu / ghi chú bảo trì, mô
+  tả tool MCP độc hại, delimiter trong prompt) — chạy mock, không cần
+  MLflow.
+- **Lớp 7 — Chưa làm:** trần token/số bước mỗi execution và tách tenant
+  thật — thuộc Bước lớn 2 và 3 của roadmap, cần 3 quyết định đang chờ
+  (phương thức đăng nhập, hosting, trần chi phí LLM mỗi user).
+
+Sau khi đổi system prompt trong code, chạy lại
+`python scripts/register_prompts.py` để đăng ký phiên bản mới lên
+MLflow Prompt Registry (cần MLflow server đang chạy).

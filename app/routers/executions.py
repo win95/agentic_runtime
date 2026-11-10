@@ -36,16 +36,16 @@ def _to_read(execution) -> schemas.ExecutionRead:
 @router.post("", response_model=schemas.ExecutionRead, status_code=202)
 def create_execution(payload: schemas.ExecutionCreate, db: Session = Depends(get_db)):
     try:
-        execution, missing = execution_service.create_execution(
+        execution, problems = execution_service.create_execution(
             db, payload.mission_id, payload.input
         )
     except Exception as exc:  # dispatch failure (broker down, ...)
         raise HTTPException(status_code=502, detail=f"dispatch failed: {exc}") from exc
     if execution is None:
-        if missing == ["__mission_not_found__"]:
+        if problems == ["__mission_not_found__"]:
             raise HTTPException(status_code=404, detail="Mission not found")
         raise HTTPException(
-            status_code=422, detail=f"Missing required input fields: {missing}"
+            status_code=422, detail=f"Invalid execution input: {problems}"
         )
     return _to_read(execution)
 
