@@ -809,3 +809,39 @@ alembic downgrade base       # gỡ toàn bộ (dev/test)
   `upgrade head` → `downgrade base` trên SQLite tạm).
 - `init_db()`/`create_all` vẫn còn cho test và dev nhanh, nhưng
   production dùng migration.
+
+## 21. Context window budget — 32.000 token (Phương án A)
+
+Một nguồn duy nhất: `runtime/context_budget.py`. Cửa sổ 32.000 token
+chia như sau (đo thực tế trước khi chia: system prompt 200–266 token,
+17 tool ~1.275 token, 2 skill tối đa ~773 token, retrieval cap cũ 750
+token, input cap 8 KB = 2.048 token):
+
+| Thành phần | Token | Tỉ lệ |
+|---|---|---|
+| System prompt | 1.024 | 3,2% |
+| Tool definitions | 2.048 | 6,4% |
+| Skills | 1.024 | 3,2% |
+| Retrieved context | 3.072 | 9,6% |
+| Execution input | 2.048 | 6,4% |
+| Hội thoại + tool output | 15.616 | 48,8% |
+| Output reserve | 5.120 | 16% |
+| KV cache / agent | 2.048 | 6,4% |
+
+Enforce: system prompt/tools/skills đo lúc build agent trong
+`deep_agent_node` — vượt thì log warning + ghi vào `notes`, run vẫn
+chạy (đây là config đã pin, fail run sẽ giấu việc thật). Retrieval
+lấy `max_chars` từ budget (3.072 token ≈ 12.288 ký tự); YAML mission
+vẫn override được `max_chars` riêng. Input đã cap sẵn 8.192 byte ở
+Layer 1 (= 2.048 token). History: `HookMiddleware.before_model` cắt
+các turn cũ nhất (cả AIMessage + ToolMessage của turn đó) cho tới khi
+vừa 15.616 token — không bao giờ cắt system/human message; mỗi lần cắt
+ghi vào `notes`. Output reserve: `max_tokens=5.120` khi build chat
+model, một response không bao giờ ăn hơn phần đã chừa. KV cache là
+khoản reserve riêng từng agent; phía prompt (6 thành phần đầu) phải
+vừa 24.832 token.
+
+Đếm token là ước lượng `ceil(ký tự / 4)` — proxy phục vụ model custom
+không có tokenizer local để đếm chính xác (tiktoken đã tắt vì lý do
+này ở `llm_factory`), nên budget enforce trên ước lượng; vòng cắt
+chạy lại trước mỗi lượt model nên sai số giới hạn trong một turn.

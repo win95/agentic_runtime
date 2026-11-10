@@ -9,6 +9,10 @@ It translates hook decisions into agent behavior:
 - ``before_agent`` — SessionStart: handlers may return
   ``additional_context``, injected as a system message (the Hooks v2
   load-context pattern).
+- ``before_model`` — context budget: trims the oldest complete
+  conversation turns (AIMessage + its ToolMessages) when the turn
+  total exceeds HISTORY_TOKENS, via ``RemoveMessage`` — system/human
+  messages are never removed. A trimming failure never fails the run.
 - ``wrap_tool_call`` — PreToolUse: a ``deny`` returns an error
   ``ToolMessage`` and the tool never runs. PostToolUse /
   PostToolUseFailure: ``feedback`` text is appended to the tool result
@@ -35,8 +39,14 @@ from __future__ import annotations
 import logging
 
 from langchain.agents.middleware import AgentMiddleware, hook_config
-from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import (
+    HumanMessage,
+    RemoveMessage,
+    SystemMessage,
+    ToolMessage,
+)
 
+from runtime.context_budget import HISTORY_TOKENS, message_tokens, trim_history
 from runtime.hooks.events import HookContext, HookEvent
 from runtime.hooks.registry import HookRegistry
 
@@ -70,6 +80,8 @@ class HookMiddleware(AgentMiddleware):
         self.max_continues = max_continues
         self.tool_calls_made = 0
         self.continues = 0
+        self.trimmed_messages = 0
+        self.trimmed_tokens = 0
         self.events: list[dict] = []
 
     # -- helpers ------------------------------------------------------
@@ -104,6 +116,33 @@ class HookMiddleware(AgentMiddleware):
         if extra:
             return {"messages": [SystemMessage(content=extra)]}
         return None
+
+    # -- Context budget: trim history before each model call ----------
+    def before_model(self, state, runtime):  # noqa: ARG002 - runtime unused
+        try:
+            messages = (state or {}).get("messages") or []
+            remove = trim_history(messages, HISTORY_TOKENS)
+            if not remove:
+                return None
+            remove_ids = [getattr(m, "id", "") or "" for m in remove]
+            removed_tokens = sum(message_tokens(m) for m in remove)
+            self.trimmed_messages += len(remove)
+            self.trimmed_tokens += removed_tokens
+            logger.info(
+                "Context budget: trimmed %d message(s) (~%d tokens) "
+                "to fit the %d-token history budget",
+                len(remove),
+                removed_tokens,
+                HISTORY_TOKENS,
+            )
+            # Messages carry ids once they are in the graph state; a
+            # missing id cannot be removed by id, so it is left alone.
+            return {
+                "messages": [RemoveMessage(id=mid) for mid in remove_ids if mid]
+            }
+        except Exception as exc:  # noqa: BLE001 — trimming never breaks a run
+            logger.debug("Context budget trim failed (non-fatal): %s", exc)
+            return None
 
     # -- Pre/PostToolUse + PostToolUseFailure --------------------------
     def wrap_tool_call(self, request, handler):

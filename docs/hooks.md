@@ -47,7 +47,8 @@ Khai báo trong `execution:` của YAML mission:
 execution:
   retrieval:
     sources: [faults, documents, relations]
-    max_chars: 3000
+    # max_chars không đặt ở đây: mặc định từ context budget
+    # (12.288 ký tự = 3.072 retrieval token).
 ```
 
 `fault_analysis.yaml` khai báo đúng như trên. Nguồn nào cũng có thể
@@ -56,7 +57,8 @@ chọn: `faults` (Postgres, tối đa 8 dòng gần nhất), `maintenance`
 đổi được), `relations` (FalkorDB, 10 dòng), `sensors` (Postgres, tóm
 tắt 1 dòng/metrics: số readings + max + ngày — không bao giờ dump
 raw readings). Không khai báo `sources` thì mặc định
-`[faults, documents, relations]`; `max_chars` mặc định 3000.
+`[faults, documents, relations]`; `max_chars` mặc định 12.288 ký tự
+(từ `runtime/context_budget.py`, 3.072 token retrieval).
 
 Luật: store nào chết thì section đó thành một dòng `unavailable: ...`
 (không crash run, không bịa dòng nào); không có record thì ghi `no

@@ -292,9 +292,10 @@ def deep_agent_node(state: MissionState) -> dict:
                 "llm_model": agent_version.model,
                 "llm_temperature": agent_version.temperature,
             })
+            system_prompt_text = agent_version.prompt_text
             agent = build_deep_agent(
                 tools,
-                system_prompt=agent_version.prompt_text,
+                system_prompt=system_prompt_text,
                 skills=skill_sources,
                 model_config=version_cfg,
                 middleware=[hook_middleware],
@@ -303,16 +304,45 @@ def deep_agent_node(state: MissionState) -> dict:
             from runtime.deep_agent import ADMIN_SYSTEM_PROMPT
             from runtime.prompts import get_system_prompt
 
+            system_prompt_text = get_system_prompt(
+                ADMIN_SYSTEM_PROMPT, prompt_name="admin_bot"
+            )
             agent = build_deep_agent(
                 tools,
-                system_prompt=get_system_prompt(ADMIN_SYSTEM_PROMPT, prompt_name="admin_bot"),
+                system_prompt=system_prompt_text,
                 skills=skill_sources,
                 middleware=[hook_middleware],
             )
         else:
+            from runtime.deep_agent import DEFAULT_SYSTEM_PROMPT
+            from runtime.prompts import get_system_prompt
+
+            system_prompt_text = get_system_prompt(DEFAULT_SYSTEM_PROMPT)
             agent = build_deep_agent(
-                tools, skills=skill_sources, middleware=[hook_middleware]
+                tools,
+                system_prompt=system_prompt_text,
+                skills=skill_sources,
+                middleware=[hook_middleware],
             )
+        # Context budget (Phương án A): measure the fixed prefix —
+        # system prompt, tool definitions, selected skill texts —
+        # against its buckets. Advisory only: an overrun is logged and
+        # noted on the execution; the run still proceeds (these are
+        # pinned config, not run data).
+        from runtime.context_budget import check_prefix_budgets
+
+        tools_text = "".join(
+            getattr(t, "name", "")
+            + (getattr(t, "description", "") or "")
+            + json.dumps(getattr(t, "args", {}) or {}, default=str)
+            for t in tools
+        )
+        skills_text = "".join(s.raw for s in (selected_skills or []))
+        prefix_overruns = check_prefix_budgets(
+            system_prompt_text, tools_text, skills_text
+        )
+        for overrun in prefix_overruns:
+            logger.warning("Context budget overrun: %s", overrun)
         outcome = run_deep_agent(agent, mission, input_data, callbacks=[handler], files=skill_files)
         notes = [f"Deep agent: {outcome.get('summary', '')}"] if outcome.get("summary") else []
         # Surface hook interventions in the state: one compact line in
@@ -339,6 +369,16 @@ def deep_agent_node(state: MissionState) -> dict:
                     ]
                     if part
                 )
+            )
+        # Context budget notes: fixed-prefix overruns (advisory) and any
+        # history trimming the middleware performed before model calls.
+        if prefix_overruns:
+            notes.append("Context budget: " + "; ".join(prefix_overruns))
+        if hook_middleware.trimmed_messages:
+            notes.append(
+                f"Context budget: trimmed {hook_middleware.trimmed_messages} "
+                f"message(s) (~{hook_middleware.trimmed_tokens} tokens) "
+                "to fit the history budget"
             )
         # Fill the mission's declared output-schema keys from the agent
         # outcome so an autonomous run can validate: without this, an

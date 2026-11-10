@@ -32,10 +32,11 @@ execution:
   # `retrieval_context`): the agent's first model call already sees
   # the asset's faults, docs and relations instead of re-discovering
   # them through tools. Sources are opt-in per mission; max_chars caps
-  # the injected block (whole lines are dropped to fit).
+  # the injected block (whole lines are dropped to fit). max_chars is
+  # not set here: the hook default applies (12,288 chars from the
+  # context budget — 3,072 retrieval tokens).
   retrieval:
     sources: [faults, documents, relations]
-    max_chars: 3000
 
 capabilities:
   - fault_history

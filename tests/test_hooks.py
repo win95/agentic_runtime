@@ -14,6 +14,7 @@ import yaml
 from langchain_core.messages import AIMessage, ToolMessage
 
 import runtime.deep_agent as deep_agent_module
+from runtime.context_budget import retrieval_max_chars
 from runtime.hooks import (
     HookContext,
     HookDecision,
@@ -625,5 +626,8 @@ def test_fault_analysis_yaml_declares_retrieval():
     fault = yaml.safe_load((REPO / "seeds/missions/fault_analysis.yaml").read_text())
     retrieval = (fault.get("execution") or {}).get("retrieval") or {}
     assert retrieval["sources"] == ["faults", "documents", "relations"]
-    assert retrieval["max_chars"] == 3000
+    # max_chars is NOT declared in the YAML: the hook default applies
+    # (12,288 chars from the context budget's 3,072 retrieval tokens).
+    assert "max_chars" not in retrieval
+    assert retrieval_max_chars() == 12_288
     assert "retrieval_context" in select_hooks(fault)

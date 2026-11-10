@@ -34,7 +34,9 @@ Six handlers ship with the runtime (name -> [(event, handler)]):
   Each section carries its provenance label; a source that is down
   becomes a one-line "unavailable" note, never a crash and never
   invented rows; the whole block is capped to ``max_chars`` (default
-  3000) by dropping whole lines. See ``docs/hooks.md``.
+  ``DEFAULT_RETRIEVAL_MAX_CHARS`` = 12,288 chars, from the context
+  budget's 3,072 retrieval tokens) by dropping whole lines. See
+  ``docs/hooks.md``.
 
 Add a custom handler by writing a function ``(context) -> decision``
 and registering it on the per-run registry in ``deep_agent_node`` —
@@ -47,6 +49,7 @@ import json
 import logging
 import re
 
+from runtime.context_budget import retrieval_max_chars
 from runtime.hooks.events import HookContext, HookDecision, HookEvent
 from runtime.hooks.registry import HookHandler
 from runtime.security import detect_injection_signals, validate_execution_input_data
@@ -60,9 +63,10 @@ DEFAULT_STOP_MAX_CONTINUES = 3
 
 # Pre-retrieval defaults (see retrieval_context): which stores to pull
 # when a mission declares `retrieval:` without listing sources, and
-# the char budget for the injected block.
+# the char budget for the injected block — derived from the context
+# budget (RETRIEVAL_TOKENS = 3,072 tokens x ~4 chars).
 DEFAULT_RETRIEVAL_SOURCES = ["faults", "documents", "relations"]
-DEFAULT_RETRIEVAL_MAX_CHARS = 3000
+DEFAULT_RETRIEVAL_MAX_CHARS = retrieval_max_chars()
 DEFAULT_RETRIEVAL_DOC_LIMIT = 5
 # Per-section line caps: the block is a briefing, not a dump. Faults
 # and relations are one line each; sensor rows are summarized per

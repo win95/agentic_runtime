@@ -69,8 +69,15 @@ def require_embedding_config(cfg: Settings | None = None) -> None:
 
 
 def build_chat_model(cfg: Settings | None = None):
-    """Build the chat model via the LiteLLM proxy (OpenAI-compatible)."""
+    """Build the chat model via the LiteLLM proxy (OpenAI-compatible).
+
+    ``max_tokens`` is the context budget's output reserve
+    (OUTPUT_RESERVE_TOKENS): one response can never eat more than the
+    tokens set aside for the answer.
+    """
     from langchain_openai import ChatOpenAI
+
+    from runtime.context_budget import OUTPUT_RESERVE_TOKENS
 
     cfg = cfg or settings
     require_llm_config(cfg)
@@ -79,6 +86,7 @@ def build_chat_model(cfg: Settings | None = None):
         api_key=cfg.llm_api_key,
         model=cfg.llm_model,
         temperature=cfg.llm_temperature,
+        max_tokens=OUTPUT_RESERVE_TOKENS,
     )
 
 
