@@ -1,6 +1,8 @@
-# Admin bot agent config. The model is resolved from env at runtime
-# (LLM_API_BASE / LLM_API_KEY / LLM_MODEL via the LiteLLM proxy); the
-# model name below is only the stored default.
+# Admin bot agent config. The model is taken from the environment at
+# seed time: `model: ${LLM_MODEL}` below expands from .env (fallback:
+# settings.llm_model, default gpt-4o-mini) and is pinned into the
+# AgentVersion snapshot (Option C). To change the model, set LLM_MODEL
+# in .env and re-run `make seed` — a new version is created.
 #
 # system_prompt mirrors ADMIN_SYSTEM_PROMPT in runtime/deep_agent.py,
 # which is the runtime fallback (the registry version lives in MLflow
@@ -10,7 +12,7 @@
 id: admin_bot
 name: Admin Bot
 provider: openai
-model: gpt-4o-mini
+model: ${LLM_MODEL}
 system_prompt: >-
   You are the admin bot for the agentic-runtime platform. Answer in
   Vietnamese. Only use the admin tools you were given; never invent

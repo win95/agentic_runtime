@@ -733,7 +733,10 @@ SHA-256 (+ `git_sha` khi chụp trong git checkout).
 Deploy: sửa YAML agent rồi chạy
 `python scripts/register_agent_version.py --agent-id <id>` (hoặc
 `--all`); `make seed` cũng tạo version (v1 lần đầu, không đổi thì
-không tạo thêm, đổi YAML rồi seed lại thì thành v2). Rollback qua API:
+không tạo thêm, đổi YAML rồi seed lại thì thành v2). Model trong YAML
+agent là `${LLM_MODEL}` — lúc seed lấy từ `.env` (mặc định
+`gpt-4o-mini` nếu không đặt); đổi model thì sửa `.env` rồi seed lại,
+version mới được tạo. Rollback qua API:
 `POST /agents/{id}/versions/{v}/activate`, xem danh sách ở
 `GET /agents/{id}/versions`.
 

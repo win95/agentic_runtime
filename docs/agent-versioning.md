@@ -51,6 +51,11 @@ POST /agents/{agent_id}/versions/{version}/activate
    MLflow lúc chạy — version vẫn tái lập được khi MLflow down).
 3. Model chạy = `version.model` + `version.temperature` (build qua
    `build_chat_model` với config override; base URL/key vẫn từ env).
+   `version.model` lấy từ đâu: YAML agent ghi `model: ${LLM_MODEL}`,
+   lúc seed loader expand từ `.env` (không đặt thì lấy
+   `settings.llm_model`, mặc định `gpt-4o-mini`) rồi pin vào snapshot.
+   Đổi model = đổi `LLM_MODEL` trong `.env` rồi seed lại → version
+   mới; version cũ vẫn giữ model cũ nên rollback được.
 4. `version.allowed_tools` đưa vào context nên `registry.check()`
    thực thi nó — trước đây allowed_tools trong YAML chỉ là metadata,
    giờ nó là cổng chặn thật (tool ngoài danh sách không tới được agent,

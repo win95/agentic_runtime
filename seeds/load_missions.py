@@ -7,17 +7,55 @@ Usage:
 from __future__ import annotations
 
 import logging
+import os
 import pathlib
+import re
 
 import yaml
 
 from app import models
+from app.config import settings
 from app.core.db import SessionLocal, init_db
 from app.services import schedule_service
 from app.services.mission_service import upsert_mission
 
 logger = logging.getLogger(__name__)
 BASE = pathlib.Path(__file__).resolve().parent
+
+_ENV_PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+
+def expand_env_placeholders(value, defaults=None):
+    """Recursively expand ${VAR} / ${VAR:-fallback} in seed YAML values.
+
+    Resolution order: os.environ, then the inline ``:-fallback``
+    (shell semantics), then ``defaults`` (seed-time settings values
+    such as LLM_MODEL). A placeholder with no value anywhere raises
+    ValueError — a literal ${...} must never reach the database as a
+    model name.
+    """
+    defaults = defaults or {}
+    if isinstance(value, str):
+
+        def _replace(match: re.Match) -> str:
+            name, fallback = match.group(1), match.group(2)
+            if name in os.environ:
+                return os.environ[name]
+            if fallback is not None:
+                return fallback
+            if name in defaults:
+                return defaults[name]
+            raise ValueError(
+                f"Seed placeholder ${{{name}}} has no value: "
+                f"set {name} in .env or give it a default"
+            )
+
+        return _ENV_PLACEHOLDER_RE.sub(_replace, value)
+    if isinstance(value, dict):
+        return {k: expand_env_placeholders(v, defaults) for k, v in value.items()}
+    if isinstance(value, list):
+        return [expand_env_placeholders(v, defaults) for v in value]
+    return value
 
 
 def load_mission_file(path: pathlib.Path) -> dict:
@@ -38,13 +76,22 @@ def load_mission_file(path: pathlib.Path) -> dict:
 
 def load_agent_file(path: pathlib.Path) -> dict:
     """Agent config row (models.Agent). No agent service exists, so the
-    loader upserts directly with db.merge (insert-or-update by id)."""
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    loader upserts directly with db.merge (insert-or-update by id).
+
+    The model follows the environment at seed time: the YAML writes
+    ``model: ${LLM_MODEL}`` and this expands it (falling back to
+    settings.llm_model when the variable is unset). A model change in
+    .env + re-seed creates a new AgentVersion (Option C).
+    """
+    data = expand_env_placeholders(
+        yaml.safe_load(path.read_text(encoding="utf-8")),
+        defaults={"LLM_MODEL": settings.llm_model},
+    )
     return {
         "id": data["id"],
         "name": data.get("name", data["id"]),
         "provider": data.get("provider", "openai"),
-        "model": data.get("model", "gpt-4o-mini"),
+        "model": data.get("model") or settings.llm_model,
         "system_prompt": data.get("system_prompt", ""),
         "temperature": float(data.get("temperature", 0.0)),
         "allowed_tools": data.get("allowed_tools") or [],
