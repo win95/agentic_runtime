@@ -10,7 +10,18 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    true,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -76,6 +87,12 @@ class AgentVersion(Base):
 
     __tablename__ = "agent_versions"
 
+    # One row per (agent, version): without this, two snapshots could
+    # claim the same version number and rollback/activation would be
+    # ambiguous. The service creates versions as max+1, so duplicates
+    # should not exist; the constraint is the backstop (migration 0002).
+    __table_args__ = (UniqueConstraint("agent_id", "version"),)
+
     id: Mapped[str] = mapped_column(String(256), primary_key=True)
     agent_id: Mapped[str] = mapped_column(
         String(128), ForeignKey("agents.id"), nullable=False, index=True
@@ -110,6 +127,14 @@ class Tool(Base):
     implementation: Mapped[str] = mapped_column(String(256), nullable=False, default="")
     timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
     retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # Layer 4: False = the tool writes, deletes or dispatches. Stored per
+    # row (mirrored from the registry by seed_tools_demo) so GET /tools/db
+    # reports the real value instead of the schema default (True) for
+    # every tool — before this column existed, all 17 tools, including
+    # the admin write tools, showed read_only=true.
+    read_only: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=true()
+    )
     is_active: Mapped[bool] = mapped_column(default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 

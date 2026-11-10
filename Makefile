@@ -1,4 +1,4 @@
-.PHONY: install install-requirements run-api run-worker test lint docker-up docker-down seed seed-dry-run ingest ingest-dry-run demo eval eval-real eval-genai eval-genai-real langgraph-dev gen-synthetic-data eval-tool-use eval-retrieval train-embedding train-llm
+.PHONY: install install-requirements run-api run-worker run-beat migrate test lint docker-up docker-down seed seed-dry-run ingest ingest-dry-run demo eval eval-real eval-genai eval-genai-real langgraph-dev gen-synthetic-data eval-tool-use eval-retrieval train-embedding train-llm
 
 # Prefer the project venv when it exists (this checkout), else system python.
 PYTHON := $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python)
@@ -16,11 +16,24 @@ run-api:
 run-worker:
 	celery -A app.worker.celery_app worker --loglevel=info
 
+# Celery beat — fires run_due_schedules every 60s. Schedules never fire
+# without it: `make run-worker` alone only executes, it does not tick.
+# Local runs need both processes (two terminals); in Docker the `beat`
+# service in docker-compose.yml covers it.
+run-beat:
+	celery -A app.worker.celery_app beat --loglevel=info
+
+# Apply Alembic migrations (alembic/versions). Fresh DB: upgrade head.
+# A DB created by init_db()/create_all before migrations existed gets
+# `alembic stamp head` once instead — see alembic/env.py.
+migrate:
+	$(PYTHON) -m alembic upgrade head
+
 test:
 	pytest -q
 
 lint:
-	ruff check app runtime infra ingest tests seeds scripts
+	ruff check app runtime infra ingest tests seeds scripts alembic
 
 docker-up:
 	docker compose up -d --build

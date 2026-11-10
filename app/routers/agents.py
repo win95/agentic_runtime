@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import models, schemas
@@ -16,9 +17,19 @@ router = APIRouter(
 
 @router.post("", response_model=schemas.AgentRead, status_code=201)
 def create_agent(payload: schemas.AgentCreate, db: Session = Depends(get_db)):
+    if db.get(models.Agent, payload.id) is not None:
+        raise HTTPException(
+            status_code=409, detail=f"Agent {payload.id} already exists"
+        )
     agent = models.Agent(**payload.model_dump())
     db.add(agent)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409, detail=f"Agent {payload.id} already exists"
+        ) from None
     db.refresh(agent)
     return agent
 
@@ -41,6 +52,36 @@ def delete_agent(agent_id: str, db: Session = Depends(get_db)):
     agent = db.get(models.Agent, agent_id)
     if agent is None:
         raise HTTPException(status_code=404, detail="Agent not found")
+    # Agent versions reference the agent (agent_versions.agent_id FK);
+    # deleting the agent would orphan its version history, so refuse
+    # with 409 — same semantics as mission delete (no cascade).
+    version_count = (
+        db.query(models.AgentVersion)
+        .filter(models.AgentVersion.agent_id == agent_id)
+        .count()
+    )
+    if version_count > 0:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Agent has {version_count} version(s) "
+                "and cannot be deleted"
+            ),
+        )
     db.delete(agent)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        count = (
+            db.query(models.AgentVersion)
+            .filter(models.AgentVersion.agent_id == agent_id)
+            .count()
+        )
+        if count > 0:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Agent has {count} version(s) and cannot be deleted",
+            ) from None
+        raise
     return None

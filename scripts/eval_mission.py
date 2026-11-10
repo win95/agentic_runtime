@@ -113,6 +113,16 @@ def run_case(case: dict, mock_llm: bool, model_name: str) -> dict:
     # root_causes/recommendations, which the Deep Agent outcome cannot
     # fill (see deep_agent_node). That needs a product decision before
     # the eval is changed to test it.
+    #
+    # NOTE (2026-11-10 bugfix): hybrid now escalates to the Deep Agent
+    # when the capability evidence is all error/empty (previously every
+    # item counted, so a total store outage still "passed" the
+    # threshold). In this mock environment there are no live stores, so
+    # the classic cases escalate and then FAIL validation honestly — the
+    # agent cannot invent root causes from nothing. That red is the fix
+    # working, not a regression: `validation_passed` was already 0 for
+    # these cases. On a live system with healthy stores the cases pass
+    # through the capability path as before.
     mission["execution_mode"] = case["mode"]
     execution_id = f"eval-{case['name']}"
     start = time.monotonic()

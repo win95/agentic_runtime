@@ -252,6 +252,12 @@ def create_mission(mission_id: str, name: str, objective: str = "",
     try:
         try:
             mission = mission_service.create_mission(db, data)
+        except mission_service.MissionAlreadyExistsError:
+            db.rollback()
+            return {
+                "error": f"Mission {mission_id} already exists",
+                "mission_id": mission_id,
+            }
         except IntegrityError:
             db.rollback()
             return {
@@ -316,7 +322,7 @@ def update_mission(mission_id: str, name: str | None = None, objective: str | No
 @tool
 def delete_mission(mission_id: str) -> dict:
     """Delete a mission. Refused (structured result, no cascade) when the
-    mission still has executions — delete or archive them first."""
+    mission still has executions or schedules — delete those first."""
     db = SessionLocal()
     try:
         try:
@@ -327,6 +333,14 @@ def delete_mission(mission_id: str) -> dict:
                 "refused": True,
                 "reason": f"Mission has {exc.execution_count} execution(s)",
                 "execution_count": exc.execution_count,
+                "mission_id": mission_id,
+            }
+        except mission_service.MissionHasSchedulesError as exc:
+            return {
+                "deleted": False,
+                "refused": True,
+                "reason": f"Mission has {exc.schedule_count} schedule(s)",
+                "schedule_count": exc.schedule_count,
                 "mission_id": mission_id,
             }
         if not deleted:

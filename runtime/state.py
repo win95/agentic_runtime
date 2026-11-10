@@ -23,6 +23,9 @@ class MissionState(TypedDict, total=False):
     # from that version's pinned manifest.
     agent_version: int | None
     agent_version_drift: bool
+    # Hooks: one record per hook dispatch in this execution (event,
+    # tool, decision actions, messages) — see runtime/hooks/.
+    hook_events: Annotated[list, add]
     plan: Annotated[list, add]
     evidence: Annotated[list, add]
     result: dict | None

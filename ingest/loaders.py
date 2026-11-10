@@ -7,9 +7,9 @@ batch therefore changes nothing.
 
 Return shape per loader: ``(ok, failures)`` where ``failures`` is a
 list of ``{"row": <raw dict>, "error": <str>}``. Postgres loaders
-isolate failures per row (merge + flush inside try/except, one commit
-at the end); the Qdrant/FalkorDB loaders work file-at-a-time, so a
-failure there fails every row in the file with the same error.
+isolate failures per row (one SAVEPOINT per row, one commit at the
+end); the Qdrant/FalkorDB loaders work file-at-a-time, so a failure
+there fails every row in the file with the same error.
 """
 
 from __future__ import annotations
@@ -29,16 +29,24 @@ logger = logging.getLogger(__name__)
 
 
 def _merge_rows(db, model, rows) -> tuple[int, list[dict]]:
-    """Merge rows one by one; a bad row is collected, not fatal."""
+    """Merge rows one by one; a bad row is collected, not fatal.
+
+    Each row merges inside its own SAVEPOINT (``db.begin_nested()``),
+    so a failing row rolls back only itself — previously the
+    ``db.rollback()`` here discarded every uncommitted row merged
+    before it while ``ok`` had already counted them, so the report
+    claimed rows that were never stored. One commit at the end still
+    applies to the surviving rows.
+    """
     ok = 0
     failures: list[dict] = []
     for row in rows:
         try:
-            db.merge(model(**row.model_dump()))
-            db.flush()
+            with db.begin_nested():
+                db.merge(model(**row.model_dump()))
+                db.flush()
             ok += 1
         except Exception as exc:  # noqa: BLE001 — per-row isolation
-            db.rollback()
             failures.append({"row": row.model_dump(mode="json"), "error": str(exc)})
     if ok:
         db.commit()

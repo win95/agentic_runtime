@@ -77,6 +77,7 @@ def create_execution(
     except Exception as exc:  # broker down etc. — do not leave a stuck QUEUED row
         execution.status = "FAILED"
         execution.error = f"dispatch failed: {exc}"
+        execution.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
         db.commit()
         raise
     return execution, []

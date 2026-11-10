@@ -69,6 +69,26 @@ def run_execution(self, execution_id: str) -> dict:
         output = final_state.get("result") or {}
         evidence = final_state.get("evidence") or []
         errors = final_state.get("errors") or []
+
+        # Hooks: SessionEnd for the whole execution (the agent run's own
+        # SessionEnd already fired inside HookMiddleware.after_agent when
+        # the Deep Agent ran; this one covers capability-only runs too).
+        # Diagnostic only — the audit hook logs it; best-effort, never
+        # blocks persistence.
+        try:
+            from runtime.hooks import HookContext, HookEvent, default_registry
+
+            _session_end = HookContext(
+                execution_id=execution.id,
+                mission_id=execution.mission_id,
+                reason=status,
+                mission=mission_dict,
+                input=execution.input or {},
+            )
+            default_registry().dispatch(HookEvent.SESSION_END, _session_end)
+        except Exception as exc:  # noqa: BLE001 — SessionEnd never blocks
+            logger.debug("SessionEnd hook dispatch failed: %s", exc)
+
         if status != "SUCCEEDED":
             output = {**output, "errors": errors}
 

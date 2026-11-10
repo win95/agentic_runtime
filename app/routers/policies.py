@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import models, schemas
@@ -16,9 +17,19 @@ router = APIRouter(
 
 @router.post("", response_model=schemas.PolicyRead, status_code=201)
 def create_policy(payload: schemas.PolicyCreate, db: Session = Depends(get_db)):
+    if db.get(models.Policy, payload.id) is not None:
+        raise HTTPException(
+            status_code=409, detail=f"Policy {payload.id} already exists"
+        )
     policy = models.Policy(**payload.model_dump())
     db.add(policy)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=409, detail=f"Policy {payload.id} already exists"
+        ) from None
     db.refresh(policy)
     return policy
 

@@ -4,6 +4,11 @@ Checks the 4 required LiteLLM env vars, POSTs a fault_analysis execution
 for asset O21 (Oct 2026) to the API, polls until a terminal status, then
 prints status, root causes, evidence count and report location.
 
+The env vars are read from a ``.env`` file at the repo root when present
+(stdlib parser below — no python-dotenv dependency), so `make demo`
+works without exporting them by hand. Vars already in the environment
+always win over the file.
+
 Usage:
     python scripts/smoke_e2e.py [--api-base http://localhost:8000]
     make demo
@@ -17,6 +22,7 @@ import argparse
 import os
 import sys
 import time
+from pathlib import Path
 
 import httpx
 
@@ -25,11 +31,44 @@ POLL_TIMEOUT_SECONDS = 300
 POLL_INTERVAL_SECONDS = 5
 
 
+def load_dotenv(path: Path | None = None) -> Path | None:
+    """Load KEY=VALUE lines from a .env file into os.environ (stdlib only).
+
+    Searches upward from this script (``scripts/.env`` first, then the
+    repo root). Existing environment variables are never overwritten;
+    blank lines, comments and lines without ``=`` are skipped; a leading
+    ``export `` and matching surrounding quotes are stripped. Returns
+    the file loaded, or None when no .env was found.
+    """
+    start = Path(path) if path is not None else Path(__file__).resolve().parent
+    candidates = [start, *start.parents]
+    for directory in candidates:
+        dotenv = directory / ".env"
+        if not dotenv.is_file():
+            continue
+        for raw in dotenv.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            if line.startswith("export "):
+                line = line[len("export "):].strip()
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip()
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+                value = value[1:-1]
+            if key and key not in os.environ:
+                os.environ[key] = value
+        return dotenv
+    return None
+
+
 def check_env() -> list[str]:
     return [name for name in REQUIRED_ENV if not os.environ.get(name)]
 
 
 def main() -> int:
+    load_dotenv()
     parser = argparse.ArgumentParser(description="Smoke test the agentic runtime end-to-end.")
     parser.add_argument(
         "--api-base",

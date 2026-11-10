@@ -373,6 +373,10 @@ def seed_tools_demo(db) -> dict:
             implementation=entry.implementation,
             timeout_seconds=entry.timeout_seconds,
             retry_count=entry.retry_count,
+            # The registry is the source of truth for read_only; the DB
+            # row must mirror it, otherwise GET /tools/db reports every
+            # tool (including the admin write tools) as read-only.
+            read_only=entry.read_only,
             is_active=True,
         ))
         count += 1
@@ -418,7 +422,8 @@ def validate() -> dict:
     ids unique per list, every row for asset O21, all fault/maintenance
     dates inside October 2026, resolved_at after occurred_at, every
     document has a non-empty title + content, every relation starts at
-    O21. Raises AssertionError on the first violation.
+    O21. Raises ValueError on the first violation (plain checks, never
+    ``assert`` — validation must survive ``python -O``).
     """
     for name, rows, key in (
         ("faults", FAULTS, "id"),
@@ -427,42 +432,42 @@ def validate() -> dict:
         ("sensor_readings", SENSOR_READINGS, "id"),
     ):
         ids = [row[key] for row in rows]
-        assert len(ids) == len(set(ids)), f"duplicate ids in {name}: {ids}"
+        if not (len(ids) == len(set(ids))):
+            raise ValueError(f"duplicate ids in {name}: {ids}")
     for row in FAULTS + MAINTENANCE:
-        assert row["asset_id"] == ASSET_ID, f"wrong asset in {row['id']}"
+        if not (row["asset_id"] == ASSET_ID):
+            raise ValueError(f"wrong asset in {row['id']}")
     for row in FAULTS:
-        assert row["occurred_at"].month == 10 and row["occurred_at"].year == 2026, (
-            f"fault {row['id']} outside October 2026"
-        )
-        assert row["resolved_at"] is None or row["resolved_at"] >= row["occurred_at"], (
-            f"fault {row['id']} resolves before it occurs"
-        )
-        assert row["severity"] in ("low", "medium", "high"), (
-            f"fault {row['id']} has unknown severity {row['severity']!r}"
-        )
+        if not (row["occurred_at"].month == 10 and row["occurred_at"].year == 2026):
+            raise ValueError(f"fault {row['id']} outside October 2026")
+        if not (row["resolved_at"] is None or row["resolved_at"] >= row["occurred_at"]):
+            raise ValueError(f"fault {row['id']} resolves before it occurs")
+        if row["severity"] not in ("low", "medium", "high"):
+            raise ValueError(f"fault {row['id']} has unknown severity {row['severity']!r}")
     for row in MAINTENANCE:
-        assert row["date"].month == 10 and row["date"].year == 2026, (
-            f"maintenance {row['id']} outside October 2026"
-        )
+        if not (row["date"].month == 10 and row["date"].year == 2026):
+            raise ValueError(f"maintenance {row['id']} outside October 2026")
     for doc in DOCUMENTS:
-        assert doc["title"].strip() and doc["content"].strip(), (
-            f"document {doc['id']} has empty title or content"
-        )
+        if not (doc["title"].strip() and doc["content"].strip()):
+            raise ValueError(f"document {doc['id']} has empty title or content")
     for rel in RELATIONS:
-        assert rel[0] == ASSET_ID, f"relation does not start at {ASSET_ID}: {rel}"
-        assert len(rel) == 5, f"malformed relation: {rel}"
+        if not (rel[0] == ASSET_ID):
+            raise ValueError(f"relation does not start at {ASSET_ID}: {rel}")
+        if not (len(rel) == 5):
+            raise ValueError(f"malformed relation: {rel}")
     for row in SENSOR_READINGS:
-        assert row["asset_id"] == ASSET_ID, f"wrong asset in {row['id']}"
-        assert row["metric"] in ("motor_temperature_c", "vibration_mm_s"), (
-            f"unknown sensor metric in {row['id']}"
-        )
-        assert row["at"].month == 10 and row["at"].year == 2026, (
-            f"sensor reading {row['id']} outside October 2026"
-        )
+        if not (row["asset_id"] == ASSET_ID):
+            raise ValueError(f"wrong asset in {row['id']}")
+        if row["metric"] not in ("motor_temperature_c", "vibration_mm_s"):
+            raise ValueError(f"unknown sensor metric in {row['id']}")
+        if not (row["at"].month == 10 and row["at"].year == 2026):
+            raise ValueError(f"sensor reading {row['id']} outside October 2026")
     # The spikes must match the fault rows they explain.
     by_id = {r["id"]: r for r in SENSOR_READINGS}
-    assert by_id["sr-o21-temp-07"]["value"] == 92.0, "F-204 temperature spike missing"
-    assert by_id["sr-o21-vib-19"]["value"] == 6.8, "F-205 vibration spike missing"
+    if not (by_id["sr-o21-temp-07"]["value"] == 92.0):
+        raise ValueError("F-204 temperature spike missing")
+    if not (by_id["sr-o21-vib-19"]["value"] == 6.8):
+        raise ValueError("F-205 vibration spike missing")
     return {
         "faults": len(FAULTS),
         "maintenance": len(MAINTENANCE),

@@ -28,6 +28,14 @@ execution:
   skills:
     - fault-investigation
     - report-writing
+  # Pre-retrieval into the agent's context window (SessionStart hook
+  # `retrieval_context`): the agent's first model call already sees
+  # the asset's faults, docs and relations instead of re-discovering
+  # them through tools. Sources are opt-in per mission; max_chars caps
+  # the injected block (whole lines are dropped to fit).
+  retrieval:
+    sources: [faults, documents, relations]
+    max_chars: 3000
 
 capabilities:
   - fault_history

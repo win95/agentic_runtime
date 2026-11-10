@@ -17,7 +17,11 @@ from runtime.tools.registry import registry
 @tool
 def search_fault_history(asset_id: str, start_date: str, end_date: str) -> dict:
     """Search equipment fault history within a date range."""
-    rows, is_stub = repositories.search_fault_history(asset_id, start_date, end_date)
+    try:
+        rows, is_stub = repositories.search_fault_history(asset_id, start_date, end_date)
+    except Exception as exc:  # noqa: BLE001 — a store failure is data, not a crash
+        return {"asset_id": asset_id, "faults": [], "error": str(exc), "stub": False,
+                "provenance": "postgres:fault_history"}
     return {"asset_id": asset_id, "faults": rows, "stub": is_stub,
             "provenance": "postgres:fault_history"}
 
@@ -25,7 +29,11 @@ def search_fault_history(asset_id: str, start_date: str, end_date: str) -> dict:
 @tool
 def get_maintenance_records(asset_id: str) -> dict:
     """Get maintenance records for an asset."""
-    rows, is_stub = repositories.get_maintenance_records(asset_id)
+    try:
+        rows, is_stub = repositories.get_maintenance_records(asset_id)
+    except Exception as exc:  # noqa: BLE001 — a store failure is data, not a crash
+        return {"asset_id": asset_id, "records": [], "error": str(exc), "stub": False,
+                "provenance": "postgres:maintenance_records"}
     return {"asset_id": asset_id, "records": rows, "stub": is_stub,
             "provenance": "postgres:maintenance_records"}
 
@@ -39,7 +47,7 @@ def search_technical_documents(query: str, limit: int = 5) -> dict:
     """
     try:
         docs, is_stub = repositories.search_documents(query, limit=limit)
-    except RuntimeError as exc:
+    except Exception as exc:  # noqa: BLE001 — a store failure is data, not a crash
         return {"query": query, "documents": [], "error": str(exc), "stub": False,
                 "provenance": "qdrant:technical_documents"}
     return {"query": query, "documents": docs, "stub": is_stub,
@@ -49,7 +57,11 @@ def search_technical_documents(query: str, limit: int = 5) -> dict:
 @tool
 def query_asset_relationships(asset_id: str) -> dict:
     """Query asset relationships from the knowledge graph (FalkorDB)."""
-    relations, is_stub = repositories.query_asset_relationships(asset_id)
+    try:
+        relations, is_stub = repositories.query_asset_relationships(asset_id)
+    except Exception as exc:  # noqa: BLE001 — a store failure is data, not a crash
+        return {"asset_id": asset_id, "relations": [], "error": str(exc), "stub": False,
+                "provenance": "falkordb:asset_relationships"}
     return {"asset_id": asset_id, "relations": relations, "stub": is_stub,
             "provenance": "falkordb:asset_relationships"}
 
@@ -62,7 +74,11 @@ def get_sensor_data(asset_id: str, start_date: str, end_date: str) -> dict:
     with no readings in the range returns an empty list (never invented
     data).
     """
-    data, is_stub = repositories.get_sensor_data(asset_id, start_date, end_date)
+    try:
+        data, is_stub = repositories.get_sensor_data(asset_id, start_date, end_date)
+    except Exception as exc:  # noqa: BLE001 — a store failure is data, not a crash
+        return {"asset_id": asset_id, "readings": [], "error": str(exc), "stub": False,
+                "provenance": "postgres:sensor_readings"}
     return {"asset_id": asset_id, "readings": data, "stub": is_stub,
             "provenance": "postgres:sensor_readings"}
 
@@ -70,7 +86,11 @@ def get_sensor_data(asset_id: str, start_date: str, end_date: str) -> dict:
 @tool
 def calculate_failure_rate(asset_id: str, start_date: str, end_date: str) -> dict:
     """Calculate the failure rate (faults per day) for an asset in a range."""
-    result, is_stub = repositories.calculate_failure_rate(asset_id, start_date, end_date)
+    try:
+        result, is_stub = repositories.calculate_failure_rate(asset_id, start_date, end_date)
+    except Exception as exc:  # noqa: BLE001 — a store failure is data, not a crash
+        return {"asset_id": asset_id, "error": str(exc), "stub": False,
+                "provenance": "postgres:fault_history (computed)"}
     return {"asset_id": asset_id, **result, "stub": is_stub,
             "provenance": "postgres:fault_history (computed)"}
 

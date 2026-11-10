@@ -624,10 +624,14 @@ curl -X DELETE localhost:8000/schedules/<id>
 Luật an toàn của dispatcher: schedule đến hạn được đẩy `next_run_at`
 lên lần chạy kế tiếp và commit **trước** khi dispatch, nên hai tick
 beat chồng nhau không dispatch trùng. Dispatch lỗi thì ghi vào
-`last_error` của schedule và vẫn đẩy lịch tiếp — không retry vô hạn.
-Không có catch-up: schedule tắt lâu ngày khi bật lại chỉ chạy một lần
-ở lần tới, không replay các lần đã lỡ. Mission có schedule thì không
-xóa được (409, như luật xóa mission có execution).
+`last_error` và **giữ nguyên `next_run_at` ở lần đã lỡ** — tick beat
+sau chạy lại lần đó thay vì mất hẳn (schedule hỏng hẳn sẽ retry mỗi
+phút; tắt schedule để dừng). Không có catch-up: schedule tắt lâu ngày
+khi bật lại chỉ chạy một lần ở lần tới, không replay các lần đã lỡ.
+Mission có schedule thì không xóa được (409, như luật xóa mission có
+execution). Chạy local cần cả worker lẫn beat (hai terminal):
+`make run-worker` + `make run-beat` — chỉ chạy worker thì schedule
+không bao giờ fire.
 
 Seed mẫu: `seeds/schedules/system_admin_daily_health.yaml` — health
 check hàng ngày lúc 07:00 UTC cho mission `system_admin`, được nạp ở
@@ -701,11 +705,15 @@ file JSON thả vào inbox (`ingest/inbox/` local, hoặc bucket MinIO
 (mặc định 1800 = 30 phút); chạy tay bằng `make ingest`, kiểm tra
 định dạng bằng `make ingest-dry-run`.
 
-Mỗi dòng được validate trước khi load (schema Pydantic + luật Lớp 1);
-dòng lỗi không bị vứt mà vào bảng `ingest_quarantine` để sửa và chạy
-lại (`python -m ingest.run --retry`). Mỗi file có một dòng
-`ingest_runs` làm watermark — chạy lại skip file đã SUCCEEDED, và mọi
-loader đều idempotent nên chạy lại không nhân đôi dữ liệu.
+Mỗi dòng được validate trước khi load (schema Pydantic + luật Lớp 1,
+raise ValueError chứ không dùng `assert` — validation còn nguyên cả
+khi chạy `python -O`); dòng lỗi không bị vứt mà vào bảng
+`ingest_quarantine` để sửa và chạy lại (`python -m ingest.run --retry`).
+Mỗi file có một dòng `ingest_runs` làm watermark — chạy lại skip file
+đã SUCCEEDED, và mọi loader đều idempotent nên chạy lại không nhân đôi
+dữ liệu. Postgres loader merge từng dòng trong một SAVEPOINT riêng,
+nên dòng lỗi chỉ rollback chính nó — số dòng `ok` báo cáo là số dòng
+thật sự đã lưu.
 
 Sensor đã có store thật: bảng Postgres `sensor_readings`
 (`get_sensor_data` đọc từ đó, thiếu số liệu thì trả danh sách rỗng).
@@ -734,3 +742,67 @@ lookup MLflow), model/temperature đã pin, `allowed_tools` thành cổng
 chặn thật trong `registry.check()`. Drift (tool live khác manifest đã
 pin) được log warning và ghi `agent_version_drift=true` trên execution;
 mỗi execution cũng ghi `agent_version` đã chạy.
+
+## 19. Hooks — vòng đời của một lần chạy agent (trích xuất từ Hooks v2)
+
+Chi tiết đầy đủ: `docs/hooks.md`. Hooks v2 của Deep Agents Code chỉ
+chạy qua CLI `dcode` + `hooks.json`, còn hệ thống này chạy server-side
+bằng SDK nên không dùng được trực tiếp — đã trích xuất ngữ nghĩa của
+nó thành `runtime/hooks/`: cùng 12 event, cùng matcher, cùng tác dụng
+theo event, viết bằng Python callables + `langchain` `AgentMiddleware`
+native (không shell script bên ngoài).
+
+Cái đã nối dây: `UserPromptSubmit` (chặn input vi phạm Layer 1 ngay
+trong `deep_agent_node`, trước khi build agent — lưới cho execution đi
+qua schedule/admin dispatch), `PreToolUse` (deny → tool không chạy;
+built-in chặn `rm -rf`/`DROP TABLE`/... trong args, quan trọng nhất
+với MCP tool), `PostToolUse`/`PostToolUseFailure` (feedback nối vào
+tool result; tool raise thành error message thay vì crash run),
+`Stop` (agent muốn dừng mà chưa gọi tool nào thì bị buộc chạy thêm,
+tối đa `stop_max_continues` mặc định 3, qua `after_model` +
+`jump_to="model"` — đã kiểm chứng qua graph thật với fake model),
+`SessionStart`/`SessionEnd` (chẩn đoán; worker dispatch SessionEnd
+bao phủ cả run không chạy agent).
+
+Khai báo trong `execution:` của YAML mission (`hooks: [...]`, giống
+`skills:`); không khai báo thì mọi built-in đều chạy. `system_admin`
+khai báo tường minh đủ 6 hook. Mỗi lần dispatch ghi một record vào
+`MissionState.hook_events`; can thiệp được tóm tắt một dòng trong
+`notes`. Chưa nối dây: `PermissionRequest` (cần quyết định kênh phê
+duyệt), `PreCompact` (không có compaction), `SubagentStart/Stop`
+(chưa có subagent).
+
+Pre-retrieval: hook built-in thứ 7, `retrieval_context` (SessionStart),
+chỉ chạy khi mission khai báo `execution.retrieval:` — `fault_analysis`
+khai báo `sources: [faults, documents, relations]`, `max_chars: 3000`.
+Nó kéo dữ liệu thật của asset thành một block có provenance rồi inject
+làm system message trước lượt model đầu tiên, để agent không phải tự
+gọi tool tìm lại những gì capability graph đã biết. Store chết thì
+ghi `unavailable`, không record thì ghi `no records found`, không bao
+giờ bịa. Chi tiết: `docs/hooks.md`.
+
+## 20. Migrations — thay đổi schema bằng Alembic
+
+Trước đây schema chỉ có `init_db()`/`create_all` nên không alter được
+bảng đã tồn tại — mọi thay đổi cột đều phải ALTER tay. Từ giờ mọi thay
+đổi schema đi qua Alembic (`alembic/versions/`):
+
+```bash
+make migrate                 # alembic upgrade head — DB mới
+alembic stamp head           # DB đã có sẵn từ create_all: đánh dấu
+                             # baseline đã áp dụng, CHỈ chạy một lần
+alembic upgrade head         # các migration sau đó áp dụng bình thường
+alembic downgrade base       # gỡ toàn bộ (dev/test)
+```
+
+- `0001` baseline: toàn bộ schema tính đến commit `b445dc98`, đúng
+  những gì `create_all` tạo ra — vì vậy `stamp head` an toàn cho DB
+  cũ. Đừng stamp DB nào đã bị sửa tay.
+- `0002`: thêm cột `tools.read_only` (backfill `true`, `make seed`
+  chạy lại sẽ sửa các tool ghi thành `false` theo registry) và unique
+  constraint `(agent_id, version)` trên `agent_versions`.
+- Viết migration mới: `alembic revision -m "..."` rồi điền
+  `upgrade()`/`downgrade()`; chạy `make test` (có test chạy
+  `upgrade head` → `downgrade base` trên SQLite tạm).
+- `init_db()`/`create_all` vẫn còn cho test và dev nhanh, nhưng
+  production dùng migration.

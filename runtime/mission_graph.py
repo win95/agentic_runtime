@@ -35,9 +35,25 @@ logger = logging.getLogger(__name__)
 # without tracing when the server is down.
 setup_mlflow_tracing()
 
-# Below this much evidence after the Capability Graph, a hybrid mission
-# escalates to the Deep Agent for further investigation.
+# Below this much SUBSTANTIVE evidence after the Capability Graph, a
+# hybrid mission escalates to the Deep Agent for further investigation.
+# Substantive = real findings (fault / maintenance / document /
+# relation). "error" items (a store was down) and "empty" items (a store
+# was consulted and had nothing) do NOT count: previously every item
+# counted, so a run with all four stores down still had 4 evidence
+# items and never escalated — the Deep Agent never got the chance to
+# investigate the outage itself.
 MIN_EVIDENCE_FOR_HYBRID = 3
+
+_SUBSTANTIVE_EVIDENCE_KINDS = frozenset(
+    {"fault", "maintenance", "document", "relation"}
+)
+
+
+def _substantive_evidence_count(evidence: list | None) -> int:
+    return sum(
+        1 for item in (evidence or []) if (item or {}).get("kind") in _SUBSTANTIVE_EVIDENCE_KINDS
+    )
 
 CAPABILITY_BUILDERS = {
     "fault_analysis": build_fault_analysis_graph,
@@ -137,9 +153,40 @@ def deep_agent_node(state: MissionState) -> dict:
     }
     try:
         from runtime.deep_agent import build_deep_agent, run_deep_agent
+        from runtime.hooks import (
+            HookContext,
+            HookEvent,
+            HookMiddleware,
+            default_registry,
+            select_hooks,
+        )
         from runtime.middleware import TokenAuditCallbackHandler
         from runtime.tools.mcp_adapter import load_mcp_tools
         from runtime.tools.registry import registry
+
+        # Hooks: one registry per run (built-ins, narrowed to the
+        # mission's declared hooks when it names any — otherwise all
+        # built-ins run). UserPromptSubmit fires before anything else:
+        # a blocked input never reaches the agent, the tools, or the
+        # version lookup. This is the net for executions that bypass
+        # the API router's Layer 1 validation (schedules, admin
+        # dispatch) — see runtime/hooks/builtin.py::validate_input.
+        hook_registry = default_registry().with_only(select_hooks(mission))
+        hook_base = HookContext(
+            execution_id=state.get("execution_id") or "",
+            mission_id=state.get("mission_id") or "",
+            tenant=context.get("tenant") or "default",
+            agent_id=mission.get("agent_id") or "",
+            mission=mission,
+            input=input_data,
+        )
+        blocked = [
+            d
+            for d in hook_registry.dispatch(HookEvent.USER_PROMPT_SUBMIT, hook_base)
+            if d.action == "block"
+        ]
+        if blocked:
+            return {"errors": [f"Input blocked by hook: {blocked[0].message}"]}
 
         # Option C: resolve the active AgentVersion for this mission's
         # agent (best-effort — any failure falls back to the
@@ -216,6 +263,25 @@ def deep_agent_node(state: MissionState) -> dict:
         selected_skills = select_skills(mission, input_data)
         skill_sources = [SKILLS_SOURCE] if selected_skills else None
         skill_files = skill_files_for_run(selected_skills) if selected_skills else None
+        # Hooks (in-agent half): one middleware instance per run, over
+        # the same registry the node already dispatched UserPromptSubmit
+        # on. It denies dangerous tool calls, injects feedback on tool
+        # results, and forces extra turns when the agent wants to stop
+        # with no evidence gathered (see runtime/hooks/middleware.py).
+        # The stop cap comes from execution.stop_max_continues.
+        hook_middleware = HookMiddleware(
+            hook_registry,
+            execution_id=state.get("execution_id") or "",
+            mission_id=state.get("mission_id") or "",
+            tenant=context.get("tenant") or "default",
+            agent_id=mission.get("agent_id") or "",
+            mission=mission,
+            input_data=input_data,
+            evidence_count=len(state.get("evidence") or []),
+            max_continues=int(
+                (mission.get("execution") or {}).get("stop_max_continues", 3)
+            ),
+        )
         if agent_version is not None:
             # Option C: the pinned prompt + model/temperature run the agent.
             # The config (not a built model) is passed down so the model
@@ -231,6 +297,7 @@ def deep_agent_node(state: MissionState) -> dict:
                 system_prompt=agent_version.prompt_text,
                 skills=skill_sources,
                 model_config=version_cfg,
+                middleware=[hook_middleware],
             )
         elif (mission.get("agent_id") or "") == "admin_bot":
             from runtime.deep_agent import ADMIN_SYSTEM_PROMPT
@@ -240,11 +307,39 @@ def deep_agent_node(state: MissionState) -> dict:
                 tools,
                 system_prompt=get_system_prompt(ADMIN_SYSTEM_PROMPT, prompt_name="admin_bot"),
                 skills=skill_sources,
+                middleware=[hook_middleware],
             )
         else:
-            agent = build_deep_agent(tools, skills=skill_sources)
+            agent = build_deep_agent(
+                tools, skills=skill_sources, middleware=[hook_middleware]
+            )
         outcome = run_deep_agent(agent, mission, input_data, callbacks=[handler], files=skill_files)
         notes = [f"Deep agent: {outcome.get('summary', '')}"] if outcome.get("summary") else []
+        # Surface hook interventions in the state: one compact line in
+        # notes plus the full per-dispatch record in hook_events, so a
+        # run that was denied/feedbacked/continued is explainable from
+        # the execution result alone (no DB lookup needed).
+        hook_events = hook_middleware.events
+        denied = sum(
+            1 for e in hook_events for a in e["decisions"] if a == "deny"
+        )
+        feedbacks = sum(
+            1 for e in hook_events for a in e["decisions"] if a == "feedback"
+        )
+        continued = hook_middleware.continues
+        if denied or feedbacks or continued:
+            notes.append(
+                "Hooks intervened: "
+                + ", ".join(
+                    part
+                    for part in [
+                        f"{denied} tool call(s) denied" if denied else "",
+                        f"{feedbacks} feedback(s) injected" if feedbacks else "",
+                        f"{continued} extra turn(s) forced" if continued else "",
+                    ]
+                    if part
+                )
+            )
         # Fill the mission's declared output-schema keys from the agent
         # outcome so an autonomous run can validate: without this, an
         # autonomous mission could never SUCCEED, because validate_results
@@ -269,6 +364,7 @@ def deep_agent_node(state: MissionState) -> dict:
             "errors": outcome.get("errors") or [],
             "agent_version": agent_version.version if agent_version is not None else None,
             "agent_version_drift": agent_version_drift,
+            "hook_events": hook_events,
         }
     except Exception as exc:  # noqa: BLE001 — model/package problems are state
         logger.warning("Deep agent unavailable: %s", exc)
@@ -408,7 +504,8 @@ def route_after_understand(state: MissionState) -> str:
 
 def route_after_capability(state: MissionState) -> str:
     mode = state.get("mode", "hybrid")
-    if mode == "hybrid" and len(state.get("evidence") or []) < MIN_EVIDENCE_FOR_HYBRID:
+    substantive = _substantive_evidence_count(state.get("evidence"))
+    if mode == "hybrid" and substantive < MIN_EVIDENCE_FOR_HYBRID:
         return "deep_agent"
     return "validate"
 
@@ -505,6 +602,7 @@ def run_mission(mission: dict, input_data: dict, execution_id: str) -> dict:
         "status": "RUNNING",
         "errors": [],
         "notes": [],
+        "hook_events": [],
     }
     # The checkpointer context must stay open for the whole invoke: the
     # saver borrows the connection from PostgresSaver.from_conn_string.

@@ -120,9 +120,15 @@ def validate_execution_input_data(mission: dict, input_data: dict) -> list[str]:
 def wrap_data(source: str, text: str, item_id: str | None = None) -> str:
     """Wrap untrusted text in a <data> block so the model can tell data
     from instructions. The system prompt (runtime/deep_agent.py) tells
-    the agent to cite, never obey, content inside these blocks."""
+    the agent to cite, never obey, content inside these blocks.
+
+    The text itself is escaped first: a literal ``</data>`` inside
+    hostile content would otherwise close the block early and let the
+    trailing text pose as instructions outside the delimiter.
+    """
+    safe_text = text.replace("</data>", "<\\/data>")
     label = f' source="{source}"' + (f' id="{item_id}"' if item_id else "")
-    return f"<data{label}>\n{text}\n</data>"
+    return f"<data{label}>\n{safe_text}\n</data>"
 
 
 # --- Layer 3: tool-output hygiene ---

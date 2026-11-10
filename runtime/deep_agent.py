@@ -67,7 +67,7 @@ def get_chat_model():
 
 
 def build_deep_agent(tools: list, system_prompt: str | None = None, skills: list | None = None,
-                     model_config=None):
+                     model_config=None, middleware=None):
     """Create a Deep Agent (compiled LangGraph) over the given tools.
 
     The system prompt defaults to the ``fault_investigator`` prompt from
@@ -81,6 +81,12 @@ def build_deep_agent(tools: list, system_prompt: str | None = None, skills: list
     ``skills`` is a list of skill source paths (e.g. ``["/skills/"]``)
     for the native ``deepagents`` SkillsMiddleware — see
     ``runtime/skills/``. ``None`` means no skills middleware at all.
+
+    ``middleware`` is a list of ``langchain`` ``AgentMiddleware``
+    instances — the Mission Graph passes ``[HookMiddleware]`` here so
+    the hooks system (``runtime/hooks/``) can deny tool calls, inject
+    feedback, and force extra turns. ``None`` means no extra
+    middleware (the default deepagents middleware still applies).
     """
     from deepagents import create_deep_agent
 
@@ -94,6 +100,7 @@ def build_deep_agent(tools: list, system_prompt: str | None = None, skills: list
         tools=tools,
         system_prompt=system_prompt or get_system_prompt(DEFAULT_SYSTEM_PROMPT),
         skills=skills,
+        middleware=middleware,
     )
 
 

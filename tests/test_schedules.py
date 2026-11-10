@@ -178,7 +178,7 @@ def test_dispatcher_skips_not_yet_due(db_session, monkeypatch):
     assert db_session.query(models.Execution).count() == 0
 
 
-def test_dispatcher_unknown_mission_marks_error_and_advances(db_session, monkeypatch):
+def test_dispatcher_unknown_mission_marks_error_and_keeps_due(db_session, monkeypatch):
     _patch_dispatch(monkeypatch)
     # Inserted directly: the service rejects unknown missions at creation,
     # so this row simulates a mission that vanished after scheduling.
@@ -201,11 +201,13 @@ def test_dispatcher_unknown_mission_marks_error_and_advances(db_session, monkeyp
     assert "not found" in summary["failed"][0]["error"]
     assert db_session.query(models.Execution).count() == 0
     db_session.refresh(schedule)
-    assert schedule.next_run_at == datetime(2026, 11, 10, 7, 0)
+    # The run is NOT lost: next_run_at stays at the missed time so the
+    # next beat tick retries it; last_error records the failure.
+    assert schedule.next_run_at == datetime(2026, 11, 9, 6, 30)
     assert schedule.last_error and "not found" in schedule.last_error
 
 
-def test_dispatcher_missing_input_marks_error_and_advances(db_session, monkeypatch):
+def test_dispatcher_missing_input_marks_error_and_keeps_due(db_session, monkeypatch):
     _patch_dispatch(monkeypatch)
     _make_mission(db_session)
     schedule = _make_schedule(db_session, input_data={})
@@ -220,11 +222,13 @@ def test_dispatcher_missing_input_marks_error_and_advances(db_session, monkeypat
     assert "asset_id" in summary["failed"][0]["error"]
     assert db_session.query(models.Execution).count() == 0
     db_session.refresh(schedule)
-    assert schedule.next_run_at == datetime(2026, 11, 10, 7, 0)
+    # The run is NOT lost: next_run_at stays at the missed time so the
+    # next beat tick retries it; last_error records the failure.
+    assert schedule.next_run_at == datetime(2026, 11, 9, 6, 30)
     assert schedule.last_error and "asset_id" in schedule.last_error
 
 
-def test_dispatcher_dispatch_failure_advances_and_records(db_session, monkeypatch):
+def test_dispatcher_dispatch_failure_keeps_due_and_records(db_session, monkeypatch):
     monkeypatch.setattr(
         execution_service,
         "dispatch_execution",
@@ -241,13 +245,15 @@ def test_dispatcher_dispatch_failure_advances_and_records(db_session, monkeypatc
     assert summary["dispatched"] == []
     assert len(summary["failed"]) == 1
     assert "broker down" in summary["failed"][0]["error"]
-    # The execution row exists (marked FAILED by create_execution) ...
+    # The execution row exists (marked FAILED by create_execution),
+    # with finished_at set like every other terminal row ...
     executions = db_session.query(models.Execution).all()
     assert len(executions) == 1
     assert executions[0].status == "FAILED"
-    # ... but the schedule still advanced instead of retry-looping.
+    assert executions[0].finished_at is not None
+    # ... and the schedule stays due so the next beat tick retries.
     db_session.refresh(schedule)
-    assert schedule.next_run_at == datetime(2026, 11, 10, 7, 0)
+    assert schedule.next_run_at == datetime(2026, 11, 9, 6, 30)
     assert schedule.last_error and "broker down" in schedule.last_error
 
 

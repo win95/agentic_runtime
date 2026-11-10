@@ -266,7 +266,8 @@ def test_autonomous_run_writes_token_and_audit_rows(db_session, monkeypatch):
     mission = mission_service.get_mission(db_session, "system_admin")
     mission_dict = mission_service.mission_to_dict(mission)
 
-    def _fake_build(tools, system_prompt=None, skills=None, model_config=None):
+    def _fake_build(tools, system_prompt=None, skills=None, model_config=None,
+                    middleware=None):
         return _CallbackFiringFakeAgent()
 
     monkeypatch.setattr(

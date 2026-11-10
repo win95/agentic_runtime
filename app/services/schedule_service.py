@@ -8,11 +8,16 @@ Execution per due schedule via ``execution_service.create_execution``.
 Double-dispatch guard: for each due schedule the service advances
 ``next_run_at`` and commits that advance BEFORE dispatching, so a
 concurrent or overlapping beat tick cannot dispatch the same schedule
-twice. A dispatch failure is recorded on the schedule (``last_error``)
-and the schedule still advances — a broken schedule is visible, never
-retried in a loop. There is no catch-up: ``next_run_at`` always jumps
-to the next occurrence *after now*, so a long-disabled schedule fires
-once when re-enabled instead of replaying every missed run.
+twice.
+
+A dispatch failure does NOT lose the run: ``next_run_at`` is restored
+to the missed time and the failure recorded in ``last_error``, so the
+next beat tick retries it. (Previously the schedule still advanced on
+failure, silently dropping that run.) A permanently broken schedule
+retries once a minute — disable it to stop the retries. There is no
+catch-up: a successful dispatch always jumps ``next_run_at`` to the
+next occurrence *after now*, so a long-disabled schedule fires once
+when re-enabled instead of replaying every missed run.
 
 Cron times are naive UTC, like every other datetime in this codebase
 (07:00 UTC is 14:00 in Asia/Saigon).
@@ -194,8 +199,8 @@ def run_due_schedules(db: Session, now: datetime | None = None) -> dict:
     Due = enabled, ``next_run_at`` set and in the past. Each due schedule
     is advanced (and that advance committed) BEFORE its execution is
     created, so overlapping beat ticks cannot double-dispatch. A failure
-    to dispatch is recorded in ``last_error`` and the schedule still
-    advances — the dispatcher never retry-loops a broken schedule.
+    to dispatch restores ``next_run_at`` to the missed time — the run is
+    retried on the next beat tick, not lost — and records ``last_error``.
     """
     now = now or _utcnow()
     due = (
@@ -211,6 +216,7 @@ def run_due_schedules(db: Session, now: datetime | None = None) -> dict:
     dispatched: list[str] = []
     failed: list[dict] = []
     for schedule in due:
+        previous_next_run = schedule.next_run_at
         try:
             schedule.next_run_at = compute_next_run(schedule.cron, now)
         except (CroniterBadCronError, ValueError) as exc:
@@ -221,19 +227,20 @@ def run_due_schedules(db: Session, now: datetime | None = None) -> dict:
             failed.append({"schedule_id": schedule.id, "error": schedule.last_error})
             logger.warning("Schedule %s has invalid cron, skipping: %s", schedule.id, exc)
             continue
-        schedule.last_run_at = now
         db.commit()  # advance committed BEFORE dispatch (double-dispatch guard)
         try:
             execution, problems = execution_service.create_execution(
                 db, schedule.mission_id, schedule.input_data or {}
             )
         except Exception as exc:  # noqa: BLE001 — dispatch failure is a result
+            schedule.next_run_at = previous_next_run  # keep the run due: retry next tick
             schedule.last_error = f"dispatch failed: {exc}"[:2000]
             db.commit()
             failed.append({"schedule_id": schedule.id, "error": schedule.last_error})
             logger.warning("Schedule %s dispatch failed: %s", schedule.id, exc)
             continue
         if execution is None:
+            schedule.next_run_at = previous_next_run  # keep the run due: retry next tick
             if problems == ["__mission_not_found__"]:
                 schedule.last_error = f"Mission {schedule.mission_id} not found"
             else:
@@ -241,6 +248,7 @@ def run_due_schedules(db: Session, now: datetime | None = None) -> dict:
             db.commit()
             failed.append({"schedule_id": schedule.id, "error": schedule.last_error})
             continue
+        schedule.last_run_at = now
         schedule.last_error = None
         db.commit()
         dispatched.append(execution.id)

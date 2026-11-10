@@ -17,7 +17,12 @@ router = APIRouter(
 
 @router.post("", response_model=schemas.MissionRead, status_code=201)
 def create_mission(payload: schemas.MissionCreate, db: Session = Depends(get_db)):
-    mission = mission_service.create_mission(db, payload.model_dump())
+    try:
+        mission = mission_service.create_mission(db, payload.model_dump())
+    except mission_service.MissionAlreadyExistsError as exc:
+        raise HTTPException(
+            status_code=409, detail=f"Mission {exc.mission_id} already exists"
+        ) from exc
     return mission
 
 

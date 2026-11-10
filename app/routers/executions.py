@@ -7,7 +7,7 @@ agent runs asynchronously in the worker.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app import schemas
@@ -25,6 +25,9 @@ def _to_read(execution) -> schemas.ExecutionRead:
         execution_id=execution.id,
         mission_id=execution.mission_id,
         mission_version=execution.mission_version,
+        agent_id=execution.agent_id,
+        agent_version=execution.agent_version,
+        agent_version_drift=execution.agent_version_drift,
         status=execution.status,
         error=execution.error,
         created_at=execution.created_at,
@@ -51,7 +54,10 @@ def create_execution(payload: schemas.ExecutionCreate, db: Session = Depends(get
 
 
 @router.get("", response_model=list[schemas.ExecutionRead])
-def list_executions(limit: int = 50, db: Session = Depends(get_db)):
+def list_executions(
+    limit: int = Query(default=50, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
     return [_to_read(e) for e in execution_service.list_executions(db, limit=limit)]
 
 

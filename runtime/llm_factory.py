@@ -88,8 +88,14 @@ def build_embeddings(cfg: Settings | None = None):
 
     cfg = cfg or settings
     require_embedding_config(cfg)
+    # The LiteLLM proxy serves a custom embedding model: tiktoken cannot
+    # load its tokenizer (embedding calls failed with a 422), and the
+    # proxy does not expose a context length to check against — both
+    # checks must be off for the proxy to work at all.
     return OpenAIEmbeddings(
         base_url=cfg.resolved_embedding_api_base,
         api_key=cfg.resolved_embedding_api_key,
         model=cfg.embedding_model,
+        tiktoken_enabled=False,
+        check_embedding_ctx_length=False,
     )

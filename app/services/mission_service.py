@@ -13,6 +13,15 @@ from sqlalchemy.orm import Session
 from app import models
 
 
+class MissionAlreadyExistsError(ValueError):
+    """A mission with this id already exists. The API maps this to 409
+    Conflict; use update (upsert) to change it."""
+
+    def __init__(self, mission_id: str):
+        super().__init__(f"Mission {mission_id} already exists")
+        self.mission_id = mission_id
+
+
 class MissionHasExecutionsError(Exception):
     """A mission with executions cannot be deleted (would break the
     executions_mission_id_fkey foreign key and destroy run history).
@@ -44,9 +53,19 @@ class MissionHasSchedulesError(Exception):
 
 
 def create_mission(db: Session, data: dict) -> models.Mission:
+    """Insert a mission. Raises MissionAlreadyExistsError (409) when the
+    id is taken — the pre-check gives the friendly error and the
+    IntegrityError catch below is the safety net for a concurrent
+    insert between the check and the commit."""
+    if db.get(models.Mission, data["id"]) is not None:
+        raise MissionAlreadyExistsError(data["id"])
     mission = models.Mission(**data)
     db.add(mission)
-    db.commit()
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise MissionAlreadyExistsError(data["id"]) from None
     db.refresh(mission)
     return mission
 

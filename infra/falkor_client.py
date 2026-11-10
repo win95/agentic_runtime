@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from app.config import settings
 
 logger = logging.getLogger(__name__)
+
+# Cypher has no parameters for labels / relationship types, so the
+# interpolated identifiers must be bare names — never user text.
+_CYPHER_IDENTIFIER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
 
 _graph = None
 
@@ -41,9 +46,22 @@ def merge_asset_relations(relations: list[tuple]) -> None:
     """Idempotently create nodes + relationships with MERGE.
 
     Each relation is (from_id, from_label, rel_type, to_id, to_label).
+    Labels and relationship types cannot be parameters in Cypher, so
+    they are interpolated — but only after an allowlist check: a bare
+    identifier (letter, then letters/digits/underscore). Anything else
+    raises ValueError instead of reaching the query string.
     """
     graph = get_graph()
     for from_id, from_label, rel_type, to_id, to_label in relations:
+        for name, value in (
+            ("from_label", from_label),
+            ("rel_type", rel_type),
+            ("to_label", to_label),
+        ):
+            if not _CYPHER_IDENTIFIER_RE.match(value or ""):
+                raise ValueError(
+                    f"Invalid Cypher identifier for {name}: {value!r}"
+                )
         graph.query(
             f"MERGE (a:{from_label} {{id: $from_id}}) "
             f"MERGE (b:{to_label} {{id: $to_id}}) "

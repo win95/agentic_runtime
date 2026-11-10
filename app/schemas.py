@@ -102,6 +102,12 @@ class ExecutionRead(BaseModel):
     execution_id: str
     mission_id: str
     mission_version: int
+    # Which agent config ran: agent_id from the mission, agent_version /
+    # agent_version_drift recorded by the worker (Option C). Without
+    # these the API could not say which version produced a result.
+    agent_id: str | None = None
+    agent_version: int | None = None
+    agent_version_drift: bool = False
     status: str
     error: str | None = None
     created_at: datetime | None = None

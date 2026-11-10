@@ -8,6 +8,12 @@ result (root_causes / evidence / recommendations). Repository calls go
 through infra/repositories, which query the real stores. When a store is
 unreachable the node records an error evidence item instead of inventing
 data — the run still completes and validation reports what is missing.
+
+Evidence kinds: "fault" / "maintenance" / "document" / "relation" are
+real findings. "error" is a store failure. "empty" is a store that was
+consulted and had nothing in range — information, not a finding: empty
+items never become root causes and never count toward the hybrid
+escalation threshold (see runtime/mission_graph.py).
 """
 
 from __future__ import annotations
@@ -58,7 +64,7 @@ def fault_history_node(state: MissionState) -> dict:
     if not items:
         items = [
             _evidence(
-                "fault_history", "fault", asset_id, "No faults recorded in range", {}, is_stub
+                "fault_history", "empty", asset_id, "No faults recorded in range", {}, is_stub
             )
         ]
     return {"evidence": items}
@@ -91,7 +97,7 @@ def maintenance_node(state: MissionState) -> dict:
     if not items:
         items = [
             _evidence(
-                "maintenance", "maintenance", asset_id, "No maintenance records found", {}, is_stub
+                "maintenance", "empty", asset_id, "No maintenance records found", {}, is_stub
             )
         ]
     return {"evidence": items}
@@ -131,7 +137,7 @@ def knowledge_retrieval_node(state: MissionState) -> dict:
         items = [
             _evidence(
                 "knowledge_retrieval",
-                "document",
+                "empty",
                 asset_id,
                 "No technical documents found",
                 {},
@@ -168,7 +174,7 @@ def asset_relations_node(state: MissionState) -> dict:
     if not items:
         items = [
             _evidence(
-                "asset_relations", "relation", asset_id, "No asset relations found", {}, is_stub
+                "asset_relations", "empty", asset_id, "No asset relations found", {}, is_stub
             )
         ]
     return {"evidence": items}
@@ -176,6 +182,11 @@ def asset_relations_node(state: MissionState) -> dict:
 
 def evidence_aggregation_node(state: MissionState) -> dict:
     evidence = state.get("evidence") or []
+    # Only real findings become root causes. "error" items (a store was
+    # down) and "empty" items (a store was consulted and had nothing)
+    # are information about what is missing, not causes — previously the
+    # "No faults recorded…" / "No maintenance records found" placeholders
+    # carried kind fault/maintenance and leaked into root_causes.
     root_causes = [
         item["summary"] for item in evidence if item.get("kind") in ("fault", "maintenance")
     ][:5]
