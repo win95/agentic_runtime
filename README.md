@@ -104,7 +104,7 @@ docker compose up -d --build
 Compose có healthcheck cho postgres, redis, qdrant, falkordb, minio;
 `api` và `worker` chỉ chạy khi các service hạ tầng đã healthy.
 
-### Bước 3: nạp mission mẫu + dữ liệu thật
+### Bước 3: nạp mission mẫu + dữ liệu demo
 
 Mission mẫu `fault_analysis` (định nghĩa trong
 `seeds/missions/fault_analysis.yaml`) được nạp bằng:
@@ -113,8 +113,21 @@ Mission mẫu `fault_analysis` (định nghĩa trong
 python -m seeds.load_missions
 ```
 
-Dữ liệu chạy mission **phải là dữ liệu thật** từ nguồn của bạn — repo không
-còn chứa dữ liệu demo nào:
+Dữ liệu demo cho thang máy O21, tháng 10/2026 (8 lỗi + 6 bảo trì trong
+PostgreSQL, 6 tài liệu kỹ thuật trong Qdrant, 5 quan hệ trong FalkorDB)
+được nạp bằng:
+
+```bash
+make seed
+# hoặc: python -m seeds.seed_demo_data
+# kiểm tra dữ liệu mà không chạm vào kho nào: make seed-dry-run
+# qua compose: docker compose --profile setup run --rm seed
+```
+
+Seed là idempotent — chạy lại không nhân đôi dữ liệu. Qdrant cần
+LiteLLM proxy để embedding tài liệu (thiếu key/proxy thì phần Qdrant
+được bỏ qua với cảnh báo, chạy lại sau khi sửa). Sau này thay dữ liệu
+demo bằng dữ liệu thật của bạn:
 
 - PostgreSQL: ghi lỗi vào bảng `fault_history`, bảo trì vào
   `maintenance_records` (schema trong `app/models.py`).
@@ -123,6 +136,10 @@ còn chứa dữ liệu demo nào:
   bạn cấu hình, không hardcode 1536/3072).
 - FalkorDB: ghi quan hệ tài sản thật vào graph (ví dụ `PART_OF`,
   `HAS_COMPONENT`).
+
+Đường đưa dữ liệu thật vào theo lô (không cần viết code nạp tay):
+xem `docs/ingest.md` — thả file JSON vào `ingest/inbox/` rồi chạy
+`make ingest` (beat tự chạy mỗi 30 phút khi stack lên).
 
 Chưa có dữ liệu thì mission vẫn chạy được, nhưng evidence sẽ rỗng và kết
 quả phân tích không có căn cứ — hệ thống không tự bịa dữ liệu thay thế.
@@ -224,7 +241,7 @@ make langgraph-dev   # langgraph dev --allow-blocking → http://localhost:8123
 
 ```bash
 make test             # pytest -q
-make lint             # ruff check app runtime infra tests seeds scripts
+make lint             # ruff check app runtime infra ingest tests seeds scripts
 make eval             # eval mock LLM, offline, không cần key/proxy
 make eval-real        # eval với model thật (cần 4 biến LiteLLM)
 make demo             # smoke test end-to-end qua API (cần 4 biến LiteLLM)
@@ -440,7 +457,8 @@ skills/               Skill playbooks (SKILL.md): fault-investigation,
 infra/                Thin clients: postgres (reuse app core), qdrant, falkor,
                       minio, langsmith_setup, mlflow_setup (tracing MLflow 3.x),
                       repositories (Postgres/RAG/KG thật)
-seeds/                Mission mẫu (fault_analysis.yaml) + loader nạp mission
+seeds/                Mission mẫu + agent + schedule (YAML) + loader,
+                      dữ liệu demo O21 (`demo_data.py`, `seed_demo_data.py`)
 scripts/              smoke_e2e.py (make demo), eval_mission.py (make eval),
                       register_prompts.py (MLflow Prompt Registry)
 training/             Vòng đời fine-tune: common/ (schemas, dữ liệu tổng
@@ -459,8 +477,9 @@ langgraph.json        Expose mission_graph cho `langgraph dev`
 - **Repository thật**: `infra/repositories.py` truy vấn Postgres/Qdrant/FalkorDB
   thật. Khi store không tới được, node ghi evidence lỗi (`kind: "error"`) và
   run vẫn hoàn thành — **không trả dữ liệu bịa**.
-- **Sensor data**: chưa có store cảm biến — `get_sensor_data` vẫn trả stub có
-  đánh dấu `"stub": true`.
+- **Sensor data**: số liệu thật trong bảng Postgres `sensor_readings`
+  (`seeds/demo_data.py` nạp 62 số liệu O21 tháng 10/2026); thiếu số liệu thì
+  trả danh sách rỗng, không bịa.
 - **Auth**: `X-API-Key` so với `API_KEY` env. Đây là stub auth tối giản cho
   scaffold; production cần thay bằng JWT/OAuth theo Policy Manager.
 - **Policy enforcement**: `ToolRegistry.check()` kiểm tra capability +
@@ -670,3 +689,25 @@ còn lại, và giới hạn thiệt hại.
 Sau khi đổi system prompt trong code, chạy lại
 `python scripts/register_prompts.py` để đăng ký phiên bản mới lên
 MLflow Prompt Registry (cần MLflow server đang chạy).
+
+## 17. Batch ingest — dữ liệu thật theo lô (Phương án B)
+
+Chi tiết đầy đủ: `docs/ingest.md`. Dữ liệu thật đi vào hệ thống bằng
+file JSON thả vào inbox (`ingest/inbox/` local, hoặc bucket MinIO
+`ingest-inbox`), một loại một file: `faults`, `maintenance`,
+`sensor_readings` → Postgres; `documents` → Qdrant (embed qua LiteLLM);
+`relations` → FalkorDB (MERGE). Beat chạy
+`app.worker.tasks.run_ingest_batch` mỗi `INGEST_INTERVAL_SECONDS`
+(mặc định 1800 = 30 phút); chạy tay bằng `make ingest`, kiểm tra
+định dạng bằng `make ingest-dry-run`.
+
+Mỗi dòng được validate trước khi load (schema Pydantic + luật Lớp 1);
+dòng lỗi không bị vứt mà vào bảng `ingest_quarantine` để sửa và chạy
+lại (`python -m ingest.run --retry`). Mỗi file có một dòng
+`ingest_runs` làm watermark — chạy lại skip file đã SUCCEEDED, và mọi
+loader đều idempotent nên chạy lại không nhân đôi dữ liệu.
+
+Sensor đã có store thật: bảng Postgres `sensor_readings`
+(`get_sensor_data` đọc từ đó, thiếu số liệu thì trả danh sách rỗng).
+`GET /tools/db` giờ trả 17 tool (mirror từ registry, nạp bởi
+`make seed`) và có 1 policy mặc định cho tenant `default`.

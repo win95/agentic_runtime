@@ -91,6 +91,14 @@ class Settings(BaseSettings):
     checkpoint_enabled: bool = False
     execution_timeout_seconds: int = 3600
 
+    # Batch ingest (Option B): files in a local inbox dir, or in the
+    # MinIO ingest-inbox bucket when ingest_use_minio is true. Beat
+    # runs the batch every ingest_interval_seconds (default 30 min).
+    ingest_interval_seconds: int = 1800
+    ingest_inbox_dir: str = "ingest/inbox"
+    ingest_use_minio: bool = False
+    ingest_minio_bucket: str = "ingest-inbox"
+
     # --- Resolved (effective) values ---
     @property
     def resolved_embedding_api_base(self) -> str:

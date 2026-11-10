@@ -12,7 +12,7 @@ keywords: fault equipment elevator failure breakdown asset maintenance sensor mo
 ## Steps
 1. Gather evidence in this order: fault history (`search_fault_history`), maintenance records (`get_maintenance_records`), technical documents (`search_technical_documents`), asset relations (`query_asset_relationships`).
 2. Never invent data. If a store is unreachable, the tool returns error evidence (`kind: "error"`) — report the failure plainly and keep going; error evidence is still evidence.
-3. `get_sensor_data` is a stub (it returns `"stub": true`) — never present stub readings as real measurements.
+3. `get_sensor_data` reads real rows from Postgres (`sensor_readings`) — an empty list means no readings in the range, never invented data.
 4. Draft `root_causes` ONLY from evidence with `kind` "fault" or "maintenance". If there is none, the honest answer is "unknown — insufficient evidence", not a guessed cause.
 5. Recommendations must follow from the evidence actually collected.
 

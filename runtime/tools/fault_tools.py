@@ -58,12 +58,13 @@ def query_asset_relationships(asset_id: str) -> dict:
 def get_sensor_data(asset_id: str, start_date: str, end_date: str) -> dict:
     """Get sensor data for an asset within a date range.
 
-    NOTE: no sensor store exists in this scaffold — returns clearly-marked
-    stub data until a real sensor repository is wired in.
+    Reads real rows from the Postgres ``sensor_readings`` table; an asset
+    with no readings in the range returns an empty list (never invented
+    data).
     """
     data, is_stub = repositories.get_sensor_data(asset_id, start_date, end_date)
     return {"asset_id": asset_id, "readings": data, "stub": is_stub,
-            "provenance": "stub:sensors"}
+            "provenance": "postgres:sensor_readings"}
 
 
 @tool

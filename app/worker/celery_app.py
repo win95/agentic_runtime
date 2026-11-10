@@ -38,5 +38,12 @@ celery_app.conf.update(
             "task": "app.worker.tasks.run_due_schedules",
             "schedule": 60.0,
         },
+        # Batch ingest (Option B): pull new files from the inbox and
+        # load them into the four stores. Idempotent + watermarked, so
+        # a beat restart or overlap only re-skips processed files.
+        "run-ingest-batch": {
+            "task": "app.worker.tasks.run_ingest_batch",
+            "schedule": float(settings.ingest_interval_seconds),
+        },
     },
 )

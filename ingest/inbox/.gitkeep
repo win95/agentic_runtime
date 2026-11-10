@@ -1,0 +1,4 @@
+Drop batch-ingest JSON files here (one type per file: faults.json,
+maintenance.json, documents.json, relations.json, sensor_readings.json).
+`make ingest` processes them; see docs/ingest.md. Example files live in
+ingest/samples/.

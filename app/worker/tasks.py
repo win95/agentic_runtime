@@ -151,3 +151,26 @@ def run_due_schedules() -> dict:
         return summary
     finally:
         db.close()
+
+
+@celery_app.task(bind=True, name="app.worker.tasks.run_ingest_batch", max_retries=0)
+def run_ingest_batch(self) -> dict:
+    """Beat task: run one batch-ingest pass over the inbox.
+
+    Thin wrapper — the logic lives in
+    ``app.services.ingest_service.run_ingest_batch`` so it is testable
+    without Celery. No retries here: beat re-fires on the schedule
+    anyway, and the watermark makes a re-run skip processed files.
+    """
+    db = SessionLocal()
+    try:
+        from app.services import ingest_service
+
+        summary = ingest_service.run_ingest_batch(db)
+        if summary["failed"]:
+            logger.warning("Ingest batch failed files: %s", summary["failed"])
+        if summary["rows_failed"]:
+            logger.warning("Ingest batch quarantined %d row(s)", summary["rows_failed"])
+        return summary
+    finally:
+        db.close()

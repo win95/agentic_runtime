@@ -1,4 +1,4 @@
-.PHONY: install install-requirements run-api run-worker test lint docker-up docker-down demo eval eval-real eval-genai eval-genai-real langgraph-dev gen-synthetic-data eval-tool-use eval-retrieval train-embedding train-llm
+.PHONY: install install-requirements run-api run-worker test lint docker-up docker-down seed seed-dry-run ingest ingest-dry-run demo eval eval-real eval-genai eval-genai-real langgraph-dev gen-synthetic-data eval-tool-use eval-retrieval train-embedding train-llm
 
 # Prefer the project venv when it exists (this checkout), else system python.
 PYTHON := $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python)
@@ -20,13 +20,34 @@ test:
 	pytest -q
 
 lint:
-	ruff check app runtime infra tests seeds scripts
+	ruff check app runtime infra ingest tests seeds scripts
 
 docker-up:
 	docker compose up -d --build
 
 docker-down:
 	docker compose down
+
+# Seed demo data (asset O21, October 2026): missions + agents +
+# schedules + Postgres rows + Qdrant docs + FalkorDB relations.
+# Idempotent — re-running changes nothing. Needs the stores up
+# (docker compose up -d) and the LiteLLM proxy for Qdrant embeddings.
+seed:
+	$(PYTHON) -m seeds.seed_demo_data
+
+# Validate the seed data without touching any store.
+seed-dry-run:
+	$(PYTHON) -m seeds.seed_demo_data --dry-run
+
+# Batch ingest (Option B): process JSON files in ingest/inbox.
+# See docs/ingest.md. Retries pending quarantined rows:
+#   $(PYTHON) -m ingest.run --retry
+ingest:
+	$(PYTHON) -m ingest.run --inbox ingest/inbox
+
+# Validate ingest files without writing to any store.
+ingest-dry-run:
+	$(PYTHON) -m ingest.run --inbox ingest/inbox --dry-run
 
 # End-to-end smoke test against a running API (needs the 4 LiteLLM vars).
 demo:

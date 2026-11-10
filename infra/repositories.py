@@ -7,8 +7,8 @@ callers (capability nodes, tools) surface that error in their result
 instead of fabricating rows.
 
 Return shape: (rows, is_stub) where is_stub is False for real data.
-`get_sensor_data` is the single documented exception: no sensor store
-exists yet, so it still returns clearly-marked stub data.
+Sensor readings live in the Postgres ``sensor_readings`` table (see
+``app/models.py``) — no stub remains in this module.
 
 Date/datetime values are converted to ISO strings so results stay JSON
 serializable (ExecutionResult stores evidence as JSON).
@@ -123,25 +123,31 @@ def query_asset_relationships(asset_id: str):
 
 
 def get_sensor_data(asset_id: str, start_date: str, end_date: str):
-    """Sensor readings.
+    """Sensor readings from PostgreSQL table `sensor_readings`.
 
-    STUB ONLY: no sensor store exists in this scaffold. Wire a real time
-    series store here (e.g. TimescaleDB/InfluxDB) before using in production.
+    Raises RuntimeError when the DB/table is unreachable. Returns
+    ([], False) when the asset simply has no readings in the range —
+    never invented data.
     """
-    return [
-        {
-            "metric": "motor_temperature_c",
-            "value": 72.5,
-            "at": start_date or "2026-10-01",
-            "asset_id": asset_id,
-        },
-        {
-            "metric": "vibration_mm_s",
-            "value": 4.1,
-            "at": start_date or "2026-10-01",
-            "asset_id": asset_id,
-        },
-    ], True
+    from infra.postgres import run_query
+
+    end_inclusive = end_date
+    if end_date and len(end_date) == 10:
+        end_inclusive = f"{end_date}T23:59:59"
+    try:
+        rows = run_query(
+            "SELECT id, asset_id, metric, value, unit, at FROM sensor_readings "
+            "WHERE asset_id = :asset_id AND at >= :start_date "
+            "AND at <= :end_date ORDER BY at ASC LIMIT 500",
+            {"asset_id": asset_id, "start_date": start_date, "end_date": end_inclusive},
+        )
+    except Exception as exc:  # noqa: BLE001 — wrapped with a clear message
+        raise RuntimeError(
+            f"Could not read sensor_readings from PostgreSQL: {exc}. "
+            "Is the database up? Load real sensor data into the "
+            "`sensor_readings` table (see seeds/demo_data.py)."
+        ) from exc
+    return [clean_text_fields(_jsonable(r)) for r in rows], False
 
 
 def calculate_failure_rate(asset_id: str, start_date: str, end_date: str):

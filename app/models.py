@@ -161,6 +161,26 @@ class MaintenanceRecord(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
+class SensorReading(Base):
+    """One sensor reading for an asset (time-series, Postgres for now).
+
+    A plain Postgres table is the pragmatic first store — the same
+    pattern as fault_history. If volume grows, this is the table to move
+    to TimescaleDB (hypertable on ``at``) without changing the readers:
+    they only query (asset_id, metric, at).
+    """
+
+    __tablename__ = "sensor_readings"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    asset_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    metric: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
+    value: Mapped[float] = mapped_column(Float, nullable=False)
+    unit: Mapped[str] = mapped_column(String(32), nullable=False, default="")
+    at: Mapped[datetime] = mapped_column(DateTime, nullable=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
 class Schedule(Base):
     """A recurring mission run (cron).
 
@@ -188,6 +208,50 @@ class Schedule(Base):
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
+
+
+class IngestRun(Base):
+    """One batch-ingest run for a single source file (Option B).
+
+    A run is per file, not per batch: ``source`` is the file name, so a
+    re-run can skip files that already succeeded (watermark). ``status``
+    is SUCCEEDED (all rows loaded), PARTIAL (some rows quarantined) or
+    FAILED (the file itself could not be read/parsed). ``errors`` holds
+    file-level errors; row-level failures live in ``ingest_quarantine``.
+    """
+
+    __tablename__ = "ingest_runs"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    source: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="SUCCEEDED")
+    rows_ok: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    rows_failed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    errors: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    started_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class IngestQuarantine(Base):
+    """One row that failed validation or loading during an ingest run.
+
+    The raw row is kept as JSON so it can be fixed and re-run (see
+    ``ingest.run --retry``) instead of being silently dropped. ``status``
+    is pending, retried, or discarded.
+    """
+
+    __tablename__ = "ingest_quarantine"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    run_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey("ingest_runs.id"), nullable=False, index=True
+    )
+    source: Mapped[str] = mapped_column(String(512), nullable=False)
+    row: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    error: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
 class LLMUsage(Base):
