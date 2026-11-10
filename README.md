@@ -711,3 +711,26 @@ Sensor đã có store thật: bảng Postgres `sensor_readings`
 (`get_sensor_data` đọc từ đó, thiếu số liệu thì trả danh sách rỗng).
 `GET /tools/db` giờ trả 17 tool (mirror từ registry, nạp bởi
 `make seed`) và có 1 policy mặc định cho tenant `default`.
+
+## 18. Agent versioning — version toàn bộ agent config (Phương án C)
+
+Chi tiết đầy đủ: `docs/agent-versioning.md`. Một agent chạy bằng 4
+thứ (system prompt, model/temperature, allowed tools, và bản thân các
+tool) — chỉ version prompt thì không pin được hành vi, vì đổi mô tả
+tool cũng đổi cách agent chọn tool. Mỗi `AgentVersion` là một snapshot
+bất biến gồm cả 4: prompt text chính xác, MLflow prompt version (nếu
+có), provider/model/temperature, allowed tools, và tool manifest kèm
+SHA-256 (+ `git_sha` khi chụp trong git checkout).
+
+Deploy: sửa YAML agent rồi chạy
+`python scripts/register_agent_version.py --agent-id <id>` (hoặc
+`--all`); `make seed` cũng tạo version (v1 lần đầu, không đổi thì
+không tạo thêm, đổi YAML rồi seed lại thì thành v2). Rollback qua API:
+`POST /agents/{id}/versions/{v}/activate`, xem danh sách ở
+`GET /agents/{id}/versions`.
+
+Lúc chạy, `deep_agent_node` dùng active version: prompt đã pin (không
+lookup MLflow), model/temperature đã pin, `allowed_tools` thành cổng
+chặn thật trong `registry.check()`. Drift (tool live khác manifest đã
+pin) được log warning và ghi `agent_version_drift=true` trên execution;
+mỗi execution cũng ghi `agent_version` đã chạy.

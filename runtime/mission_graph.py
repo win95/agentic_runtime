@@ -141,6 +141,49 @@ def deep_agent_node(state: MissionState) -> dict:
         from runtime.tools.mcp_adapter import load_mcp_tools
         from runtime.tools.registry import registry
 
+        # Option C: resolve the active AgentVersion for this mission's
+        # agent (best-effort — any failure falls back to the
+        # pre-versioning behaviour: env model + registry prompt, and no
+        # allowed_tools gate). When a version is active, its allowed
+        # tools gate the registry (registry.check enforces
+        # context["allowed_tools"]) and its pinned prompt/model/
+        # temperature run the agent; the tools themselves still come
+        # from the live code registry.
+        agent_version = None
+        agent_version_drift = False
+        agent_id = mission.get("agent_id") or ""
+        if agent_id:
+            try:
+                from app.core.db import SessionLocal
+                from app.services import agent_version_service
+
+                _db = SessionLocal()
+                try:
+                    agent_version = agent_version_service.get_active_version(_db, agent_id)
+                finally:
+                    _db.close()
+            except Exception as exc:  # noqa: BLE001 — versioning never breaks a run
+                logger.debug(
+                    "Could not resolve active agent version for %s: %s", agent_id, exc
+                )
+                agent_version = None
+        if agent_version is not None:
+            context["allowed_tools"] = list(agent_version.allowed_tools or [])
+            # Drift: the live toolset changed since this version was
+            # pinned. Advisory only — the run continues with live tools.
+            try:
+                from app.services import agent_version_service
+
+                _, live_digest = agent_version_service.compute_tool_manifest()
+                agent_version_drift = live_digest != agent_version.manifest_sha256
+                if agent_version_drift:
+                    logger.warning(
+                        "Agent %s v%d: live tool manifest drifted from the pinned one",
+                        agent_id, agent_version.version,
+                    )
+            except Exception as exc:  # noqa: BLE001 — drift is advisory
+                logger.debug("Could not compute live tool manifest: %s", exc)
+
         # Layer 4: MCP tools go through the registry permission check
         # like built-in tools. load_mcp_tools() registers only the MCP
         # tools mapped to a capability (default deny for the rest);
@@ -159,7 +202,7 @@ def deep_agent_node(state: MissionState) -> dict:
             execution_id=state.get("execution_id") or "",
             mission_id=state.get("mission_id") or "",
             tenant=context.get("tenant") or "default",
-            model=settings.llm_model,
+            model=agent_version.model if agent_version is not None else settings.llm_model,
         )
         # Skills: deterministic selection (explicit mission declaration
         # wins, else keyword matching over mission + request — see
@@ -173,7 +216,23 @@ def deep_agent_node(state: MissionState) -> dict:
         selected_skills = select_skills(mission, input_data)
         skill_sources = [SKILLS_SOURCE] if selected_skills else None
         skill_files = skill_files_for_run(selected_skills) if selected_skills else None
-        if (mission.get("agent_id") or "") == "admin_bot":
+        if agent_version is not None:
+            # Option C: the pinned prompt + model/temperature run the agent.
+            # The config (not a built model) is passed down so the model
+            # is constructed inside build_deep_agent, where test doubles
+            # replace it — the node itself never needs live LLM config
+            # just to resolve a version.
+            version_cfg = settings.model_copy(update={
+                "llm_model": agent_version.model,
+                "llm_temperature": agent_version.temperature,
+            })
+            agent = build_deep_agent(
+                tools,
+                system_prompt=agent_version.prompt_text,
+                skills=skill_sources,
+                model_config=version_cfg,
+            )
+        elif (mission.get("agent_id") or "") == "admin_bot":
             from runtime.deep_agent import ADMIN_SYSTEM_PROMPT
             from runtime.prompts import get_system_prompt
 
@@ -208,6 +267,8 @@ def deep_agent_node(state: MissionState) -> dict:
             "result": result,
             "notes": notes,
             "errors": outcome.get("errors") or [],
+            "agent_version": agent_version.version if agent_version is not None else None,
+            "agent_version_drift": agent_version_drift,
         }
     except Exception as exc:  # noqa: BLE001 — model/package problems are state
         logger.warning("Deep agent unavailable: %s", exc)

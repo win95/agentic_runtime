@@ -185,7 +185,7 @@ def test_deep_agent_node_injects_declared_skills(db_session, monkeypatch):
     mission_dict = mission_service.mission_to_dict(mission)
     seen: dict = {}
 
-    def fake_build(tools, system_prompt=None, skills=None):
+    def fake_build(tools, system_prompt=None, skills=None, model_config=None):
         seen["skills"] = skills
         return object()
 
@@ -209,7 +209,7 @@ def test_deep_agent_node_injects_declared_skills(db_session, monkeypatch):
 def test_deep_agent_node_no_skill_when_no_match(monkeypatch):
     seen: dict = {}
 
-    def fake_build(tools, system_prompt=None, skills=None):
+    def fake_build(tools, system_prompt=None, skills=None, model_config=None):
         seen["skills"] = skills
         return object()
 

@@ -4,6 +4,12 @@ The registered prompts become the Deep Agents' system prompts (loaded by
 ``runtime/prompts.py`` via the ``production`` alias, falling back to
 ``@latest`` and then to the hardcoded defaults in ``runtime/deep_agent.py``).
 
+Note (Option C): the prompt alone does not pin an agent's behaviour —
+model, allowed tools and tool descriptions matter too. The full
+versioned unit is an AgentVersion (see docs/agent-versioning.md);
+``scripts/register_agent_version.py`` snapshots one (and can register
+the prompt here first with --register-prompt).
+
 Usage:
     python scripts/register_prompts.py [--tracking-uri URI] [--alias production]
     python scripts/register_prompts.py --prompt admin_bot

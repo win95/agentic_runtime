@@ -100,6 +100,10 @@ def run_execution(self, execution_id: str) -> dict:
         )
         execution.status = status
         execution.error = "; ".join(errors) if errors else None
+        # Option C: record which agent version ran (None when no version
+        # was active) and whether the live tools had drifted from it.
+        execution.agent_version = final_state.get("agent_version")
+        execution.agent_version_drift = bool(final_state.get("agent_version_drift"))
         execution.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
         db.commit()
         logger.info("Execution %s finished with status %s", execution_id, status)

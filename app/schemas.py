@@ -41,6 +41,25 @@ class AgentRead(AgentCreate):
     created_at: datetime | None = None
 
 
+# --- Agent version (Option C) ---
+class AgentVersionRead(BaseModel):
+    id: str
+    agent_id: str
+    version: int
+    prompt_text: str = ""
+    prompt_registry_version: int | None = None
+    provider: str = "openai"
+    model: str = "gpt-4o-mini"
+    temperature: float = 0.0
+    allowed_tools: list[str] = Field(default_factory=list)
+    tool_manifest: list[dict[str, Any]] = Field(default_factory=list)
+    manifest_sha256: str = ""
+    git_sha: str | None = None
+    source: str = "seed"
+    is_active: bool = False
+    created_at: datetime | None = None
+
+
 # --- Tool ---
 class ToolRead(BaseModel):
     id: str

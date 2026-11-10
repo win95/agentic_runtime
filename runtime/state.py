@@ -18,6 +18,11 @@ class MissionState(TypedDict, total=False):
     input: dict
     # "deterministic" | "hybrid" | "autonomous" (from mission.execution.mode)
     mode: str
+    # Option C: the AgentVersion that ran this execution (None when no
+    # version was active), and whether the live tool manifest had drifted
+    # from that version's pinned manifest.
+    agent_version: int | None
+    agent_version_drift: bool
     plan: Annotated[list, add]
     evidence: Annotated[list, add]
     result: dict | None

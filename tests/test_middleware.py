@@ -266,10 +266,13 @@ def test_autonomous_run_writes_token_and_audit_rows(db_session, monkeypatch):
     mission = mission_service.get_mission(db_session, "system_admin")
     mission_dict = mission_service.mission_to_dict(mission)
 
+    def _fake_build(tools, system_prompt=None, skills=None, model_config=None):
+        return _CallbackFiringFakeAgent()
+
     monkeypatch.setattr(
         deep_agent_module,
         "build_deep_agent",
-        lambda tools, system_prompt=None, skills=None: _CallbackFiringFakeAgent(),
+        _fake_build,
     )
 
     final = run_mission(mission_dict, {"request": "execution nào lỗi hôm nay?"}, "exec-mw-e2e")

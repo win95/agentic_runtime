@@ -66,12 +66,17 @@ def get_chat_model():
     return build_chat_model()
 
 
-def build_deep_agent(tools: list, system_prompt: str | None = None, skills: list | None = None):
+def build_deep_agent(tools: list, system_prompt: str | None = None, skills: list | None = None,
+                     model_config=None):
     """Create a Deep Agent (compiled LangGraph) over the given tools.
 
     The system prompt defaults to the ``fault_investigator`` prompt from
     the MLflow Prompt Registry, falling back to DEFAULT_SYSTEM_PROMPT when
-    the registry is unavailable (see ``runtime/prompts.py``).
+    the registry is unavailable (see ``runtime/prompts.py``). Pass
+    ``model_config`` (a Settings object) to build the chat model from a
+    specific model/temperature instead of the env-configured one — the
+    Mission Graph does this when an active AgentVersion pins a
+    model/temperature (Option C).
 
     ``skills`` is a list of skill source paths (e.g. ``["/skills/"]``)
     for the native ``deepagents`` SkillsMiddleware — see
@@ -79,8 +84,13 @@ def build_deep_agent(tools: list, system_prompt: str | None = None, skills: list
     """
     from deepagents import create_deep_agent
 
+    model = (
+        build_chat_model(model_config)
+        if model_config is not None
+        else get_chat_model()
+    )
     return create_deep_agent(
-        model=get_chat_model(),
+        model=model,
         tools=tools,
         system_prompt=system_prompt or get_system_prompt(DEFAULT_SYSTEM_PROMPT),
         skills=skills,

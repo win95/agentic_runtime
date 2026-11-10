@@ -58,6 +58,43 @@ class Agent(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
+class AgentVersion(Base):
+    """One immutable snapshot of an agent's full config (Option C).
+
+    A version pins everything that decides the agent's behaviour: the
+    exact system prompt text, the MLflow prompt version it was built
+    from (best-effort, may be NULL), provider/model/temperature, the
+    allowed tool list, and the tool manifest (name, description, schema
+    and permission of every tool the agent could call) with its SHA-256.
+    ``git_sha`` records the code the snapshot was taken from (NULL when
+    taken outside a git checkout).
+
+    Only one version per agent is active (``is_active``); the runtime
+    uses the active version, and rollback is activating an older one.
+    Rows are never edited in place — a change creates a new version.
+    """
+
+    __tablename__ = "agent_versions"
+
+    id: Mapped[str] = mapped_column(String(256), primary_key=True)
+    agent_id: Mapped[str] = mapped_column(
+        String(128), ForeignKey("agents.id"), nullable=False, index=True
+    )
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    prompt_text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    prompt_registry_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False, default="openai")
+    model: Mapped[str] = mapped_column(String(128), nullable=False, default="gpt-4o-mini")
+    temperature: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    allowed_tools: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    tool_manifest: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    git_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    source: Mapped[str] = mapped_column(String(64), nullable=False, default="seed")
+    is_active: Mapped[bool] = mapped_column(default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
 class Tool(Base):
     """Registered tool metadata (the runtime registry mirrors this)."""
 
@@ -104,6 +141,11 @@ class Execution(Base):
     )
     mission_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     agent_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # Option C: which AgentVersion ran (NULL when the run predates
+    # versioning or no version was active), and whether the live tool
+    # manifest had drifted from that version's pinned manifest.
+    agent_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    agent_version_drift: Mapped[bool] = mapped_column(default=False)
     input: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     # QUEUED | RUNNING | SUCCEEDED | FAILED | CANCELLED
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="QUEUED")

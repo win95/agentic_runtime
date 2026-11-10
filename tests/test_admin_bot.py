@@ -303,7 +303,7 @@ def test_autonomous_system_admin_run_succeeds(db_session, monkeypatch):
 
     seen_prompts: list[str | None] = []
 
-    def fake_build_deep_agent(tools, system_prompt=None, skills=None):
+    def fake_build_deep_agent(tools, system_prompt=None, skills=None, model_config=None):
         seen_prompts.append(system_prompt)
         return object()
 

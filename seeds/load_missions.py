@@ -101,11 +101,23 @@ def main() -> None:
             print(f"Seeded mission {mission.id} (v{mission.version})")
         agents_dir = BASE / "agents"
         if agents_dir.is_dir():
+            from app.services import agent_version_service
+
             for path in sorted(agents_dir.glob("*.yaml")):
                 agent = db.merge(models.Agent(**load_agent_file(path)))
                 db.commit()
                 logger.info("Seeded agent %s", agent.id)
                 print(f"Seeded agent {agent.id}")
+                # Option C: snapshot the agent's config as a version
+                # when it changed (or when no version exists yet).
+                # Re-seeding an unchanged agent creates nothing.
+                version, created = agent_version_service.ensure_version_for_agent(
+                    db, agent.id, source="seed"
+                )
+                if created:
+                    print(f"  agent version v{version.version} created (active)")
+                else:
+                    print(f"  agent version v{version.version} already active")
         seed_schedules(db)
     finally:
         db.close()
