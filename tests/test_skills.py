@@ -64,7 +64,7 @@ NEUTRAL_MISSION = {
     "agent_id": "general",
 }
 
-ALL_SKILL_NAMES = {"fault-investigation", "admin-operations", "report-writing"}
+ALL_SKILL_NAMES = {"fault-investigation", "admin-operations", "report-writing", "data-access"}
 
 
 # --- Loader ---
@@ -140,7 +140,11 @@ def test_skill_files_shape():
 
 def test_seed_yaml_declares_skills():
     fault = load_missions.load_mission_file(BASE / "missions" / "fault_analysis.yaml")
-    assert fault["execution_config"]["skills"] == ["fault-investigation", "report-writing"]
+    assert fault["execution_config"]["skills"] == [
+        "fault-investigation",
+        "data-access",
+        "report-writing",
+    ]
     admin = load_missions.load_mission_file(BASE / "missions" / "system_admin.yaml")
     assert admin["execution_config"]["skills"] == ["admin-operations", "report-writing"]
 
@@ -199,6 +203,8 @@ def test_deep_agent_node_injects_declared_skills(db_session, monkeypatch):
 
     final = run_mission(mission_dict, {"request": "execution nào lỗi hôm nay?"}, "exec-skill-admin")
     assert final["status"] == "SUCCEEDED", f"errors: {final.get('errors')}"
+    # system_admin's skills have no maps: no plan trace is produced.
+    assert "plan_trace" not in final["result"]
     assert seen["skills"] == ["/skills/"]
     assert set(seen["files"]) == {
         "/skills/admin-operations/SKILL.md",

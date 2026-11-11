@@ -16,6 +16,7 @@ import logging
 from runtime.llm_factory import build_chat_model
 from runtime.prompts import get_system_prompt
 from runtime.security import MAX_INPUT_JSON_BYTES, wrap_data
+from runtime.skills.map_plan import SkillMap, compute_plan_trace
 
 logger = logging.getLogger(__name__)
 
@@ -158,7 +159,8 @@ def _tool_call_failure(result_message) -> str | None:
     return None
 
 
-def run_deep_agent(agent, mission: dict, input_data: dict, callbacks=None, files=None) -> dict:
+def run_deep_agent(agent, mission: dict, input_data: dict, callbacks=None, files=None,
+                   skill_maps: list[SkillMap] | None = None) -> dict:
     """Invoke the deep agent for one mission input.
 
     Returns {"summary": str, "evidence": [...], "actions_taken": [...],
@@ -178,6 +180,10 @@ def run_deep_agent(agent, mission: dict, input_data: dict, callbacks=None, files
     handler sees the agent's LLM and tool calls. ``files`` (e.g. the
     selected skill files from ``runtime/skills/``) are passed through the
     invoke input so the native SkillsMiddleware can disclose them.
+    ``skill_maps`` (a list of ``SkillMap``) adds a ``plan_trace`` key:
+    per skill, which plan nodes the agent visited (in order), which it
+    skipped, and which called tools belong to no node — computed
+    deterministically from the run's tool calls, failed calls included.
     """
     objective = mission.get("objective", "")
     # Layer 2: the execution input is untrusted data, never instructions.
@@ -227,6 +233,10 @@ def run_deep_agent(agent, mission: dict, input_data: dict, callbacks=None, files
             results_by_id[str(call_id)] = message
     actions_taken: list[str] = []
     errors: list[str] = []
+    # Every tool the agent attempted, in call order (failed calls
+    # included — attempting a node still counts as visiting it for the
+    # plan trace; grounding of actions_taken stays separate, above).
+    called_tools: list[str] = []
     for message in messages:
         for call in getattr(message, "tool_calls", None) or []:
             if isinstance(call, dict):
@@ -237,6 +247,7 @@ def run_deep_agent(agent, mission: dict, input_data: dict, callbacks=None, files
                 call_id = getattr(call, "id", None)
             if not name:
                 continue
+            called_tools.append(name)
             failure = _tool_call_failure(
                 results_by_id.get(str(call_id)) if call_id else None
             )
@@ -250,9 +261,15 @@ def run_deep_agent(agent, mission: dict, input_data: dict, callbacks=None, files
         evidence.append(
             {"source": "deep_agent", "kind": "summary", "summary": summary, "stub": False}
         )
-    return {
+    outcome = {
         "summary": summary,
         "evidence": evidence,
         "actions_taken": actions_taken,
         "errors": errors,
     }
+    if skill_maps:
+        outcome["plan_trace"] = {
+            skill_map.skill_name: compute_plan_trace(skill_map, called_tools)
+            for skill_map in skill_maps
+        }
+    return outcome

@@ -27,6 +27,7 @@ execution:
   agent_id: fault_investigator
   skills:
     - fault-investigation
+    - data-access
     - report-writing
   # Pre-retrieval into the agent's context window (SessionStart hook
   # `retrieval_context`): the agent's first model call already sees

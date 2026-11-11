@@ -14,6 +14,11 @@ the default ``StateBackend`` (in-memory — no real filesystem access is
 granted); the selected skill files are handed to the agent via
 ``invoke(files={...})`` and the middleware progressively discloses them
 (skill index in the system prompt, full text on read).
+
+A skill may also carry a ``map:`` frontmatter block (see
+``runtime/skills/map_plan.py``): a plan the Deep Agent follows, rendered
+into its instructions and traced deterministically from its tool calls.
+Skills without a map work exactly as before (``skill.map is None``).
 """
 
 from __future__ import annotations
@@ -23,6 +28,8 @@ import pathlib
 import re
 
 import yaml
+
+from runtime.skills.map_plan import SkillMap, parse_skill_map
 
 logger = logging.getLogger(__name__)
 
@@ -55,13 +62,19 @@ def _tokens(text: str) -> set[str]:
 
 
 class Skill:
-    """One parsed skill: frontmatter metadata + full file text."""
+    """One parsed skill: frontmatter metadata + full file text.
 
-    def __init__(self, name: str, description: str, keywords: list[str], raw: str):
+    ``map`` is the parsed ``map:`` frontmatter block (``SkillMap``) when
+    the skill declares one, else None — map-less skills are unaffected.
+    """
+
+    def __init__(self, name: str, description: str, keywords: list[str], raw: str,
+                 map: SkillMap | None = None):
         self.name = name
         self.description = description
         self.keywords = keywords
         self.raw = raw
+        self.map = map
 
     @property
     def body(self) -> str:
@@ -86,6 +99,35 @@ def _parse_keywords(value: object) -> list[str]:
         if token not in seen:
             seen.append(token)
     return seen
+
+
+_KNOWN_TOOLS_CACHE: set[str] | None = None
+_KNOWN_TOOLS_TRIED = False
+
+
+def _known_tool_names() -> set[str] | None:
+    """Registered tool names for map validation, best-effort.
+
+    Importing the tools package registers the built-ins (and any MCP
+    tools already loaded by the caller) in the global registry. When
+    the import fails — e.g. a test process without the infra stack —
+    return None and skip tool validation (structure is still checked).
+    Tried once per process; a later caller that needs validation reuses
+    the cached set.
+    """
+    global _KNOWN_TOOLS_CACHE, _KNOWN_TOOLS_TRIED
+    if _KNOWN_TOOLS_TRIED:
+        return _KNOWN_TOOLS_CACHE
+    _KNOWN_TOOLS_TRIED = True
+    try:
+        import runtime.tools  # noqa: F401  (registers built-in tools)
+        from runtime.tools.registry import registry
+
+        _KNOWN_TOOLS_CACHE = {entry.name for entry in registry.list()}
+    except Exception as exc:  # noqa: BLE001 — validation is best-effort
+        logger.debug("Skill map tool validation skipped: %s", exc)
+        _KNOWN_TOOLS_CACHE = None
+    return _KNOWN_TOOLS_CACHE
 
 
 def _parse_skill_file(path: pathlib.Path) -> Skill | None:
@@ -117,6 +159,7 @@ def _parse_skill_file(path: pathlib.Path) -> Skill | None:
         description=description,
         keywords=_parse_keywords(frontmatter.get("keywords")),
         raw=raw,
+        map=parse_skill_map(frontmatter, name, known_tools=_known_tool_names()),
     )
 
 

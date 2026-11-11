@@ -308,10 +308,25 @@ def deep_agent_node(state: MissionState) -> dict:
         # backend stays in use. No matching skill means no skills
         # argument at all — the run behaves exactly as before.
         from runtime.skills import SKILLS_SOURCE, select_skills, skill_files_for_run
+        from runtime.skills.map_plan import plan_trace_note, render_plan
 
         selected_skills = select_skills(mission, input_data)
         skill_sources = [SKILLS_SOURCE] if selected_skills else None
         skill_files = skill_files_for_run(selected_skills) if selected_skills else None
+        # Skill maps (Option C): skills that declare a ``map:`` become a
+        # plan in the agent's instructions — rendered once here and
+        # appended to whichever system prompt runs below (pinned version
+        # prompt, admin prompt, or default). The plan is skill-derived
+        # runtime context, like the skill files themselves, not part of
+        # the pinned prompt text. Skills without a map are unaffected.
+        mapped_skills = [
+            s for s in (selected_skills or []) if getattr(s, "map", None) is not None
+        ]
+        plan_block = (
+            "\n\n".join(render_plan(s.map) for s in mapped_skills)
+            if mapped_skills
+            else ""
+        )
         # Hooks (in-agent half): one middleware instance per run, over
         # the same registry the node already dispatched UserPromptSubmit
         # on. It denies dangerous tool calls, injects feedback on tool
@@ -342,6 +357,8 @@ def deep_agent_node(state: MissionState) -> dict:
                 "llm_temperature": agent_version.temperature,
             })
             system_prompt_text = agent_version.prompt_text
+            if plan_block:
+                system_prompt_text = system_prompt_text + "\n\n" + plan_block
             agent = build_deep_agent(
                 tools,
                 system_prompt=system_prompt_text,
@@ -356,6 +373,8 @@ def deep_agent_node(state: MissionState) -> dict:
             system_prompt_text = get_system_prompt(
                 ADMIN_SYSTEM_PROMPT, prompt_name="admin_bot"
             )
+            if plan_block:
+                system_prompt_text = system_prompt_text + "\n\n" + plan_block
             agent = build_deep_agent(
                 tools,
                 system_prompt=system_prompt_text,
@@ -367,6 +386,8 @@ def deep_agent_node(state: MissionState) -> dict:
             from runtime.prompts import get_system_prompt
 
             system_prompt_text = get_system_prompt(DEFAULT_SYSTEM_PROMPT)
+            if plan_block:
+                system_prompt_text = system_prompt_text + "\n\n" + plan_block
             agent = build_deep_agent(
                 tools,
                 system_prompt=system_prompt_text,
@@ -392,8 +413,26 @@ def deep_agent_node(state: MissionState) -> dict:
         )
         for overrun in prefix_overruns:
             logger.warning("Context budget overrun: %s", overrun)
-        outcome = run_deep_agent(agent, mission, input_data, callbacks=[handler], files=skill_files)
+        run_kwargs: dict = {"callbacks": [handler], "files": skill_files}
+        if mapped_skills:
+            run_kwargs["skill_maps"] = [s.map for s in mapped_skills]
+        try:
+            outcome = run_deep_agent(agent, mission, input_data, **run_kwargs)
+        except TypeError as exc:
+            # Doubles predating skill_maps (older tests, eval mocks)
+            # don't accept the kwarg — retry without it; the run
+            # proceeds, just without a plan trace. Any other TypeError
+            # is a real bug and is re-raised.
+            if "unexpected keyword argument 'skill_maps'" not in str(exc):
+                raise
+            run_kwargs.pop("skill_maps", None)
+            outcome = run_deep_agent(agent, mission, input_data, **run_kwargs)
         notes = [f"Deep agent: {outcome.get('summary', '')}"] if outcome.get("summary") else []
+        # Plan trace (Option C): deterministic audit of the run against
+        # each map — visited nodes, skipped nodes, tools outside the map.
+        plan_trace = outcome.get("plan_trace") or {}
+        for skill_name, trace in plan_trace.items():
+            notes.append(plan_trace_note(skill_name, trace))
         # Surface hook interventions in the state: one compact line in
         # notes plus the full per-dispatch record in hook_events, so a
         # run that was denied/feedbacked/continued is explainable from
@@ -470,6 +509,10 @@ def deep_agent_node(state: MissionState) -> dict:
             # the model's prose summary, which is not rewritten.
             result["tool_failures"] = list(tool_failures)
             notes.append("Tool failures reported: " + "; ".join(tool_failures))
+        if plan_trace:
+            # Additive only: validate_results checks the declared
+            # output-schema keys and ignores extra keys.
+            result["plan_trace"] = plan_trace
         return {
             "evidence": outcome.get("evidence") or [],
             "result": result,
