@@ -70,6 +70,14 @@ Mỗi execution ghi lại `agent_version` (version đã chạy) và
 `agent_version_drift` trên dòng `executions` — xem lại được lần chạy
 nào dùng config nào.
 
+`agent_version` là NULL khi run không qua Deep Agent — tức run hybrid
+chỉ chạy capability (đủ evidence nên không escalate) — dù đã có active
+version. NULL nghĩa là "không chạy Deep Agent (capability-only)",
+không phải "không có version". Agent vẫn tra lại được qua
+`execution.agent_id` (lưu lúc tạo execution từ `mission.agent_id`).
+`agent_version_drift` khi đó là false (không có tool nào của agent
+được dùng nên không có gì để drift).
+
 ## Quan hệ với MLflow Prompt Registry
 
 `scripts/register_prompts.py` vẫn là nơi đăng ký text prompt lên

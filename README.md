@@ -744,7 +744,10 @@ Lúc chạy, `deep_agent_node` dùng active version: prompt đã pin (không
 lookup MLflow), model/temperature đã pin, `allowed_tools` thành cổng
 chặn thật trong `registry.check()`. Drift (tool live khác manifest đã
 pin) được log warning và ghi `agent_version_drift=true` trên execution;
-mỗi execution cũng ghi `agent_version` đã chạy.
+mỗi execution cũng ghi `agent_version` đã chạy. Ngoại lệ: run hybrid
+chỉ chạy capability (không escalate tới Deep Agent) thì `agent_version`
+là NULL — NULL nghĩa là "không chạy Deep Agent", agent vẫn tra được
+qua `execution.agent_id`.
 
 ## 19. Hooks — vòng đời của một lần chạy agent (trích xuất từ Hooks v2)
 

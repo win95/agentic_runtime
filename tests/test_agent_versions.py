@@ -7,6 +7,7 @@ version path is tested without a model.
 
 import pytest
 
+import infra.repositories as repositories
 from app import models
 from app.core.db import SessionLocal
 from app.services import agent_version_service as avs
@@ -25,6 +26,37 @@ ADMIN_TOOLS = {
 def _seed_agents(db_session):
     load_missions.main()
     return db_session
+
+
+def _patch_capability_repositories(monkeypatch):
+    """Repository-shaped rows (same as tests/test_mission_graph.py) —
+    enough substantive evidence that a hybrid run never escalates."""
+    monkeypatch.setattr(
+        repositories,
+        "search_fault_history",
+        lambda *a, **k: (
+            [
+                {"id": "fh-1", "code": "F-101", "title": "Door sensor fault"},
+                {"id": "fh-2", "code": "F-204", "title": "Motor overheating"},
+            ],
+            False,
+        ),
+    )
+    monkeypatch.setattr(
+        repositories,
+        "get_maintenance_records",
+        lambda *a, **k: ([{"id": "mr-1", "action": "Sensor cleaned"}], False),
+    )
+    monkeypatch.setattr(
+        repositories,
+        "search_documents",
+        lambda *a, **k: ([{"doc_id": "d1", "title": "Door sensor doc"}], False),
+    )
+    monkeypatch.setattr(
+        repositories,
+        "query_asset_relationships",
+        lambda *a, **k: ([{"from": "O21", "type": "HAS_COMPONENT", "to": "motor-M2"}], False),
+    )
 
 
 def test_manifest_covers_all_built_in_tools():
@@ -206,6 +238,44 @@ def test_node_enforces_version_allowed_tools(db_session, monkeypatch):
     assert seen["tools"] == ["search_fault_history"]
 
 
+FAULT_TOOLS = {
+    "calculate_failure_rate",
+    "get_maintenance_records",
+    "get_sensor_data",
+    "query_asset_relationships",
+    "search_fault_history",
+    "search_technical_documents",
+}
+
+
+def test_fault_agent_receives_all_six_tools(db_session, monkeypatch):
+    """F1 fix (2026-11-11): the fault agent lists six tools in
+    allowed_tools, and the seeded mission now declares all five
+    capabilities (incl. sensor_data + asset_relations), so the
+    capability gate must let all six through to the Deep Agent.
+    Before the fix only four arrived."""
+    _seed_agents(db_session)
+    mission = mission_service.get_mission(db_session, "fault_analysis")
+    mission_dict = mission_service.mission_to_dict(mission)
+    assert set(mission_dict["capabilities"]) >= {
+        "fault_history", "maintenance_analysis", "knowledge_retrieval",
+        "sensor_data", "asset_relations",
+    }
+    seen: dict = {}
+    _fake_agent(monkeypatch, seen)
+    state = {
+        "execution_id": "exec-av-f1", "mission_id": "fault_analysis",
+        "mission": mission_dict,
+        "input": {"asset_id": "O21", "start_date": "2026-10-01",
+                  "end_date": "2026-10-31"},
+        "mode": "autonomous", "plan": [], "evidence": [], "result": None,
+        "status": "RUNNING", "errors": [], "notes": [],
+    }
+    out = deep_agent_node(state)
+    assert out.get("agent_version") == 1
+    assert set(seen["tools"]) == FAULT_TOOLS
+
+
 def test_run_mission_carries_agent_version(db_session, monkeypatch):
     _seed_agents(db_session)
     mission = mission_service.get_mission(db_session, "system_admin")
@@ -218,6 +288,32 @@ def test_run_mission_carries_agent_version(db_session, monkeypatch):
     assert final["status"] == "SUCCEEDED", f"errors: {final.get('errors')}"
     assert final.get("agent_version") == 1
     assert final.get("agent_version_drift") is False
+
+
+def test_capability_only_run_keeps_agent_version_null(db_session, monkeypatch):
+    """Option C semantics (tran, 2026-11-10): a hybrid run that never
+    escalates keeps agent_version NULL — even though v1 is active —
+    because the version is resolved inside deep_agent_node only.
+    NULL means "no Deep Agent ran (capability-only)". The guard below
+    fails loudly if the run ever reaches the Deep Agent."""
+    _seed_agents(db_session)
+    _patch_capability_repositories(monkeypatch)
+
+    def _must_not_run(*args, **kwargs):
+        raise AssertionError("Deep Agent must not run in a capability-only test")
+
+    monkeypatch.setattr(deep_agent_module, "build_deep_agent", _must_not_run)
+    mission = mission_service.get_mission(db_session, "fault_analysis")
+    mission_dict = mission_service.mission_to_dict(mission)
+    final = run_mission(
+        mission_dict,
+        {"asset_id": "O21", "start_date": "2026-10-01", "end_date": "2026-10-31"},
+        "exec-av-capability-only",
+    )
+    assert final["status"] == "SUCCEEDED", f"errors: {final.get('errors')}"
+    assert len(final["evidence"]) >= 3  # the capability path really ran
+    assert final.get("agent_version") is None
+    assert not final.get("agent_version_drift")
 
 
 def test_versions_router(db_session, client):

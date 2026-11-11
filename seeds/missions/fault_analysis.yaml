@@ -42,6 +42,12 @@ capabilities:
   - fault_history
   - maintenance_analysis
   - knowledge_retrieval
+  # F1 fix (2026-11-11): sensor_data and asset_relations share the
+  # fault_analysis subgraph (deduped in capability_node) but must be
+  # declared here or registry.check() blocks get_sensor_data and
+  # query_asset_relationships from reaching the agent.
+  - sensor_data
+  - asset_relations
 
 output_schema:
   type: object

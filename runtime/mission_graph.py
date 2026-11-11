@@ -96,10 +96,20 @@ def capability_node(state: MissionState) -> dict:
     mission = state.get("mission") or {}
     capabilities = mission.get("capabilities") or []
     # Map business capability names to subgraph builders.
+    # NOTE (F1 fix, 2026-11-11): capability names do double duty — they
+    # route the capability node AND gate tools in registry.check(). The
+    # fault tools get_sensor_data (sensor_data) and
+    # query_asset_relationships (asset_relations) need their capability
+    # declared on the mission or the agent never receives them, even
+    # though the agent lists all six tools in allowed_tools. Both map
+    # to the same fault_analysis subgraph (deduped by `ran` below), so
+    # declaring them costs no extra subgraph run.
     capability_to_graph = {
         "fault_history": "fault_analysis",
         "maintenance_analysis": "fault_analysis",
         "knowledge_retrieval": "fault_analysis",
+        "sensor_data": "fault_analysis",
+        "asset_relations": "fault_analysis",
         "fault_analysis": "fault_analysis",
     }
     new_evidence: list = []

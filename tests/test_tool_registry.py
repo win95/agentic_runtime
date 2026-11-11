@@ -1,5 +1,9 @@
 """Tool Registry tests — registration, schemas, permission checks."""
 
+from pathlib import Path
+
+import yaml
+
 import runtime.tools  # noqa: F401 — importing registers the built-in tools
 from runtime.tools.registry import registry
 
@@ -61,6 +65,29 @@ def test_permission_check_denies_unlisted_capability():
     assert registry.check("get_sensor_data", FAULT_CONTEXT) is False
     assert registry.check("query_asset_relationships", FAULT_CONTEXT) is False
     assert registry.check("nonexistent_tool", FAULT_CONTEXT) is False
+
+
+def test_seeded_fault_mission_declares_all_tool_capabilities():
+    """F1 fix (2026-11-11): the seeded fault_analysis mission must
+    declare every capability its agent's tools need, or the gate
+    silently drops tools (get_sensor_data, query_asset_relationships)
+    from the agent. Reads the real YAML so the test tracks the config
+    instead of a hardcoded copy."""
+    mission_yaml = yaml.safe_load(
+        (Path(__file__).resolve().parents[1] / "seeds" / "missions"
+         / "fault_analysis.yaml").read_text(encoding="utf-8")
+    )
+    context = dict(FAULT_CONTEXT)
+    context["capabilities"] = mission_yaml["capabilities"]
+    names = {tool.name for tool in registry.get_langchain_tools(context)}
+    assert names == {
+        "search_fault_history",
+        "get_maintenance_records",
+        "search_technical_documents",
+        "query_asset_relationships",
+        "get_sensor_data",
+        "calculate_failure_rate",
+    }
 
 
 def test_permission_check_denies_unlisted_tool():
