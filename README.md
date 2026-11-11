@@ -848,3 +848,21 @@ vừa 24.832 token.
 không có tokenizer local để đếm chính xác (tiktoken đã tắt vì lý do
 này ở `llm_factory`), nên budget enforce trên ước lượng; vòng cắt
 chạy lại trước mỗi lượt model nên sai số giới hạn trong một turn.
+
+## 22. Slack notifications — chỉ báo khi lỗi + hành động admin
+
+Workspace `agentic-runtime`, kênh `#agent-activity`. Chỉ gửi khi
+execution `FAILED` (bất kỳ mission nào) hoặc khi mission
+`system_admin` `SUCCEEDED` với `actions_taken` không rỗng; truy vấn
+admin chỉ đọc và mọi execution thành công khác không báo. Tin nhắn là
+text ngắn tiếng Việt: trạng thái + mission + execution id + lỗi (cắt
+500 ký tự) hoặc danh sách hành động (tối đa 5 mục, mỗi mục 200 ký tự).
+
+- Code: `runtime/notifications/slack.py` (hàm thuần, stdlib `urllib`,
+  không import app code) — worker gọi best-effort sau khi persist
+  trạng thái cuối, lỗi gửi thông báo không bao giờ làm hỏng execution.
+- Cấu hình: `SLACK_WEBHOOK_URL` (trống = không gửi gì),
+  `SLACK_CHANNEL=#agent-activity` (ghi rõ kênh đích; webhook post về
+  kênh đã cấu hình lúc tạo), `SLACK_NOTIFICATIONS_ENABLED=true`.
+- Chi tiết (cách tạo Incoming Webhook, bảng phạm vi, cách kiểm tra):
+  `docs/slack-notifications.md`.

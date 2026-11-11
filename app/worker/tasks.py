@@ -131,6 +131,24 @@ def run_execution(self, execution_id: str) -> dict:
         execution.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
         db.commit()
         logger.info("Execution %s finished with status %s", execution_id, status)
+        # Slack notification (scope: failures + admin actions only).
+        # Best-effort, after persistence, never blocks the return.
+        try:
+            from app.config import settings
+            from runtime.notifications.slack import notify_execution
+
+            notify_execution(
+                execution_id=execution.id,
+                mission_id=execution.mission_id,
+                agent_id=execution.agent_id,
+                status=status,
+                output=output,
+                error=execution.error,
+                enabled=settings.slack_notifications_enabled,
+                webhook_url=settings.slack_webhook_url,
+            )
+        except Exception as exc:  # noqa: BLE001 — notify never blocks
+            logger.warning("Slack notification failed for %s: %s", execution_id, exc)
         return {"execution_id": execution_id, "status": status}
     except Exception as exc:
         db.rollback()
@@ -151,6 +169,28 @@ def run_execution(self, execution_id: str) -> dict:
                 execution.error = str(exc)[:2000]
                 execution.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 db.commit()
+                # Slack notification (FAILED always notifies when a
+                # webhook is configured). Best-effort, after persistence.
+                try:
+                    from app.config import settings
+                    from runtime.notifications.slack import notify_execution
+
+                    notify_execution(
+                        execution_id=execution.id,
+                        mission_id=execution.mission_id,
+                        agent_id=execution.agent_id,
+                        status="FAILED",
+                        output={},
+                        error=execution.error,
+                        enabled=settings.slack_notifications_enabled,
+                        webhook_url=settings.slack_webhook_url,
+                    )
+                except Exception as notify_exc:  # noqa: BLE001 — never mask
+                    logger.warning(
+                        "Slack notification failed for %s: %s",
+                        execution_id,
+                        notify_exc,
+                    )
         except Exception:  # noqa: BLE001 — last-resort persistence, never mask
             logger.exception("Could not persist FAILED status for %s", execution_id)
         raise

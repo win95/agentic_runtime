@@ -87,6 +87,19 @@ class Settings(BaseSettings):
     # side effects are unknown to this codebase.
     mcp_tool_capabilities: str = ""
 
+    # --- Slack notifications (Incoming Webhook, #agent-activity) ---
+    # Webhook URL for the workspace's Incoming Webhook app. Empty =
+    # notifications disabled (the notifier is a silent no-op); the URL
+    # is a secret, it lives only in .env, never in the repo.
+    slack_webhook_url: str = ""
+    # Documentary only for now: an Incoming Webhook posts to the channel
+    # configured when the webhook was created, not to this value. Kept
+    # so the intended target channel is explicit in config.
+    slack_channel: str = "#agent-activity"
+    # Master switch: False disables all Slack notifications even when
+    # a webhook URL is set.
+    slack_notifications_enabled: bool = True
+
     # Runtime
     checkpoint_enabled: bool = False
     execution_timeout_seconds: int = 3600
