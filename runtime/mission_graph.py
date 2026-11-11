@@ -447,11 +447,11 @@ def deep_agent_node(state: MissionState) -> dict:
             )
         elif (mission.get("agent_id") or "") == "admin_bot":
             from runtime.deep_agent import ADMIN_SYSTEM_PROMPT
-            from runtime.prompts import get_system_prompt
 
-            system_prompt_text = get_system_prompt(
-                ADMIN_SYSTEM_PROMPT, prompt_name="admin_bot"
-            )
+            # No-version fallback: the code constant (a copy of the YAML
+            # seed text) runs — the runtime never looks up MLflow for
+            # prompts (docs/agent-versioning.md).
+            system_prompt_text = ADMIN_SYSTEM_PROMPT
             if plan_block:
                 system_prompt_text = system_prompt_text + "\n\n" + plan_block
             prompt_for_budget = system_prompt_text
@@ -465,9 +465,11 @@ def deep_agent_node(state: MissionState) -> dict:
             )
         else:
             from runtime.deep_agent import DEFAULT_SYSTEM_PROMPT
-            from runtime.prompts import get_system_prompt
 
-            system_prompt_text = get_system_prompt(DEFAULT_SYSTEM_PROMPT)
+            # No-version fallback: the code constant (a copy of the YAML
+            # seed text) runs — the runtime never looks up MLflow for
+            # prompts (docs/agent-versioning.md).
+            system_prompt_text = DEFAULT_SYSTEM_PROMPT
             if plan_block:
                 system_prompt_text = system_prompt_text + "\n\n" + plan_block
             prompt_for_budget = system_prompt_text
@@ -503,17 +505,41 @@ def deep_agent_node(state: MissionState) -> dict:
         run_kwargs: dict = {"callbacks": [handler], "files": skill_files}
         if mapped_skills:
             run_kwargs["skill_maps"] = [s.map for s in mapped_skills]
-        try:
-            outcome = run_deep_agent(agent, mission, input_data, **run_kwargs)
-        except TypeError as exc:
-            # Doubles predating skill_maps (older tests, eval mocks)
-            # don't accept the kwarg — retry without it; the run
-            # proceeds, just without a plan trace. Any other TypeError
-            # is a real bug and is re-raised.
-            if "unexpected keyword argument 'skill_maps'" not in str(exc):
-                raise
-            run_kwargs.pop("skill_maps", None)
-            outcome = run_deep_agent(agent, mission, input_data, **run_kwargs)
+        # Tracing (docs/sessions.md): the execution/session identity rides
+        # in the LangSmith config of the agent invoke.
+        from runtime.tracing import build_run_metadata, build_run_tags
+
+        run_kwargs["trace_metadata"] = build_run_metadata(
+            state.get("execution_id") or "",
+            state.get("mission_id") or "",
+            mission.get("agent_id") or None,
+            state.get("session_id"),
+        )
+        run_kwargs["trace_tags"] = build_run_tags(
+            state.get("mission_id") or "",
+            mission.get("agent_id") or None,
+            state.get("session_id"),
+        )
+        # Doubles predating skill_maps / trace kwargs (older tests, eval
+        # mocks) don't accept them — retry without each unknown kwarg;
+        # the run proceeds, just without a plan trace / trace metadata.
+        # Any other TypeError is a real bug and is re-raised. Each retry
+        # strips at least one kwarg, so the loop always terminates.
+        while True:
+            try:
+                outcome = run_deep_agent(agent, mission, input_data, **run_kwargs)
+                break
+            except TypeError as exc:
+                msg = str(exc)
+                if "unexpected keyword argument 'skill_maps'" in msg:
+                    run_kwargs.pop("skill_maps", None)
+                elif "unexpected keyword argument 'trace_metadata'" in msg:
+                    run_kwargs.pop("trace_metadata", None)
+                    run_kwargs.pop("trace_tags", None)
+                elif "unexpected keyword argument 'trace_tags'" in msg:
+                    run_kwargs.pop("trace_tags", None)
+                else:
+                    raise
         notes = [f"Deep agent: {outcome.get('summary', '')}"] if outcome.get("summary") else []
         # Option B session history: one line saying how many prior
         # turns the agent was shown (the turns themselves are in the
@@ -971,16 +997,36 @@ def run_mission(
         "session_id": session_id,
         "session_history": session_history,
     }
+    # Tracing (docs/sessions.md): the execution/session identity rides
+    # in the LangSmith config (metadata + tags, propagated to child
+    # runs) and in one tagged MLflow run per execution (autolog traces
+    # link to it via mlflow.sourceRun).
+    from runtime.tracing import (
+        build_run_metadata,
+        build_run_tags,
+        mlflow_execution_run,
+    )
+
+    agent_id = mission.get("agent_id") or ""
+    trace_metadata = build_run_metadata(
+        execution_id, mission.get("mission_id", ""), agent_id or None, session_id
+    )
+    trace_tags = build_run_tags(
+        mission.get("mission_id", ""), agent_id or None, session_id
+    )
     # The checkpointer context must stay open for the whole invoke: the
     # saver borrows the connection from PostgresSaver.from_conn_string.
-    with get_checkpointer() as checkpointer:
-        graph = (
-            build_mission_graph(checkpointer=checkpointer)
-            if checkpointer
-            else mission_graph
-        )
-        config = (
-            {"configurable": {"thread_id": execution_id}} if checkpointer else None
-        )
-        final_state = graph.invoke(initial_state, config=config)
+    with mlflow_execution_run(
+        execution_id, mission.get("mission_id", ""), agent_id or None, session_id
+    ):
+        with get_checkpointer() as checkpointer:
+            graph = (
+                build_mission_graph(checkpointer=checkpointer)
+                if checkpointer
+                else mission_graph
+            )
+            config: dict = {"metadata": trace_metadata, "tags": trace_tags}
+            if checkpointer:
+                config["configurable"] = {"thread_id": execution_id}
+            final_state = graph.invoke(initial_state, config=config)
     return dict(final_state)

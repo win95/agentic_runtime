@@ -375,17 +375,22 @@ docker compose run --rm mlflow mlflow db upgrade postgresql://postgres:postgres@
 
 ### Prompt Registry
 
-System prompt của Deep Agent (`fault_investigator`) nằm trong Prompt
-Registry của MLflow — đổi prompt không cần deploy lại code:
+System prompt của Deep Agent được đăng ký lên Prompt Registry của
+MLflow làm bản sao để review/rollback — **runtime không bao giờ đọc
+registry để lấy prompt** (xem `docs/agent-versioning.md`). Prompt chạy
+là text đã pin trong `AgentVersion`, hoặc khi chưa có version active
+thì là hằng số trong `runtime/deep_agent.py` (bản sao của text trong
+YAML seed). Sửa prompt trên MLflow mà không re-seed / tạo version mới
+thì run vẫn dùng text cũ.
 
 ```bash
 python scripts/register_prompts.py            # đăng ký version mới + gắn alias production
 python scripts/register_prompts.py --alias staging   # gắn alias khác
 ```
 
-`runtime/prompts.py` load theo thứ tự `@production` → `@latest` → fallback
-là hằng số `DEFAULT_SYSTEM_PROMPT` trong `runtime/deep_agent.py`. Chưa đăng
-ký prompt hoặc server không tới được thì agent vẫn chạy bằng fallback.
+Muốn đổi prompt thật: sửa YAML agent + hằng số trong
+`runtime/deep_agent.py`, chạy script trên (đăng ký bản sao mới), rồi
+re-seed hoặc `scripts/register_agent_version.py` để thành version mới.
 
 ### Eval
 
@@ -717,7 +722,9 @@ còn lại, và giới hạn thiệt hại.
 
 Sau khi đổi system prompt trong code, chạy lại
 `python scripts/register_prompts.py` để đăng ký phiên bản mới lên
-MLflow Prompt Registry (cần MLflow server đang chạy).
+MLflow Prompt Registry (cần MLflow server đang chạy), rồi re-seed
+hoặc `scripts/register_agent_version.py` để text mới thành version
+mới — chỉ đăng ký lên registry thì run vẫn dùng text cũ.
 
 ## 17. Batch ingest — dữ liệu thật theo lô (Phương án B)
 
@@ -768,7 +775,9 @@ version mới được tạo. Rollback qua API:
 
 Lúc chạy, `deep_agent_node` dùng active version: prompt đã pin (không
 lookup MLflow), model/temperature đã pin, `allowed_tools` thành cổng
-chặn thật trong `registry.check()`. Drift (tool live khác manifest đã
+chặn thật trong `registry.check()`. Khi không có version active thì
+prompt chạy là hằng số trong code (bản sao của YAML) — cũng không
+lookup MLflow. Drift (tool live khác manifest đã
 pin) được log warning và ghi `agent_version_drift=true` trên execution;
 mỗi execution cũng ghi `agent_version` đã chạy — version được resolve
 một lần trong `run_mission` trước khi rẽ nhánh nên cả run hybrid chỉ
@@ -942,5 +951,10 @@ số evidence, lỗi nếu có — không bơm full evidence).
   renderer mới là nơi enforce.
 - Checkpointer không đổi: `thread_id` vẫn là execution id (không
   resume LangGraph theo session); lịch sử được inject tường minh.
+- Trace được theo session: LangSmith filter theo metadata
+  `session_id` / tag `session:<id>`; MLflow search run theo tag
+  `session_id` (mỗi execution mở 1 run `execution-<id>` có tag;
+  trace autolog link vào run qua `mlflow.sourceRun`). Best-effort:
+  tracing off hay server down thì chạy không tag, không fail run.
 - Chi tiết (ngữ nghĩa, dạng từng lượt, bảng giới hạn, API, những gì
   KHÔNG có): `docs/sessions.md`.

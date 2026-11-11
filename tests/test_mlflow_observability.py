@@ -1,20 +1,23 @@
-"""MLflow 3.x observability tests — tracing setup, prompt fallback, registry.
+"""MLflow 3.x observability tests — tracing setup, prompt registry write.
 
-Offline only: no MLflow server, no LiteLLM proxy, no real key. The prompt
-round-trip test uses a throwaway local SQLite backend (real MLflow code,
-no network).
+Offline only: no MLflow server, no LiteLLM proxy, no real key. The
+register round-trip test uses a throwaway local SQLite backend (real
+MLflow code, no network).
+
+Note: the runtime never READS prompts from the registry
+(docs/agent-versioning.md) — the registry only holds a downstream copy
+for review/rollback, so there is no read-path test here.
 """
 
 import importlib.util
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import mlflow
 import pytest
 
 import infra.mlflow_setup as mlflow_setup
-import runtime.prompts as prompts_module
 from app.config import settings
+from runtime.deep_agent import ADMIN_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -22,10 +25,8 @@ ROOT = Path(__file__).resolve().parents[1]
 @pytest.fixture(autouse=True)
 def _reset_mlflow_setup():
     mlflow_setup.reset_mlflow_setup_for_tests()
-    prompts_module.clear_prompt_cache()
     yield
     mlflow_setup.reset_mlflow_setup_for_tests()
-    prompts_module.clear_prompt_cache()
 
 
 def _load_script(name: str):
@@ -64,38 +65,21 @@ def test_setup_disabled_by_env(monkeypatch):
     assert mlflow_setup.setup_mlflow_tracing() is False
 
 
-def test_prompt_fallback_when_tracing_off(monkeypatch):
-    monkeypatch.setattr("infra.mlflow_setup.is_mlflow_tracing_enabled", lambda: False)
-    assert prompts_module.get_system_prompt("FALLBACK") == "FALLBACK"
-
-
-def test_prompt_fallback_when_load_fails(monkeypatch):
-    monkeypatch.setattr("infra.mlflow_setup.is_mlflow_tracing_enabled", lambda: True)
-    monkeypatch.setattr(
-        "mlflow.genai.load_prompt",
-        MagicMock(side_effect=RuntimeError("server down")),
-    )
-    assert prompts_module.get_system_prompt("FALLBACK") == "FALLBACK"
-
-
-def test_prompt_roundtrip_sqlite(monkeypatch, tmp_path):
-    """Real register/load round-trip against a local SQLite backend."""
+def test_register_prompts_sqlite_roundtrip(tmp_path):
+    """Write path still works: register_prompts.py stores the code
+    constants in the registry (the runtime never reads them back)."""
     import mlflow.genai as genai
 
+    module = _load_script("register_prompts")
     db_path = tmp_path / "mlflow.db"
-    mlflow.set_tracking_uri(f"sqlite:///{db_path}")
-    pv = genai.register_prompt(
-        name="fault_investigator",
-        template="You are a test investigator for {{asset}}.",
-        commit_message="test",
-        tags={"role": "system"},
-    )
-    genai.set_prompt_alias("fault_investigator", "production", pv.version)
-    monkeypatch.setattr("infra.mlflow_setup.is_mlflow_tracing_enabled", lambda: True)
-    assert prompts_module.get_system_prompt("FALLBACK") == (
-        "You are a test investigator for {{asset}}."
-    )
-    mlflow.set_tracking_uri("http://localhost:5000")
+    try:
+        assert module.main(["--tracking-uri", f"sqlite:///{db_path}"]) == 0
+        fault = genai.load_prompt("prompts:/fault_investigator@production")
+        assert fault.template == DEFAULT_SYSTEM_PROMPT
+        admin = genai.load_prompt("prompts:/admin_bot@production")
+        assert admin.template == ADMIN_SYSTEM_PROMPT
+    finally:
+        mlflow.set_tracking_uri("http://localhost:5000")
 
 
 def test_register_prompts_fails_cleanly_without_server(capsys):

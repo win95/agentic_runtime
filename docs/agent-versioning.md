@@ -45,7 +45,8 @@ POST /agents/{agent_id}/versions/{version}/activate
 
 `run_mission` resolve active version của `mission.agent_id` một lần
 trước khi rẽ nhánh (best-effort — DB lỗi hay chưa có version thì
-chạy như cũ: model từ env, prompt từ registry/fallback, không có
+chạy như cũ: model từ env, prompt từ hằng số trong code — bản sao của
+text trong YAML seed, không lookup MLflow — không có
 cổng allowed_tools); `deep_agent_node` dùng lại version đó theo số
 version, chỉ resolve lại khi node được gọi trực tiếp mà state chưa
 có version. Sau đó node làm như sau, theo thứ tự:
@@ -86,8 +87,12 @@ agent", không phải "không chạy Deep Agent". Agent vẫn tra lại được
 `scripts/register_prompts.py` vẫn là nơi đăng ký text prompt lên
 MLflow (để review/rollback prompt riêng lẻ). AgentVersion ghi lại
 `prompt_registry_version` của prompt đó (best-effort, chỉ khi chạy
-CLI với `--register-prompt`). Runtime không phụ thuộc MLflow để lấy
-prompt nữa — text đã pin trong version. Muốn đổi riêng prompt mà
+CLI với `--register-prompt`). **Runtime không bao giờ lookup MLflow
+để lấy prompt** — kể cả khi không có version nào active, prompt chạy
+là hằng số trong code (`runtime/deep_agent.py`, bản sao của text trong
+YAML seed); khi có version active thì prompt chạy là text đã pin trong
+version đó. Sửa prompt trên MLflow mà không re-seed / tạo version mới
+thì run vẫn dùng text cũ. Muốn đổi riêng prompt mà
 không đụng model/tool: sửa text, chạy `register_agent_version.py`
 (hoặc seed lại) để thành version mới.
 

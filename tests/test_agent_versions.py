@@ -8,12 +8,14 @@ version path is tested without a model.
 import pytest
 
 import infra.repositories as repositories
+import runtime.mission_graph as mission_graph_module
 from app import models
 from app.config import settings
 from app.core.db import SessionLocal
 from app.services import agent_version_service as avs
 from app.services import mission_service
 from runtime import deep_agent as deep_agent_module
+from runtime.deep_agent import ADMIN_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT
 from runtime.mission_graph import deep_agent_node, run_mission
 from seeds import load_missions
 
@@ -351,3 +353,103 @@ def test_versions_router(db_session, client):
     assert client.get("/agents/nope/versions").status_code == 404
     assert client.get("/agents/admin_bot/versions/99").status_code == 404
     assert client.post("/agents/admin_bot/versions/99/activate").status_code == 404
+
+
+# --- No-version prompt resolution (Part 2 fix) ---
+#
+# The runtime never looks up MLflow for prompts: with no active version
+# the node runs the code constant (a copy of the YAML seed text), even
+# when the registry is reachable and holds a different prompt. These
+# tests fail on the old code (the registry text would win) and pass on
+# the new code.
+
+
+def _no_version_mission(mission_id, agent_id, capabilities):
+    return {
+        "mission_id": mission_id,
+        "agent_id": agent_id,
+        "objective": "Test mission.",
+        "input_schema": {"type": "object", "properties": {}},
+        "output_schema": {"type": "object", "properties": {}},
+        "execution": {"mode": "autonomous"},
+        "capabilities": capabilities,
+    }
+
+
+def _fake_reachable_registry_with_other_text(monkeypatch):
+    """Pretend the MLflow registry is up and holds a DIFFERENT prompt."""
+    import mlflow.genai as genai
+
+    class _Version:
+        template = "REGISTRY TEXT — must never run"
+        version = 99
+
+    monkeypatch.setattr("infra.mlflow_setup.is_mlflow_tracing_enabled", lambda: True)
+    monkeypatch.setattr(genai, "load_prompt", lambda *a, **k: _Version())
+
+
+def _no_version_state(mission):
+    return {
+        "execution_id": "exec-nv-1",
+        "mission_id": mission["mission_id"],
+        "mission": mission,
+        "input": {"asset_id": "O21"},
+        "mode": "autonomous",
+        "plan": [],
+        "evidence": [],
+        "result": None,
+        "status": "RUNNING",
+        "errors": [],
+        "notes": [],
+    }
+
+
+def test_no_version_fault_branch_uses_code_constant(monkeypatch):
+    _fake_reachable_registry_with_other_text(monkeypatch)
+    monkeypatch.setattr(
+        mission_graph_module, "_resolve_agent_version", lambda agent_id: (None, False)
+    )
+    seen: dict = {}
+    _fake_agent(monkeypatch, seen)
+    out = deep_agent_node(
+        _no_version_state(
+            _no_version_mission(
+                "fault_analysis", "fault_investigator", ["fault_history"]
+            )
+        )
+    )
+    assert out.get("agent_version") is None
+    assert seen["system_prompt"] == DEFAULT_SYSTEM_PROMPT
+
+
+def test_no_version_admin_branch_uses_code_constant(monkeypatch):
+    _fake_reachable_registry_with_other_text(monkeypatch)
+    monkeypatch.setattr(
+        mission_graph_module, "_resolve_agent_version", lambda agent_id: (None, False)
+    )
+    seen: dict = {}
+    _fake_agent(monkeypatch, seen)
+    out = deep_agent_node(
+        _no_version_state(
+            _no_version_mission("system_admin", "admin_bot", ["system_admin"])
+        )
+    )
+    assert out.get("agent_version") is None
+    assert seen["system_prompt"] == ADMIN_SYSTEM_PROMPT
+
+
+def test_build_deep_agent_defaults_to_code_constant(monkeypatch):
+    """build_deep_agent() with no prompt uses DEFAULT_SYSTEM_PROMPT."""
+    import deepagents
+
+    captured: dict = {}
+
+    def fake_create_deep_agent(*args, **kwargs):
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(deepagents, "create_deep_agent", fake_create_deep_agent)
+    # No live LLM in tests: the model itself is irrelevant here.
+    monkeypatch.setattr(deep_agent_module, "get_chat_model", lambda: object())
+    deep_agent_module.build_deep_agent([])
+    assert captured["system_prompt"] == DEFAULT_SYSTEM_PROMPT

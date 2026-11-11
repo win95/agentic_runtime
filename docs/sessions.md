@@ -148,6 +148,36 @@ curl "localhost:8000/executions?session_id=sess-admin-1&limit=50" \
 422 for a malformed id. `GET /executions?session_id=...` with an
 unknown id simply returns `[]` (it is a filter, not an identifier).
 
+## Tracing a session on LangSmith / MLflow
+
+Every execution carries its session identity into the observability
+layer (implemented in `runtime/tracing.py`):
+
+- **LangSmith:** `run_mission` puts `metadata` (`execution_id`,
+  `mission_id`, `agent_id`, `session_id`) and `tags`
+  (`mission:<id>`, `agent:<id>`, `session:<id>`) into the LangChain
+  config of the graph invoke, and `deep_agent_node` forwards the same
+  pair into the Deep Agent invoke. LangChain propagates config
+  metadata/tags to child runs, so the whole trace tree of an
+  execution carries them. In the LangSmith UI, filter runs by metadata
+  `session_id` or by the tag `session:<id>` to see all turns of one
+  session. (Executions without a session simply omit the key/tag.)
+- **MLflow:** `mlflow.langchain.autolog` traces carry no session tag
+  of their own, but a trace created inside an active run is linked to
+  it (`trace_metadata["mlflow.sourceRun"] == run_id` — verified
+  against MLflow 3.18.0). `run_mission` therefore opens one nested run
+  per execution (`execution-<execution_id>`), tagged with
+  `session_id` / `execution_id` / `mission_id` / `agent_id`. In the
+  MLflow UI, search runs by `tags.session_id = '<id>'`; the run's
+  traces follow via the sourceRun link. Eval runs log no session
+  (they create no session).
+- **Best-effort only:** the MLflow run is skipped when tracing is off
+  or the tracking server is unreachable, and a tagging/teardown
+  failure only logs a warning — tracing never fails an execution.
+  Usage and audit rows (`llm_usage`, `audit_logs`) still carry only
+  `execution_id`; join them to `executions` on it to aggregate per
+  session.
+
 ## What is NOT included
 
 - **Full evidence is never injected** — only an evidence count per

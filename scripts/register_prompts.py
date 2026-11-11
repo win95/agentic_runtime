@@ -1,8 +1,10 @@
 """Register system prompts in the MLflow Prompt Registry.
 
-The registered prompts become the Deep Agents' system prompts (loaded by
-``runtime/prompts.py`` via the ``production`` alias, falling back to
-``@latest`` and then to the hardcoded defaults in ``runtime/deep_agent.py``).
+The registry holds a DOWNSTREAM COPY of the prompts for review and
+rollback only — the runtime never reads it (docs/agent-versioning.md).
+The prompts that actually run are the pinned text in an AgentVersion,
+or, when no version is active, the hardcoded constants in
+``runtime/deep_agent.py`` (kept identical to the YAML seed text).
 
 Note (Option C): the prompt alone does not pin an agent's behaviour —
 model, allowed tools and tool descriptions matter too. The full
@@ -17,10 +19,14 @@ Usage:
 Requires a reachable MLflow 3.x server. When the server is unreachable the
 script prints a clear one-line error and exits non-zero (no traceback).
 
-To roll out a new prompt version: edit the prompt text in
-``runtime/deep_agent.py``, run this script again (it creates a new immutable
-version), then move the alias:
+To roll out a new prompt version: edit the prompt text in the agent YAML
+(``seeds/agents/*.yaml``) and its mirror constant in
+``runtime/deep_agent.py``, run this script again (it creates a new
+immutable version), then move the alias:
     python scripts/register_prompts.py --alias production
+Then re-seed (or run ``scripts/register_agent_version.py``) so the new
+text becomes a new AgentVersion — editing the registry alone changes
+nothing at runtime.
 """
 
 from __future__ import annotations

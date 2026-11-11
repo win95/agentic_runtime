@@ -14,7 +14,6 @@ import json
 import logging
 
 from runtime.llm_factory import build_chat_model
-from runtime.prompts import get_system_prompt
 from runtime.security import MAX_INPUT_JSON_BYTES, wrap_data
 from runtime.skills.map_plan import SkillMap, compute_plan_trace
 
@@ -83,9 +82,12 @@ def build_deep_agent(tools: list, system_prompt: str | None = None, skills: list
                      model_config=None, middleware=None):
     """Create a Deep Agent (compiled LangGraph) over the given tools.
 
-    The system prompt defaults to the ``fault_investigator`` prompt from
-    the MLflow Prompt Registry, falling back to DEFAULT_SYSTEM_PROMPT when
-    the registry is unavailable (see ``runtime/prompts.py``). Pass
+    The system prompt defaults to DEFAULT_SYSTEM_PROMPT (the code
+    constant, kept identical to the YAML seed text — see
+    ``test_layer2_seed_prompts_match_constants``). The runtime never
+    looks up the MLflow Prompt Registry for prompts
+    (docs/agent-versioning.md); the registry only holds a downstream
+    copy for review/rollback (``scripts/register_prompts.py``). Pass
     ``model_config`` (a Settings object) to build the chat model from a
     specific model/temperature instead of the env-configured one — the
     Mission Graph does this when an active AgentVersion pins a
@@ -111,7 +113,7 @@ def build_deep_agent(tools: list, system_prompt: str | None = None, skills: list
     return create_deep_agent(
         model=model,
         tools=tools,
-        system_prompt=system_prompt or get_system_prompt(DEFAULT_SYSTEM_PROMPT),
+        system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT,
         skills=skills,
         middleware=middleware,
     )
@@ -172,7 +174,9 @@ def _tool_call_failure(result_message) -> str | None:
 
 
 def run_deep_agent(agent, mission: dict, input_data: dict, callbacks=None, files=None,
-                   skill_maps: list[SkillMap] | None = None) -> dict:
+                   skill_maps: list[SkillMap] | None = None,
+                   trace_metadata: dict | None = None,
+                   trace_tags: list[str] | None = None) -> dict:
     """Invoke the deep agent for one mission input.
 
     Returns {"summary": str, "evidence": [...], "actions_taken": [...],
@@ -196,6 +200,9 @@ def run_deep_agent(agent, mission: dict, input_data: dict, callbacks=None, files
     per skill, which plan nodes the agent visited (in order), which it
     skipped, and which called tools belong to no node — computed
     deterministically from the run's tool calls, failed calls included.
+    ``trace_metadata`` / ``trace_tags`` (built by ``runtime.tracing``)
+    go into the invoke config as LangSmith run metadata/tags, so the
+    agent's trace tree carries the execution/session identity.
     """
     objective = mission.get("objective", "")
     # Layer 2: the execution input is untrusted data, never instructions.
@@ -214,8 +221,14 @@ def run_deep_agent(agent, mission: dict, input_data: dict, callbacks=None, files
     input_payload: dict = {"messages": [{"role": "user", "content": prompt}]}
     if files:
         input_payload["files"] = files
-    config = {"callbacks": callbacks} if callbacks else None
-    if config is not None:
+    config: dict = {}
+    if callbacks:
+        config["callbacks"] = callbacks
+    if trace_metadata:
+        config["metadata"] = trace_metadata
+    if trace_tags:
+        config["tags"] = trace_tags
+    if config:
         result = agent.invoke(input_payload, config=config)
     else:
         # No callbacks: keep the plain call so mock agents with a
