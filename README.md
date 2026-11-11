@@ -7,7 +7,7 @@ tự hành, **Capability Graphs / Tools** cung cấp năng lực nghiệp vụ,
 
 > Đây là **MVP chạy được thật** (v0.1.0): LLM và embedding chạy qua proxy
 > LiteLLM chuẩn OpenAI (cấu hình bằng env), dữ liệu demo O21 nằm trong
-> Postgres/Qdrant/FalkorDB thật, report lưu vào MinIO. Xem mục
+> Postgres/Qdrant/Neo4j thật, report lưu vào MinIO. Xem mục
 > [Stub & giới hạn](#10-stub--giới-hạn) để biết phần nào vẫn là stub.
 
 ## 1. Tổng quan kiến trúc (6 lớp)
@@ -19,7 +19,7 @@ tự hành, **Capability Graphs / Tools** cung cấp năng lực nghiệp vụ,
 | 3 | **Agent Runtime — LangGraph** (`runtime/mission_graph.py`) | Một Mission Graph cho mỗi nhóm workflow: understand → router → capability / deep agent → validate → END. Hỗ trợ checkpoint Postgres (tùy chọn). |
 | 4 | **Autonomous Agent — Deep Agents** (`runtime/deep_agent.py`) | Lập kế hoạch, phân rã công việc, dùng subagents và tools. Nằm **bên trong** Mission Graph (Deep Agents build trên LangGraph, trả về compiled graph). |
 | 5 | **Capability & Tool Layer** (`runtime/capabilities/`, `runtime/tools/`) | Capability = LangGraph subgraph tái sử dụng (vd: `fault_analysis`). Tool = hành động nhỏ Agent có thể gọi. Quyền thực tế kiểm tra ở runtime theo mission/tenant/execution. |
-| 6 | **Data & Observability** (`infra/`) | PostgreSQL, Redis, Qdrant, FalkorDB, MinIO, MLflow, LangSmith (chỉ quan sát, không phải nơi lưu trạng thái). |
+| 6 | **Data & Observability** (`infra/`) | PostgreSQL, Redis, Qdrant, Neo4j, MinIO, MLflow, LangSmith (chỉ quan sát, không phải nơi lưu trạng thái). |
 
 ### Lưu trữ
 
@@ -48,7 +48,7 @@ Ví dụ: *“Phân tích nguyên nhân các lỗi của thang máy O21 trong th
    xác định chiến lược (mode `hybrid` của mission này).
 4. **Capability Graph chạy trước** — `fault_analysis` chạy các node: lịch sử lỗi
    (Postgres), bảo trì (Postgres), tìm tài liệu (RAG/Qdrant), quan hệ thiết bị
-   (FalkorDB), rồi tổng hợp evidence.
+   (Neo4j), rồi tổng hợp evidence.
 5. **Deep Agent (nếu evidence chưa đủ)** — lập kế hoạch điều tra thêm, tự quyết
    định gọi tools cho đến khi đủ evidence.
 6. **Validate kết quả** — kiểm tra đủ evidence, đúng output schema
@@ -101,7 +101,7 @@ docker compose up -d --build
 - Qdrant: http://localhost:6333
 - MLflow (tùy chọn): `docker compose --profile observability up -d`
 
-Compose có healthcheck cho postgres, redis, qdrant, falkordb, minio;
+Compose có healthcheck cho postgres, redis, qdrant, neo4j, minio;
 `api` và `worker` chỉ chạy khi các service hạ tầng đã healthy.
 
 ### Bước 3: nạp mission mẫu + dữ liệu demo
@@ -114,7 +114,7 @@ python -m seeds.load_missions
 ```
 
 Dữ liệu demo cho thang máy O21, tháng 10/2026 (8 lỗi + 6 bảo trì trong
-PostgreSQL, 6 tài liệu kỹ thuật trong Qdrant, 5 quan hệ trong FalkorDB)
+PostgreSQL, 6 tài liệu kỹ thuật trong Qdrant, 5 quan hệ trong Neo4j)
 được nạp bằng:
 
 ```bash
@@ -134,7 +134,8 @@ demo bằng dữ liệu thật của bạn:
 - Qdrant: index tài liệu kỹ thuật thật vào collection
   `technical_documents` (vector dim được đo từ probe embedding của model
   bạn cấu hình, không hardcode 1536/3072).
-- FalkorDB: ghi quan hệ tài sản thật vào graph (ví dụ `PART_OF`,
+- Neo4j: ghi quan hệ tài sản thật vào graph qua ontology canonical
+  (xem §20.1) thay vì MERGE Cypher trực tiếp (ví dụ `PART_OF`,
   `HAS_COMPONENT`).
 
 Đường đưa dữ liệu thật vào theo lô (không cần viết code nạp tay):
@@ -227,7 +228,7 @@ make run-worker   # celery -A app.worker.celery_app worker --loglevel=info
 
 Worker cần Redis đang chạy: cài local rồi chạy `redis-server`, hoặc dùng
 compose chỉ cho Redis: `docker compose up -d redis`. API/DB cũng vậy:
-Postgres (`DATABASE_URL`), Qdrant, FalkorDB, MinIO đều có thể lấy từ
+Postgres (`DATABASE_URL`), Qdrant, Neo4j, MinIO đều có thể lấy từ
 compose (`docker compose up -d postgres redis qdrant neo4j minio`)
 trong khi API + worker chạy local — cách lai này tiện khi debug.
 
@@ -419,7 +420,7 @@ Xem đầy đủ trong `.env.example`. Các biến quan trọng:
 | `ANTHROPIC_API_KEY` | *(trống)* | Alternative provider: `pip install -e ".[anthropic]"`. Chỉ là alternative, mặc định dùng LiteLLM. |
 | `LANGSMITH_TRACING` / `LANGSMITH_API_KEY` / `LANGSMITH_PROJECT` / `LANGSMITH_ENDPOINT` | `true` / *(trống)* / `agentic-runtime` / `https://api.smith.langchain.com` | Bật trace khi có key. |
 | `QDRANT_URL` / `QDRANT_COLLECTION` | localhost:6333 / `technical_documents` | RAG retrieval |
-| `FALKOR_HOST` / `FALKOR_PORT` | localhost / 6379 | Knowledge Graph |
+| `NEO4J_URI` / `NEO4J_USERNAME` / `NEO4J_PASSWORD` / `NEO4J_DATABASE` / `GRAPH_DATABASE_BACKEND` | `bolt://localhost:7687` / `neo4j` / `changeme` / `neo4j` / `neo4j` | Knowledge Graph |
 | `MINIO_ENDPOINT` / `MINIO_BUCKET` / `MINIO_REPORTS_BUCKET` | localhost:9000 / `agentic-runtime` / `reports` | Artifacts, reports |
 | `MLFLOW_TRACKING_URI` | `http://localhost:5000` | MLflow server 3.x (compose service `mlflow`, profile `observability`) |
 | `MLFLOW_EXPERIMENT` / `MLFLOW_TRACING_ENABLED` | `agentic-runtime` / `true` | Experiment cho trace + eval; `false` = tắt tracing MLflow |
@@ -454,7 +455,7 @@ runtime/              LangGraph runtime: state, mission_graph, deep_agent,
                       skills/ (skill loader: SKILL.md selection)
 skills/               Skill playbooks (SKILL.md): fault-investigation,
                       admin-operations, report-writing + README
-infra/                Thin clients: postgres (reuse app core), qdrant, falkor,
+infra/                Thin clients: postgres (reuse app core), qdrant, neo4j,
                       minio, langsmith_setup, mlflow_setup (tracing MLflow 3.x),
                       repositories (Postgres/RAG/KG thật)
 seeds/                Mission mẫu + agent + schedule (YAML) + loader,
@@ -474,7 +475,7 @@ langgraph.json        Expose mission_graph cho `langgraph dev`
 
 ## 10. Stub & giới hạn
 
-- **Repository thật**: `infra/repositories.py` truy vấn Postgres/Qdrant/FalkorDB
+- **Repository thật**: `infra/repositories.py` truy vấn Postgres/Qdrant/Neo4j
   thật. Khi store không tới được, node ghi evidence lỗi (`kind: "error"`) và
   run vẫn hoàn thành — **không trả dữ liệu bịa**.
 - **Sensor data**: số liệu thật trong bảng Postgres `sensor_readings`
@@ -700,7 +701,8 @@ Chi tiết đầy đủ: `docs/ingest.md`. Dữ liệu thật đi vào hệ th�
 file JSON thả vào inbox (`ingest/inbox/` local, hoặc bucket MinIO
 `ingest-inbox`), một loại một file: `faults`, `maintenance`,
 `sensor_readings` → Postgres; `documents` → Qdrant (embed qua LiteLLM);
-`relations` → FalkorDB (MERGE). Beat chạy
+`relations` → ontology canonical (PostgreSQL), rồi projection sang
+Neo4j (MERGE). Beat chạy
 `app.worker.tasks.run_ingest_batch` mỗi `INGEST_INTERVAL_SECONDS`
 (mặc định 1800 = 30 phút); chạy tay bằng `make ingest`, kiểm tra
 định dạng bằng `make ingest-dry-run`.
@@ -825,8 +827,10 @@ alembic downgrade base       # gỡ toàn bộ (dev/test)
   task `ontology.projection_drain` hoặc CLI
   `python -m scripts.project_ontology_queue`.
 - **API:** `GET /ontology/entities/{type}/{key}`,
-  `/relationships`, `/knowledge`, `/graph`; drain nội bộ
-  `POST /ontology/internal/project-drain`.
+  `GET /ontology/entities/{type}/{key}/relationships`,
+  `GET /ontology/entities/{type}/{key}/knowledge`,
+  `GET /ontology/graph?root_type=&root_key=&depth=&limit=`; drain nội bộ
+  `POST /ontology/internal/project-drain` (xem `docs/ontology.md`).
 - **Env:** `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`,
   `GRAPH_DATABASE_BACKEND=neo4j` (xem `.env.example`).
 - **Seed:** `make migrate` rồi `make seed` (hoặc

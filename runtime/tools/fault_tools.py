@@ -56,14 +56,14 @@ def search_technical_documents(query: str, limit: int = 5) -> dict:
 
 @tool
 def query_asset_relationships(asset_id: str) -> dict:
-    """Query asset relationships from the knowledge graph (FalkorDB)."""
+    """Query asset relationships from the knowledge graph (Neo4j)."""
     try:
         relations, is_stub = repositories.query_asset_relationships(asset_id)
     except Exception as exc:  # noqa: BLE001 — a store failure is data, not a crash
         return {"asset_id": asset_id, "relations": [], "error": str(exc), "stub": False,
-                "provenance": "falkordb:asset_relationships"}
+                "provenance": "neo4j:asset_relationships"}
     return {"asset_id": asset_id, "relations": relations, "stub": is_stub,
-            "provenance": "falkordb:asset_relationships"}
+            "provenance": "neo4j:asset_relationships"}
 
 
 @tool

@@ -2,14 +2,17 @@
 
 Every loader is idempotent: Postgres rows upsert by fixed ``id``
 (``db.merge``), Qdrant points upsert by uuid5 of the document id
-(existing points are skipped), FalkorDB relations MERGE. Re-running a
+(existing points are skipped), canonical relations MERGE. Re-running a
 batch therefore changes nothing.
 
 Return shape per loader: ``(ok, failures)`` where ``failures`` is a
 list of ``{"row": <raw dict>, "error": <str>}``. Postgres loaders
 isolate failures per row (one SAVEPOINT per row, one commit at the
-end); the Qdrant/FalkorDB loaders work file-at-a-time, so a failure
-there fails every row in the file with the same error.
+end); the Qdrant loader works file-at-a-time, so a failure there fails
+every row in the file with the same error. The relations loader
+is per-row like the Postgres loaders (one SAVEPOINT per row) but
+commits nothing itself — it shares the batch session and the caller
+commits.
 """
 
 from __future__ import annotations
@@ -80,20 +83,60 @@ def load_documents(rows: list[DocumentRow], embeddings=None) -> tuple[int, list[
     return ok, []
 
 
-def load_relations(rows: list[RelationRow]) -> tuple[int, list[dict]]:
-    """Write relations into canonical ontology + projection drain."""
-    from infra.falkor_client import merge_asset_relations
+def load_relations(
+    db, rows: list[RelationRow], *, source: str = "ingest"
+) -> tuple[int, list[dict]]:
+    """Write relations into the canonical ontology (same transaction as
+    the batch — the caller commits). One SAVEPOINT per row, like
+    ``_merge_rows``: a bad row is quarantined, not fatal to the file.
 
-    tuples = [
-        (r.from_id, r.from_label, r.relation, r.to_id, r.to_label) for r in rows
-    ]
-    try:
-        merge_asset_relations(tuples)
-    except Exception as exc:  # noqa: BLE001 — file-level failure
-        return 0, [
-            {"row": r.model_dump(mode="json"), "error": str(exc)} for r in rows
-        ]
-    return len(rows), []
+    Each row gets a stable per-relation ``source_event_id`` so a
+    re-run replays instead of versioning again. Endpoints are created
+    only when missing: a relation row carries no endpoint properties,
+    so writing them would null out properties an earlier write stored.
+    Projection is not drained here; beat/CLI own it.
+    """
+    from ontology.canonical.provenance import WriteProvenance
+    from ontology.canonical.repository import CanonicalOntologyRepository
+    from ontology.canonical.write_service import OntologyWriteService
+
+    writer = OntologyWriteService(CanonicalOntologyRepository(db))
+    trace_id = f"ingest:{source}"
+    ok = 0
+    failures: list[dict] = []
+    for row in rows:
+        event_id = (
+            f"ingest:{source}:{row.from_id}:{row.relation}:{row.to_id}"
+        )
+        prov = WriteProvenance(trace_id=trace_id, source_event_id=event_id)
+        try:
+            with db.begin_nested():
+                writer.ensure_entity(
+                    entity_type=row.from_label,
+                    entity_key=row.from_id,
+                    properties=None,
+                    provenance=prov,
+                )
+                writer.ensure_entity(
+                    entity_type=row.to_label,
+                    entity_key=row.to_id,
+                    properties=None,
+                    provenance=prov,
+                )
+                writer.write_relationship(
+                    relationship_type=row.relation,
+                    source_type=row.from_label,
+                    source_key=row.from_id,
+                    target_type=row.to_label,
+                    target_key=row.to_id,
+                    properties=None,
+                    provenance=prov,
+                )
+                db.flush()
+            ok += 1
+        except Exception as exc:  # noqa: BLE001 — per-row isolation
+            failures.append({"row": row.model_dump(mode="json"), "error": str(exc)})
+    return ok, failures
 
 
 LOADERS = {

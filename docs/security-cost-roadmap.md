@@ -17,7 +17,7 @@ Trạng thái xuất phát (kiểm chứng 2026-11-08 trên code ở `main`):
 Mục tiêu: server có deploy lên cũng không ai sờ được vào ruột.
 
 - Chỉ mở cổng 443 qua reverse proxy có TLS (Caddy hoặc Nginx) trỏ vào API;
-  toàn bộ Postgres, Redis, Qdrant, FalkorDB, MinIO, MLflow chỉ nói chuyện
+  toàn bộ Postgres, Redis, Qdrant, Neo4j, MinIO, MLflow chỉ nói chuyện
   trong mạng docker nội bộ, không publish ra ngoài nữa.
 - Bắt buộc mật khẩu thật qua `.env`; chương trình tự dừng nếu còn dùng mật
   khẩu mặc định (Postgres, Redis, Qdrant API key, MinIO).

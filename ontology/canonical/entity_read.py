@@ -10,8 +10,18 @@ from ontology.canonical.repository import CanonicalOntologyRepository
 
 
 def get_entity(session: Session, entity_type: str, entity_key: str) -> dict[str, Any] | None:
+    """Canonical read for the API: only ``active`` entities are visible.
+
+    Deleted/archived rows return None (the API answers 404). The
+    filter lives here — NOT in ``repository.get_entity`` — because the
+    write service and the projection engine rely on the repository
+    returning non-active rows (write upsert + delete-from-graph
+    decisions).
+    """
     row = CanonicalOntologyRepository(session).get_entity(entity_type, entity_key)
     if row is None:
+        return None
+    if row.status in ("deleted", "archived"):
         return None
     return {
         "entity_type": row.entity_type,

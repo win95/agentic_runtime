@@ -62,7 +62,7 @@ Tool nào cũng trả dict thô về cho agent, không qua lớp lọc nào:
 | `search_fault_history` | `title`, `description`, `action`, `technician` | `infra/repositories.py` |
 | `get_maintenance_records` | `action`, `notes` | `infra/repositories.py` |
 | `search_technical_documents` | toàn bộ `content` tài liệu Qdrant | `infra/repositories.py` |
-| `query_asset_relationships` | nhãn quan hệ FalkorDB | `infra/repositories.py` |
+| `query_asset_relationships` | nhãn quan hệ Neo4j | `infra/repositories.py` |
 
 LangChain đưa kết quả tool về cho LLM dưới dạng tool message — LLM không
 phân biệt được đâu là dữ liệu, đâu là lệnh. Một dòng mô tả lỗi trong DB

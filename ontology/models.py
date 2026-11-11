@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, DateTime, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, DateTime, Index, Integer, String, Text, UniqueConstraint, text
 
 from app.models import Base, Mapped, mapped_column
 
@@ -67,6 +67,7 @@ class OntologyRelationship(Base):
             name="uq_ontology_relationships_edge",
         ),
         Index("ix_ontology_relationships_source", "source_type", "source_key"),
+        Index("ix_ontology_relationships_target", "target_type", "target_key"),
     )
 
 
@@ -89,6 +90,11 @@ class OntologyVersion(Base):
             "subject_ref",
             "version",
             name="uq_ontology_versions_ref_version",
+        ),
+        Index(
+            "ix_ontology_versions_subject_version",
+            "subject_ref",
+            text("version DESC"),
         ),
     )
 

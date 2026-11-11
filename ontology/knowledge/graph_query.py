@@ -61,16 +61,18 @@ def linked_documents(
     entity_type: str,
     entity_key: str,
     *,
+    limit: int = 50,
     store: GraphStore | None = None,
 ) -> list[dict[str, Any]]:
     store = store or get_graph_store()
     label = _label(entity_type)
+    limit = max(1, min(limit, 200))
     rel_filter = "|".join(_DOC_EDGE_TYPES)
     cypher = (
         f"MATCH (a:{label} {{id: $key}})-[r:{rel_filter}]-(d:Document) "
-        "RETURN d.id AS document_id, type(r) AS rel_type"
+        "RETURN d.id AS document_id, type(r) AS rel_type LIMIT $limit"
     )
-    rows = store.run_query(cypher, {"key": entity_key})
+    rows = store.run_query(cypher, {"key": entity_key, "limit": limit})
     return [{"document_id": r.get("document_id"), "rel_type": r.get("rel_type")} for r in rows]
 
 

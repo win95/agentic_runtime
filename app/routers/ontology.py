@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app import schemas
+from app.config import settings
 from app.core.db import get_db
 from app.core.security import require_api_key
 from ontology.canonical.entity_read import get_entity as read_entity
@@ -48,7 +49,10 @@ def get_entity(
 ):
     entity_type = _validate_entity_type(entity_type)
     entity_key = _validate_entity_key(entity_type, entity_key)
-    row = read_entity(db, entity_type, entity_key)
+    try:
+        row = read_entity(db, entity_type, entity_key)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"store unavailable: {exc}") from exc
     if row is None:
         raise HTTPException(status_code=404, detail="entity not found")
     return row
@@ -84,11 +88,15 @@ def get_entity_relationships(
     "/entities/{entity_type}/{entity_key}/knowledge",
     response_model=schemas.KnowledgeLinksRead,
 )
-def get_knowledge_links(entity_type: str, entity_key: str):
+def get_knowledge_links(
+    entity_type: str,
+    entity_key: str,
+    limit: int = Query(50, ge=1, le=200),
+):
     entity_type = _validate_entity_type(entity_type)
     entity_key = _validate_entity_key(entity_type, entity_key)
     try:
-        links = graph_query.linked_documents(entity_type, entity_key)
+        links = graph_query.linked_documents(entity_type, entity_key, limit=limit)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"graph unavailable: {exc}") from exc
     return schemas.KnowledgeLinksRead(
@@ -116,5 +124,6 @@ def get_subgraph(
 
 @router.post("/internal/project-drain", response_model=schemas.ProjectionDrainResult)
 def trigger_projection_drain(db: Session = Depends(get_db)):
-    result = drain_pending_projections(db)
+    # Same batch size as the beat task (settings.projection_drain_batch_size).
+    result = drain_pending_projections(db, limit=settings.projection_drain_batch_size)
     return schemas.ProjectionDrainResult(**result)

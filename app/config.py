@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     graph_features_enabled: bool = True
     projection_drain_interval_seconds: int = 60
     projection_drain_batch_size: int = 32
+    # Poison handling: a projection row that fails this many times is
+    # marked status="dead" and never re-claimed (see docs/ontology.md).
+    projection_max_attempts: int = 5
 
     # MinIO (files, artifacts, reports)
     minio_endpoint: str = "localhost:9000"

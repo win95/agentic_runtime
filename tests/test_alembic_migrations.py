@@ -51,7 +51,7 @@ def test_alembic_upgrade_head_then_downgrade_base(tmp_path):
     db_path = tmp_path / "migrate-test.db"
     result = _alembic(tmp_path, "upgrade", "head")
     assert result.returncode == 0, result.stderr
-    assert _version(db_path) == [("0003",)]
+    assert _version(db_path) == [("0004",)]
     tables = _tables(db_path)
     assert {"missions", "executions", "tools", "agent_versions"} <= tables
     assert "ontology_entities" in tables
@@ -71,6 +71,16 @@ def test_alembic_upgrade_head_then_downgrade_base(tmp_path):
             "uq_agent_versions_agent_version" in name or "autoindex" in name
             for name in indexes
         )
+        ontology_indexes = {
+            row[0]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master "
+                "WHERE tbl_name IN ('ontology_versions', "
+                "'ontology_relationships') AND type='index'"
+            )
+        }
+        assert "ix_ontology_versions_subject_version" in ontology_indexes
+        assert "ix_ontology_relationships_target" in ontology_indexes
     finally:
         conn.close()
 
@@ -84,4 +94,4 @@ def test_alembic_current_matches_head(tmp_path):
     assert result.returncode == 0, result.stderr
     result = _alembic(tmp_path, "current")
     assert result.returncode == 0, result.stderr
-    assert "0003" in result.stdout
+    assert "0004" in result.stdout

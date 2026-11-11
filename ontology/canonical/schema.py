@@ -30,6 +30,8 @@ def normalize_entity_label(raw: str) -> str:
     value = (raw or "").strip()
     if not _LABEL_RE.match(value):
         raise ValueError(f"Invalid entity_type identifier: {raw!r}")
+    if value not in ENTITY_TYPES_V1:
+        raise ValueError(f"entity_type {raw!r} not allowed in v1")
     return value
 
 

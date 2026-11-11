@@ -32,25 +32,22 @@ def seed_ontology_demo(*, trace_id: str = "seed-ontology-demo") -> dict:
             entity_key=ASSET_ID,
             properties=O21_PROPERTIES,
             provenance=prov,
-            force_update=True,
         )
 
         entities_written = 1
         relations_written = 0
         for from_id, from_label, rel_type, to_id, to_label in RELATIONS:
-            writer.write_entity(
+            writer.ensure_entity(
                 entity_type=from_label,
                 entity_key=from_id,
                 properties=None,
                 provenance=prov,
-                force_update=True,
             )
-            writer.write_entity(
+            writer.ensure_entity(
                 entity_type=to_label,
                 entity_key=to_id,
                 properties=None,
                 provenance=prov,
-                force_update=True,
             )
             writer.write_relationship(
                 relationship_type=rel_type,
@@ -60,7 +57,6 @@ def seed_ontology_demo(*, trace_id: str = "seed-ontology-demo") -> dict:
                 target_key=to_id,
                 properties=None,
                 provenance=prov,
-                force_update=True,
             )
             entities_written += 2
             relations_written += 1

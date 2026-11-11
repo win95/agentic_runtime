@@ -162,6 +162,10 @@ def process_file(db, name: str, content: bytes, *, force: bool = False,
     loader = LOADERS[row_type]
     if row_type in ("faults", "maintenance", "sensor_readings"):
         ok, load_failures = loader(db, valid)
+    elif row_type == "relations":
+        # Same session/transaction as the batch; the file name is the
+        # per-file trace id and each row gets a stable event id.
+        ok, load_failures = loader(db, valid, source=name)
     else:
         ok, load_failures = loader(valid)
     failures.extend(load_failures)
@@ -231,6 +235,8 @@ def retry_quarantine(db, *, limit: int = 100) -> dict:
         try:
             if row_type in ("faults", "maintenance", "sensor_readings"):
                 ok, failures = loader(db, [row])
+            elif row_type == "relations":
+                ok, failures = loader(db, [row], source=item.source)
             else:
                 ok, failures = loader([row])
         except Exception as exc:  # noqa: BLE001 — stays pending

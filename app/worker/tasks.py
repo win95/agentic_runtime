@@ -251,6 +251,13 @@ def projection_drain() -> dict:
 
     db = SessionLocal()
     try:
-        return drain_pending_projections(db, limit=settings.projection_drain_batch_size)
+        result = drain_pending_projections(db, limit=settings.projection_drain_batch_size)
+        if result.get("detail") == "neo4j_unhealthy":
+            logger.warning(
+                "Projection drain skipped: Neo4j unhealthy (processed=%s errors=%s)",
+                result.get("processed"),
+                result.get("errors"),
+            )
+        return result
     finally:
         db.close()

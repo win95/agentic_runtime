@@ -217,6 +217,8 @@ def test_merge_asset_relations_rejects_bad_label(monkeypatch):
 
 
 def test_merge_asset_relations_writes_canonical(monkeypatch):
+    """S7: the shim writes canonical rows but must NOT drain inline —
+    projection is owned by beat/CLI/the internal endpoint now."""
     drained: list[int] = []
 
     def _fake_drain(db, limit=32):
@@ -230,7 +232,24 @@ def test_merge_asset_relations_writes_canonical(monkeypatch):
     falkor_client.merge_asset_relations(
         [("O21", "Asset", "HAS_COMPONENT", "M2", "Component")]
     )
-    assert drained
+    assert not drained
+
+    from app.core.db import SessionLocal
+    from ontology.canonical.repository import CanonicalOntologyRepository
+
+    db = SessionLocal()
+    try:
+        repo = CanonicalOntologyRepository(db)
+        assert repo.get_entity("Asset", "O21") is not None
+        assert repo.get_entity("Component", "M2") is not None
+        assert (
+            repo.get_relationship(
+                "HAS_COMPONENT", "Asset", "O21", "Component", "M2"
+            )
+            is not None
+        )
+    finally:
+        db.close()
 
 
 _RANGE = {"asset_id": "O21", "start_date": "2026-10-01", "end_date": "2026-10-31"}

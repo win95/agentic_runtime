@@ -55,7 +55,7 @@ execution:
 `fault_analysis.yaml` khai báo đúng như trên. Nguồn nào cũng có thể
 chọn: `faults` (Postgres, tối đa 8 dòng gần nhất), `maintenance`
 (Postgres, 5 dòng), `documents` (Qdrant, mặc định 5 doc, `doc_limit`
-đổi được), `relations` (FalkorDB, 10 dòng), `sensors` (Postgres, tóm
+đổi được), `relations` (Neo4j, 10 dòng), `sensors` (Postgres, tóm
 tắt 1 dòng/metrics: số readings + max + ngày — không bao giờ dump
 raw readings). Không khai báo `sources` thì mặc định
 `[faults, documents, relations]`; `max_chars` mặc định 12.288 ký tự

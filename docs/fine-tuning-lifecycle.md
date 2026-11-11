@@ -2,7 +2,7 @@
 
 > Trạng thái: **chuẩn bị quy trình + scaffold, chưa train thật.**
 > Chưa có dữ liệu hoạt động thật (dữ liệu demo O21 đã xóa theo yêu cầu;
-> Postgres/Qdrant/FalkorDB đang trống). Mọi ví dụ trong tài liệu này và
+> Postgres/Qdrant/Neo4j đang trống). Mọi ví dụ trong tài liệu này và
 > trong `training/` đều là **dữ liệu tổng hợp, ghi rõ `source: "synthetic"`**,
 > chỉ để chạy thử pipeline — không được dùng làm bằng chứng chất lượng
 > model. Khi dữ liệu thật tới, nó đi qua đúng các hợp đồng dữ liệu ở mục 3.

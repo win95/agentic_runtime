@@ -200,5 +200,6 @@ class OntologySubgraphRead(BaseModel):
 class ProjectionDrainResult(BaseModel):
     processed: int = 0
     errors: int = 0
+    dead: int = 0
     claimed: int | None = None
     detail: str | None = None

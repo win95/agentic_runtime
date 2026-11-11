@@ -7,7 +7,7 @@ between calls, so name exact ids in the request text.
 
 ## Prerequisites
 
-- Docker backing services up (`postgres`, `redis`, `qdrant`, `falkordb`, `minio`, `mlflow`).
+- Docker backing services up (`postgres`, `redis`, `qdrant`, `neo4j`, `minio`, `mlflow`).
 - API on `http://localhost:8000` and a Celery worker consuming the queue.
 - Run from the repo root with the project venv: `.venv/bin/python ...`
 - `API_KEY` and `API_BASE_URL` are read from the repo-root `.env`

@@ -22,7 +22,8 @@ ingest.run.run_batch()
   ├─ load idempotent (ingest/loaders.py):
   │     Postgres (faults / maintenance / sensor_readings): db.merge theo id
   │     Qdrant (documents): upsert theo uuid5 của id, điểm đã có bị skip
-  │     FalkorDB (relations): MERGE
+  │     Ontology canonical (relations): OntologyWriteService,
+  │     rồi projection → Neo4j (MERGE)
   ├─ dòng lỗi → bảng ingest_quarantine (giữ nguyên row JSON + lỗi)
   └─ mỗi file → 1 dòng ingest_runs (SUCCEEDED / PARTIAL / FAILED)
 ```
@@ -40,7 +41,7 @@ Một file là một JSON array; mỗi phần tử là một dòng. Tên file qu
 | `maintenance.json` | id, asset_id, date, action, technician?, notes? | Postgres `maintenance_records` |
 | `sensor_readings.json` | id, asset_id, metric (lower_snake_case), value, unit?, at | Postgres `sensor_readings` |
 | `documents.json` | id, title, content (≤10000 ký tự), category? | Qdrant `technical_documents` |
-| `relations.json` | from_id, from_label, relation (UPPER_SNAKE_CASE), to_id, to_label | FalkorDB graph |
+| `relations.json` | from_id, from_label, relation (UPPER_SNAKE_CASE), to_id, to_label | Ontology canonical → Neo4j graph |
 
 `resolved_at` phải sau `occurred_at`. Ngày viết ISO (`2026-11-03T09:15:00`).
 
@@ -72,7 +73,7 @@ lần chạy sau skip file đã SUCCEEDED.
   sau skip. File PARTIAL (có dòng lỗi) được chạy lại — dòng ok cũ
   upsert lại không đổi, dòng lỗi cũ đã nằm trong quarantine.
 - **Idempotency**: Postgres upsert theo `id` cố định; Qdrant skip
-  point đã có; FalkorDB MERGE. Chạy lại cùng file không nhân đôi dữ liệu.
+  point đã có; canonical upsert + Neo4j MERGE (qua projection). Chạy lại cùng file không nhân đôi dữ liệu.
 - **Quarantine**: dòng lỗi không bị vứt — giữ nguyên row JSON trong
   `ingest_quarantine` (status `pending`) để sửa và chạy
   `python -m ingest.run --retry`. Sửa được thì status thành `retried`.
