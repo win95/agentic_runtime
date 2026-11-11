@@ -79,10 +79,18 @@ def call(method: str, path: str, body: dict | None = None,
         return exc.code, (json.loads(raw) if raw else None)
 
 
-def submit(mission_id: str, input_data: dict) -> dict:
-    """POST /executions and return the ExecutionRead payload."""
-    status, payload = call("POST", "/executions",
-                           {"mission_id": mission_id, "input": input_data})
+def submit(mission_id: str, input_data: dict,
+           session_id: str | None = None) -> dict:
+    """POST /executions and return the ExecutionRead payload.
+
+    ``session_id`` is optional (Option B, docs/sessions.md): executions
+    that share it form one conversation and later runs see the prior
+    turns. Omitted -> the API creates a fresh one-turn session.
+    """
+    body: dict = {"mission_id": mission_id, "input": input_data}
+    if session_id is not None:
+        body["session_id"] = session_id
+    status, payload = call("POST", "/executions", body)
     if status != 202 or not payload:
         raise RuntimeError(f"POST /executions -> HTTP {status}: {payload}")
     return payload

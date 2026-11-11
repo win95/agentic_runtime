@@ -1,9 +1,11 @@
 # Manual API test scripts
 
 Small scripts used to drive the running stack through the real API (not
-mock LLM, not the eval harness). Each `POST /executions` is a **new
-execution / new conversation** — the agents keep no memory between calls,
-so name exact ids in the request text.
+mock LLM, not the eval harness). By default each `POST /executions` is a
+**new execution / new conversation** — agents keep no memory between
+calls, so name exact ids in the request text. Passing a shared
+`session_id` is the exception: those executions form one conversation
+and later runs see the prior turns (`docs/sessions.md`).
 
 ## Prerequisites
 
@@ -28,6 +30,8 @@ so name exact ids in the request text.
 | `fault_autonomous.py` | Creates a throwaway mission with `mode=autonomous` so the Deep Agent/LLM path actually runs, then deletes its executions + mission rows from Postgres (`--keep` to leave them). |
 | `skill_map_check.py` | Confirms the skill-map feature through the real LLM. `map` case: throwaway autonomous mission with `skills=["data-access"]`; validates `plan_trace["data-access"]` against `skills/data-access/SKILL.md` (visited/skipped partition the nodes, tools belong to their node, deviations are outside the map, every successful action is traced). `mapless` case: `skills=["fault-investigation"]` must produce **no** `plan_trace`. `--strict` also requires the agent to visit every tool-bearing node in map order with no deviations. Cleans up unless `--keep`. |
 | `agent_turns.py` | Proves the agent loop runs **multiple model/tool turns inside one execution** (`system_admin`). Reads `llm_usage` + `audit_logs` from Postgres to print a timeline (model turn → its tools → next model turn) and checks: SUCCEEDED, `--min-turns` model calls (default 2), `--min-tools` tool calls (default 2), every audit row terminal. `--strict` also requires tools in ≥ 2 different model turns. `--request` overrides the admin request; `--cleanup` deletes the run's execution/result/usage/audit rows. |
+| `session_conversation.py` | Drives a real **conversation across executions** using Option B sessions (`docs/sessions.md`): 3 turns share one `session_id`; the bot must recall a random code it was given in turn 1, then carry it across 2 prior turns; `GET /sessions/{id}` must list the executions oldest first. `--control` asks the same question in a fresh session (must not know the code). `--cleanup` deletes the session's rows. |
+| `agent_config_check.py` | Asserts that runs use the config pinned in the active `AgentVersion`. Static: seed YAML ↔ `agents` row ↔ version snapshot, tool-manifest drift, `allowed_tools` in the registry, mission skills/hooks resolve, session limits parse. Live (2 turns, one fresh session): both runs record the version + no drift, `llm_usage` model matches, and the MLflow trace shows the system prompt **starts with** the pinned text, the pinned model/temperature, all `allowed_tools` at the model call (no registry tool leaks), the selected skills, and turn 2's session-history header with the agent's limits. `--no-trace` skips the MLflow assertions; `--cleanup` deletes the runs. |
 
 `_api.py` is the shared helper (`.env` loading, JSON calls, poll-until-terminal).
 
@@ -64,6 +68,14 @@ so name exact ids in the request text.
 # Multi-turn: stricter thresholds, custom request, delete the run afterwards
 .venv/bin/python scripts/manual/agent_turns.py --min-turns 3 --min-tools 4 --cleanup
 .venv/bin/python scripts/manual/agent_turns.py --request "Kiểm tra sức khỏe hệ thống"
+
+# Conversation across executions (Option B session, 3 turns + isolation control)
+.venv/bin/python scripts/manual/session_conversation.py --control --cleanup
+
+# Config check: seeds → agents row → version → the prompt/model/tools the LLM saw
+.venv/bin/python scripts/manual/agent_config_check.py
+.venv/bin/python scripts/manual/agent_config_check.py --cleanup
+.venv/bin/python scripts/manual/agent_config_check.py --no-trace   # no MLflow
 ```
 
 ## Notes from the manual test session (2026-11-10)
@@ -117,10 +129,13 @@ so name exact ids in the request text.
 
 ## Notes from the multi-turn check (2026-11-11)
 
-- There is **no conversation memory across executions** (README §8), and
-  no chat/thread API: a new `POST /executions` is a new conversation. So
-  `agent_turns.py` measures the agent loop inside one execution, using
-  the middleware rows as evidence.
+- `agent_turns.py` measures the agent loop **inside one execution**
+  using the middleware rows as evidence. Conversation memory **across**
+  executions is now Option B sessions (`docs/sessions.md`): executions
+  sharing a `session_id` are one conversation and later runs are shown
+  the prior turns; without a `session_id` a run is still its own
+  one-turn session, exactly as before. Use `session_conversation.py`
+  to exercise that.
 - `llm_usage.created_at` is written at `on_llm_end` (model call finished)
   and `audit_logs.created_at` when the tool starts, so sorting both gives
   `model turn 1 -> its tools -> model turn 2 -> ...`. A tool row belongs
@@ -139,3 +154,65 @@ so name exact ids in the request text.
 - `--cleanup` removes `ExecutionResult`, `LLMUsage`, `AuditLog`, then the
   `Execution`; without it the run stays in the admin history like any
   other `system_admin` execution.
+
+## Notes from the session conversation check (2026-11-11)
+
+- `session_conversation.py` proves the session memory end to end: turn 2
+  answers with the random code from turn 1, turn 3 carries it across two
+  prior turns, and `GET /sessions/{id}` lists the three executions oldest
+  first with `agent_id=admin_bot`, `mission_id=system_admin`.
+- The `--control` run asks the same recall question in a fresh session;
+  it must not know the code. That is the isolation check — without
+  `session_id` there is no history to read.
+- Each turn names a tool on purpose. `system_admin` declares the
+  `stop_completion` hook: if the agent tries to finish with zero tool
+  calls, the hook forces another model turn with a "gather evidence"
+  nudge. `qwen2.5-3b` then calls `system_health` (the only no-arg tool)
+  and its long output can drown out the recall. Naming a tool keeps the
+  turn deterministic while still requiring the model to read history.
+- Session history is the prior **input** + a result summary (answer,
+  root causes/recommendations) + an evidence **count**, not the full
+  evidence. The rerun therefore proves the stored turns are enough for
+  continuity without re-reading the live stores.
+- A session is bound to one agent + mission: joining it with a different
+  pair is rejected with 422 (`docs/sessions.md`).
+- `--cleanup` deletes the demo session's `ExecutionResult`/`LLMUsage`/
+  `AuditLog`/`Execution` rows (and the control session when `--control`
+  is set). Without it the conversation stays in the DB for inspection.
+
+## Notes from the agent config check (2026-11-11)
+
+- `agent_config_check.py` closes the "config vs. what ran" gap: a run can
+  succeed while the prompt/model/tools the model saw differ from the
+  active `AgentVersion` (edit the YAML without re-seeding, edit the
+  `agents` row without creating a version, or point the runtime at a
+  different model). The script asserts all four layers instead of only
+  the execution status.
+- **Prompt prefix** is read from the MLflow trace's `CHAT_MODEL` span,
+  not reconstructed locally: the system prompt the model received must
+  `startswith` the pinned `prompt_text`. The skills index and the
+  session-history block are appended after it by design, so the check is
+  a prefix, not equality.
+- **Model/temperature** come from the same span (`mlflow.llm.model`,
+  `invocation_params.temperature`), and `llm_usage.model` in Postgres is
+  checked as the runtime's own record.
+- **`allowed_tools`** must all be offered at the model call, and no
+  *registry* tool outside the list may leak through the gate. The 8
+  deepagents built-ins (`ls`, `read_file`, `write_file`, `edit_file`,
+  `glob`, `grep`, `task`, `delete`) are not in the registry gate; the
+  script reports them as a warning, not a failure (known behaviour, see
+  `docs/agent-versioning.md`).
+- **Session limits** are asserted on turn 2 of a fresh session: the
+  header must name the agent's own caps (`limited to N turn(s) / M
+  tokens for agent X`) and exactly one `<data source="session_history">`
+  block must be present. This proves the agent/version limits are the
+  ones applied, not the globals.
+- Traces are found by `execution_id`: search the experiment's runs for
+  `tags.execution_id`, then `search_traces(run_id=...)` (the autolog
+  trace links to the run via `metadata["mlflow.sourceRun"]`). The script
+  polls up to `--trace-wait` seconds because the tracking server can lag
+  the execution's SUCCEEDED state.
+- `--no-trace` runs the static + DB checks without MLflow (useful on a
+  stack without tracing); the prompt/model/tools checks are then
+  reported as skipped, not passed.
+
