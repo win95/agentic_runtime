@@ -3,7 +3,7 @@
 Asset: O21, a passenger elevator in building B1, October 2026.
 - PostgreSQL: 8 fault_history rows + 6 maintenance_records rows.
 - Qdrant: 6 technical documents, embedded with the configured model.
-- FalkorDB: asset relations, seeded with MERGE (idempotent).
+- Ontology (PG + Neo4j): asset relations via canonical write + projection.
 
 All seed functions are idempotent: re-running them changes nothing
 (deterministic ids / MERGE / point-id skip).
@@ -330,12 +330,10 @@ def seed_qdrant_demo(embeddings=None) -> dict:
 
 
 def seed_falkor_demo() -> dict:
-    """Seed asset relations with MERGE (idempotent)."""
-    from infra.falkor_client import merge_asset_relations
+    """Seed ontology relations (legacy entrypoint name)."""
+    from seeds.seed_ontology_demo import seed_ontology_demo
 
-    merge_asset_relations(RELATIONS)
-    logger.info("Seeded %d FalkorDB relations", len(RELATIONS))
-    return {"relations": len(RELATIONS)}
+    return seed_ontology_demo()
 
 
 def seed_tools_demo(db) -> dict:

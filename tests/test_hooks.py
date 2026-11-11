@@ -667,7 +667,7 @@ def test_retrieval_context_unavailable_sources_noted_not_raised(monkeypatch):
     assert decision is not None
     block = decision.additional_context
     assert "[documents — qdrant:technical_documents]" in block
-    assert "[relations — falkordb:asset_relationships]" in block
+    assert "[relations — neo4j:entity_relationships]" in block
     assert block.count("unavailable:") == 2  # both stubbed stores raise
 
 

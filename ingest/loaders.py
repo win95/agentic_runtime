@@ -81,7 +81,7 @@ def load_documents(rows: list[DocumentRow], embeddings=None) -> tuple[int, list[
 
 
 def load_relations(rows: list[RelationRow]) -> tuple[int, list[dict]]:
-    """MERGE relations into FalkorDB (file-level: all or nothing)."""
+    """Write relations into canonical ontology + projection drain."""
     from infra.falkor_client import merge_asset_relations
 
     tuples = [

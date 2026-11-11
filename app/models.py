@@ -366,3 +366,7 @@ class AuditLog(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     duration_ms: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+# Ontology canonical tables — side-effect import so Alembic sees metadata.
+from ontology import models as _ontology_models  # noqa: E402, F401

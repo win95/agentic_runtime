@@ -92,11 +92,14 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         falkor = seed_falkor_demo()
-        print(f"FalkorDB: seeded {falkor['relations']} relations for asset O21")
+        print(
+            f"Ontology/Neo4j: seeded {falkor.get('relations', 0)} relations "
+            f"for asset O21 (projection={falkor.get('projection', {})})"
+        )
     except Exception as exc:  # noqa: BLE001 — best-effort, reported clearly
         print(
-            f"WARNING: FalkorDB seed skipped: {exc}\n"
-            "  Start FalkorDB, then re-run this seed."
+            f"WARNING: Ontology seed skipped: {exc}\n"
+            "  Start Neo4j and run migrations, then re-run this seed."
         )
 
     print("Seed complete.")

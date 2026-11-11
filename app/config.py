@@ -59,9 +59,15 @@ class Settings(BaseSettings):
     qdrant_api_key: str = ""
     qdrant_collection: str = "technical_documents"
 
-    # FalkorDB (knowledge graph)
-    falkor_host: str = "localhost"
-    falkor_port: int = 6379
+    # Neo4j (ontology projection / knowledge graph)
+    graph_database_backend: str = "neo4j"
+    neo4j_uri: str = "bolt://localhost:7687"
+    neo4j_username: str = "neo4j"
+    neo4j_password: str = "changeme"
+    neo4j_database: str = "neo4j"
+    graph_features_enabled: bool = True
+    projection_drain_interval_seconds: int = 60
+    projection_drain_batch_size: int = 32
 
     # MinIO (files, artifacts, reports)
     minio_endpoint: str = "localhost:9000"

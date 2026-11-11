@@ -160,3 +160,45 @@ class ModelInfo(BaseModel):
     model: str
     default: bool = False
     note: str = ""
+
+
+# --- Ontology ---
+class OntologyEntityRead(BaseModel):
+    entity_type: str
+    entity_key: str
+    properties: dict[str, Any] = Field(default_factory=dict)
+    status: str
+    version: int
+    state_hash: str | None = None
+
+
+class EntityRelationshipRead(BaseModel):
+    from_id: str
+    rel_type: str
+    to_id: str
+    to_label: str | None = None
+
+
+class KnowledgeDocumentLink(BaseModel):
+    document_id: str | None = None
+    rel_type: str | None = None
+
+
+class KnowledgeLinksRead(BaseModel):
+    entity_type: str
+    entity_key: str
+    documents: list[KnowledgeDocumentLink] = Field(default_factory=list)
+
+
+class OntologySubgraphRead(BaseModel):
+    root_type: str
+    root_key: str
+    nodes: list[dict[str, Any]] = Field(default_factory=list)
+    relationships: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ProjectionDrainResult(BaseModel):
+    processed: int = 0
+    errors: int = 0
+    claimed: int | None = None
+    detail: str | None = None

@@ -364,7 +364,7 @@ _RETRIEVAL_SOURCES = {
         _document_lines,
     ),
     "relations": (
-        "[relations — falkordb:asset_relationships]",
+        "[relations — neo4j:entity_relationships]",
         _load_relations,
         _relation_lines,
     ),

@@ -28,7 +28,7 @@ tự hành, **Capability Graphs / Tools** cung cấp năng lực nghiệp vụ,
 | PostgreSQL | Mission, Agent, Tool metadata, execution, kết quả, fault_history, maintenance_records |
 | Redis | Celery queue, cache, trạng thái điều phối tạm thời |
 | Qdrant | Document embeddings, vector retrieval (`technical_documents`) |
-| FalkorDB | Knowledge Graph, entity relationships |
+| Neo4j | Knowledge graph (ontology L2 projection) |
 | MinIO | File, tài liệu, artifact, report (`reports` bucket) |
 | MLflow | Observability chính: trace LangGraph, Prompt Registry, eval runs (`agentic-runtime-eval`) |
 | LangSmith | Agent trace, graph execution, tool calls |
@@ -228,7 +228,7 @@ make run-worker   # celery -A app.worker.celery_app worker --loglevel=info
 Worker cần Redis đang chạy: cài local rồi chạy `redis-server`, hoặc dùng
 compose chỉ cho Redis: `docker compose up -d redis`. API/DB cũng vậy:
 Postgres (`DATABASE_URL`), Qdrant, FalkorDB, MinIO đều có thể lấy từ
-compose (`docker compose up -d postgres redis qdrant falkordb minio`)
+compose (`docker compose up -d postgres redis qdrant neo4j minio`)
 trong khi API + worker chạy local — cách lai này tiện khi debug.
 
 **Bước 5 — debug bằng LangGraph dev server:**
@@ -808,11 +808,29 @@ alembic downgrade base       # gỡ toàn bộ (dev/test)
 - `0002`: thêm cột `tools.read_only` (backfill `true`, `make seed`
   chạy lại sẽ sửa các tool ghi thành `false` theo registry) và unique
   constraint `(agent_id, version)` trên `agent_versions`.
+- `0003`: bảng ontology canonical (`ontology_entities`, relationships,
+  versions, `ontology_projection_state`) — nguồn ghi duy nhất cho KG.
 - Viết migration mới: `alembic revision -m "..."` rồi điền
   `upgrade()`/`downgrade()`; chạy `make test` (có test chạy
   `upgrade head` → `downgrade base` trên SQLite tạm).
 - `init_db()`/`create_all` vẫn còn cho test và dev nhanh, nhưng
   production dùng migration.
+
+## 20.1 Ontology runtime (PostgreSQL + Neo4j)
+
+- **L1 canonical:** ghi qua `OntologyWriteService` → PostgreSQL
+  (`ontology_*`). Ingest `relations` và `seeds/seed_ontology_demo.py`
+  dùng đường này (không MERGE Cypher trực tiếp).
+- **L2 projection:** queue `ontology_projection_state` → Celery beat
+  task `ontology.projection_drain` hoặc CLI
+  `python -m scripts.project_ontology_queue`.
+- **API:** `GET /ontology/entities/{type}/{key}`,
+  `/relationships`, `/knowledge`, `/graph`; drain nội bộ
+  `POST /ontology/internal/project-drain`.
+- **Env:** `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`,
+  `GRAPH_DATABASE_BACKEND=neo4j` (xem `.env.example`).
+- **Seed:** `make migrate` rồi `make seed` (hoặc
+  `python -m seeds.seed_ontology_demo` chỉ ontology).
 
 ## 21. Context window budget — 32.000 token (Phương án A)
 

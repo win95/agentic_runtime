@@ -45,5 +45,9 @@ celery_app.conf.update(
             "task": "app.worker.tasks.run_ingest_batch",
             "schedule": float(settings.ingest_interval_seconds),
         },
+        "ontology-projection-drain": {
+            "task": "ontology.projection_drain",
+            "schedule": float(settings.projection_drain_interval_seconds),
+        },
     },
 )

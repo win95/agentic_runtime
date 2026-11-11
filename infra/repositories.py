@@ -108,18 +108,34 @@ def search_documents(query: str, limit: int = 5):
     return [clean_text_fields(d) for d in docs], False
 
 
-def query_asset_relationships(asset_id: str):
-    """Asset relationships from the FalkorDB knowledge graph."""
-    from infra.falkor_client import query_asset_relationships as falkor_query
+def query_entity_relationships(entity_type: str, entity_key: str):
+    """KG neighbors for any entity (v1: label = entity_type, id = entity_key)."""
+    from infra.graph_client import query_entity_relationships as graph_query
 
     try:
-        relations = falkor_query(asset_id)
-    except Exception as exc:  # noqa: BLE001 — wrapped with a clear message
+        relations = graph_query(entity_type, entity_key)
+    except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
-            f"Could not query FalkorDB for asset {asset_id}: {exc}. "
-            "Is FalkorDB up? Load real asset relations into the graph."
+            f"Could not query graph for {entity_type}/{entity_key}: {exc}. "
+            "Is Neo4j up? Seed ontology demo + projection drain."
         ) from exc
     return [clean_text_fields(r) for r in relations], False
+
+
+def query_asset_relationships(asset_id: str):
+    """Asset relationships from the Neo4j knowledge graph."""
+    return query_entity_relationships("Asset", asset_id)
+
+
+def get_knowledge_links(entity_type: str, entity_key: str):
+    """Document links for an entity from the knowledge graph."""
+    from ontology.knowledge.graph_query import linked_documents
+
+    try:
+        links = linked_documents(entity_type, entity_key)
+    except Exception as exc:  # noqa: BLE001
+        raise RuntimeError(f"Could not query knowledge links: {exc}") from exc
+    return [clean_text_fields(d) for d in links], False
 
 
 def get_sensor_data(asset_id: str, start_date: str, end_date: str):

@@ -35,7 +35,7 @@ dependencies = [
     "langchain-mcp-adapters>=0.1,<1",
     "langsmith>=0.2,<1",
     "qdrant-client>=1.11,<2",
-    "falkordb>=1.0,<2",
+    "neo4j>=5.26,<6",
     "minio>=7.2,<8",
     # boto3: the MLflow *client* needs it to upload artifacts (e.g. eval
     # report.md) to the server's S3 (MinIO) artifact root. Without it,
@@ -68,7 +68,7 @@ anthropic = ["langchain-anthropic>=0.3,<2"]
 postgres-checkpoint = ["langgraph-checkpoint-postgres>=2.0,<4"]
 
 [tool.setuptools.packages.find]
-include = ["app*", "runtime*", "infra*", "seeds*"]
+include = ["app*", "runtime*", "infra*", "ingest*", "ontology*", "seeds*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -241,3 +241,16 @@ def run_ingest_batch(self) -> dict:
         return summary
     finally:
         db.close()
+
+
+@celery_app.task(name="ontology.projection_drain", max_retries=0)
+def projection_drain() -> dict:
+    """Beat task: project pending canonical rows to Neo4j."""
+    from app.config import settings
+    from ontology.projection.engine import drain_pending_projections
+
+    db = SessionLocal()
+    try:
+        return drain_pending_projections(db, limit=settings.projection_drain_batch_size)
+    finally:
+        db.close()

@@ -210,23 +210,27 @@ def test_wrap_data_escapes_closing_tag():
 
 # --- P1-12: Cypher identifiers are allowlisted ---------------------------
 def test_merge_asset_relations_rejects_bad_label(monkeypatch):
-    calls = []
-
-    class FakeGraph:
-        def query(self, cypher, params):
-            calls.append((cypher, params))
-
-    monkeypatch.setattr(falkor_client, "get_graph", lambda: FakeGraph())
     with pytest.raises(ValueError):
         falkor_client.merge_asset_relations(
-            [("O21", "Asset) MATCH (x", "HAS", "M2", "Motor")]
+            [("O21", "Asset) MATCH (x", "PART_OF", "B1", "Building")]
         )
-    assert calls == []
-    falkor_client.merge_asset_relations([("O21", "Asset", "HAS_COMPONENT", "M2", "Motor")])
-    assert len(calls) == 1
-    cypher, params = calls[0]
-    assert params == {"from_id": "O21", "to_id": "M2"}
-    assert "$from_id" in cypher and "$to_id" in cypher
+
+
+def test_merge_asset_relations_writes_canonical(monkeypatch):
+    drained: list[int] = []
+
+    def _fake_drain(db, limit=32):
+        drained.append(1)
+        return {"processed": 1, "errors": 0}
+
+    monkeypatch.setattr(
+        "ontology.projection.engine.drain_pending_projections",
+        _fake_drain,
+    )
+    falkor_client.merge_asset_relations(
+        [("O21", "Asset", "HAS_COMPONENT", "M2", "Component")]
+    )
+    assert drained
 
 
 _RANGE = {"asset_id": "O21", "start_date": "2026-10-01", "end_date": "2026-10-31"}

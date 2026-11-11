@@ -1,70 +1,59 @@
-"""FalkorDB client — knowledge graph / entity relationships (Layer 6)."""
+"""Deprecated FalkorDB shim — delegates to Neo4j graph_client.
+
+New code should import ``infra.graph_client`` directly.
+"""
 
 from __future__ import annotations
 
-import logging
-import re
-
-from app.config import settings
-
-logger = logging.getLogger(__name__)
-
-# Cypher has no parameters for labels / relationship types, so the
-# interpolated identifiers must be bare names — never user text.
-_CYPHER_IDENTIFIER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
-
-_graph = None
+from infra.graph_client import query_asset_relationships
 
 
 def get_graph():
-    """Lazily select the `knowledge` graph, or raise if unreachable."""
-    global _graph
-    if _graph is not None:
-        return _graph
-    from falkordb import FalkorDB
-
-    db = FalkorDB(host=settings.falkor_host, port=settings.falkor_port)
-    _graph = db.select_graph("knowledge")
-    return _graph
-
-
-def query_asset_relationships(asset_id: str, limit: int = 20) -> list[dict]:
-    """Return [{from, type, to}] relationships for one asset."""
-    graph = get_graph()
-    result = graph.query(
-        "MATCH (a:Asset {id: $asset_id})-[r]-(b) "
-        "RETURN a.id AS from_id, type(r) AS rel_type, b.id AS to_id "
-        "LIMIT $limit",
-        {"asset_id": asset_id, "limit": limit},
-    )
-    return [
-        {"from": row[0], "type": row[1], "to": row[2]} for row in result.result_set
-    ]
+    raise RuntimeError("FalkorDB removed; use Neo4j via infra.graph_client")
 
 
 def merge_asset_relations(relations: list[tuple]) -> None:
-    """Idempotently create nodes + relationships with MERGE.
+    """Legacy hook — canonical ingest should use OntologyWriteService."""
+    from app.core.db import SessionLocal
+    from ontology.canonical.provenance import WriteProvenance
+    from ontology.canonical.repository import CanonicalOntologyRepository
+    from ontology.canonical.write_service import OntologyWriteService
 
-    Each relation is (from_id, from_label, rel_type, to_id, to_label).
-    Labels and relationship types cannot be parameters in Cypher, so
-    they are interpolated — but only after an allowlist check: a bare
-    identifier (letter, then letters/digits/underscore). Anything else
-    raises ValueError instead of reaching the query string.
-    """
-    graph = get_graph()
-    for from_id, from_label, rel_type, to_id, to_label in relations:
-        for name, value in (
-            ("from_label", from_label),
-            ("rel_type", rel_type),
-            ("to_label", to_label),
-        ):
-            if not _CYPHER_IDENTIFIER_RE.match(value or ""):
-                raise ValueError(
-                    f"Invalid Cypher identifier for {name}: {value!r}"
-                )
-        graph.query(
-            f"MERGE (a:{from_label} {{id: $from_id}}) "
-            f"MERGE (b:{to_label} {{id: $to_id}}) "
-            f"MERGE (a)-[:{rel_type}]->(b)",
-            {"from_id": from_id, "to_id": to_id},
-        )
+    db = SessionLocal()
+    try:
+        writer = OntologyWriteService(CanonicalOntologyRepository(db))
+        trace = WriteProvenance(trace_id="legacy-merge-asset-relations")
+        for from_id, from_label, rel_type, to_id, to_label in relations:
+            writer.write_entity(
+                entity_type=from_label,
+                entity_key=from_id,
+                properties=None,
+                provenance=trace,
+                force_update=True,
+            )
+            writer.write_entity(
+                entity_type=to_label,
+                entity_key=to_id,
+                properties=None,
+                provenance=trace,
+                force_update=True,
+            )
+            writer.write_relationship(
+                relationship_type=rel_type,
+                source_type=from_label,
+                source_key=from_id,
+                target_type=to_label,
+                target_key=to_id,
+                properties=None,
+                provenance=trace,
+                force_update=True,
+            )
+        db.commit()
+        from ontology.projection.engine import drain_pending_projections
+
+        drain_pending_projections(db)
+    finally:
+        db.close()
+
+
+__all__ = ["get_graph", "merge_asset_relations", "query_asset_relationships"]

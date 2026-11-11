@@ -20,6 +20,7 @@ from app.routers import (
     executions,
     missions,
     models,
+    ontology,
     policies,
     results,
     schedules,
@@ -68,6 +69,7 @@ def create_app() -> FastAPI:
     app.include_router(executions.router)
     app.include_router(results.router)
     app.include_router(schedules.router)
+    app.include_router(ontology.router)
     return app
 
 

@@ -33,7 +33,7 @@ test:
 	$(PYTHON) -m pytest -q
 
 lint:
-	ruff check app runtime infra ingest tests seeds scripts alembic
+	ruff check app runtime infra ingest ontology tests seeds scripts alembic
 
 docker-up:
 	docker compose up -d --build
