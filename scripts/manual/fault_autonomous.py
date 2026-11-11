@@ -31,7 +31,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from _api import (  # noqa: E402
-    call, get_result, print_result, require_worker, submit, wait_for,
+    call,
+    get_result,
+    print_result,
+    require_worker,
+    submit,
+    wait_for,
 )
 
 TEMP_MISSION = "fault_auto_test"

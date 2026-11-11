@@ -30,7 +30,12 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _api import (  # noqa: E402
-    call, get_result, print_result, require_worker, submit, wait_for,
+    call,
+    get_result,
+    print_result,
+    require_worker,
+    submit,
+    wait_for,
 )
 
 MISSION_ID = "system_admin"
