@@ -19,8 +19,10 @@ class MissionState(TypedDict, total=False):
     # "deterministic" | "hybrid" | "autonomous" (from mission.execution.mode)
     mode: str
     # Option C: the AgentVersion that ran this execution (None when no
-    # version was active), and whether the live tool manifest had drifted
-    # from that version's pinned manifest.
+    # version was active or the mission names no agent), and whether
+    # the live tool manifest had drifted from that version's pinned
+    # manifest. Resolved once in run_mission for every execution, so
+    # capability-only runs record their version too.
     agent_version: int | None
     agent_version_drift: bool
     # Hooks: one record per hook dispatch in this execution (event,

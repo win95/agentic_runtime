@@ -104,15 +104,74 @@ def build_deep_agent(tools: list, system_prompt: str | None = None, skills: list
     )
 
 
+def _tool_call_failure(result_message) -> str | None:
+    """Describe a structured tool failure, or None when the result does
+    not indicate one.
+
+    Failure signals are business-level refusals (not crashes — the
+    agent handled them by design, so they are reported, not raised):
+    a dict result with a truthy ``"error"``, ``"refused"`` true,
+    ``"cancelled"`` false, ``"deleted"`` false, or ``"success"``
+    false; or a ToolMessage with ``status="error"`` (tool raised, or
+    a hook denied the call). Non-dict results and missing results are
+    not failures — nothing contradicts the call.
+    """
+    if result_message is None:
+        return None
+    content = getattr(result_message, "content", "")
+    data = None
+    text = ""
+    if isinstance(content, dict):
+        data = content
+    elif isinstance(content, list):
+        text = " ".join(
+            str(part.get("text", "")) for part in content if isinstance(part, dict)
+        )
+        try:
+            parsed = json.loads(text)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            data = parsed
+    elif isinstance(content, str):
+        text = content
+        if text.strip().startswith("{"):
+            try:
+                parsed = json.loads(text)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, dict):
+                data = parsed
+    if isinstance(data, dict):
+        if data.get("error"):
+            return str(data["error"])[:200]
+        if data.get("refused") is True:
+            return str(data.get("reason") or "refused")[:200]
+        if data.get("cancelled") is False:
+            return "cancelled: false"
+        if data.get("deleted") is False:
+            return "deleted: false"
+        if data.get("success") is False:
+            return "success: false"
+    if getattr(result_message, "status", None) == "error":
+        return (text or "tool error")[:200]
+    return None
+
+
 def run_deep_agent(agent, mission: dict, input_data: dict, callbacks=None, files=None) -> dict:
     """Invoke the deep agent for one mission input.
 
     Returns {"summary": str, "evidence": [...], "actions_taken": [...],
     "errors": [...]}. Evidence here is the agent's own summary; the
     structured evidence still comes from the Capability Graphs and tool
-    outputs. ``actions_taken`` lists the tool names the agent called, in
-    order — the Mission Graph uses it to fill the result of autonomous
-    missions (see ``deep_agent_node``).
+    outputs. ``actions_taken`` lists the tool names the agent called AND whose
+    results did not report failure, in order — a refused or failed
+    call (``cancelled: false``, ``refused: true``, ``deleted: false``,
+    an ``"error"`` value, or an error ToolMessage) is NOT listed as
+    taken; it goes into ``errors`` as a factual line (tool name +
+    failure value) instead. The Mission Graph surfaces those errors in
+    the result (see ``deep_agent_node``) — the model's prose summary is
+    not rewritten, but the structured outcome is authoritative over it.
 
     ``callbacks`` (e.g. the middleware token/audit handler built per run
     by ``deep_agent_node``) are passed through the invoke config so the
@@ -156,15 +215,44 @@ def run_deep_agent(agent, mission: dict, input_data: dict, callbacks=None, files
             summary = " ".join(t for t in texts if t)
             if summary:
                 break
+    # Pair each tool call with its ToolMessage result (by tool_call id)
+    # and ground actions_taken in real outcomes: a call counts only
+    # when its result does not report failure. A call with no result
+    # message (e.g. mock agents that return no ToolMessages) still
+    # counts — nothing contradicts it.
+    results_by_id: dict[str, object] = {}
+    for message in messages:
+        call_id = getattr(message, "tool_call_id", None)
+        if call_id:
+            results_by_id[str(call_id)] = message
     actions_taken: list[str] = []
+    errors: list[str] = []
     for message in messages:
         for call in getattr(message, "tool_calls", None) or []:
-            name = call.get("name") if isinstance(call, dict) else getattr(call, "name", None)
-            if name and name not in actions_taken:
+            if isinstance(call, dict):
+                name = call.get("name")
+                call_id = call.get("id")
+            else:
+                name = getattr(call, "name", None)
+                call_id = getattr(call, "id", None)
+            if not name:
+                continue
+            failure = _tool_call_failure(
+                results_by_id.get(str(call_id)) if call_id else None
+            )
+            if failure is not None:
+                errors.append(f"Tool '{name}' reported failure: {failure}")
+                continue
+            if name not in actions_taken:
                 actions_taken.append(name)
     evidence = []
     if summary:
         evidence.append(
             {"source": "deep_agent", "kind": "summary", "summary": summary, "stub": False}
         )
-    return {"summary": summary, "evidence": evidence, "actions_taken": actions_taken, "errors": []}
+    return {
+        "summary": summary,
+        "evidence": evidence,
+        "actions_taken": actions_taken,
+        "errors": errors,
+    }

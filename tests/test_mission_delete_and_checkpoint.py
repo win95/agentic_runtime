@@ -18,6 +18,8 @@ import sys
 import types
 from contextlib import contextmanager
 
+import pytest
+
 import infra.repositories as repositories
 import runtime.mission_graph as mission_graph
 from app import models
@@ -214,3 +216,39 @@ def test_run_mission_keeps_checkpointer_open(monkeypatch):
     assert final["status"] == "SUCCEEDED", f"errors: {final.get('errors')}"
     assert saver.put_calls >= 1, "checkpointer received no writes during invoke"
     assert saver.put_writes_calls >= 1
+
+
+# --- Bug 3 (2026-11-11): SQLAlchemy URL is not a libpq DSN --------------
+def test_to_libpq_dsn_strips_sqlalchemy_driver():
+    """`postgresql+psycopg://...` is not parseable by libpq: psycopg
+    raises `missing "=" after "postgresql+psycopg://..."`. The helper
+    strips the driver so from_conn_string receives a plain DSN."""
+    converted = mission_graph._to_libpq_dsn(
+        "postgresql+psycopg://postgres:postgres@localhost:5432/agentic_runtime"
+    )
+    assert converted == "postgresql://postgres:postgres@localhost:5432/agentic_runtime"
+    # Already-plain DSNs and non-postgres URLs pass through untouched.
+    assert mission_graph._to_libpq_dsn(
+        "postgresql://postgres:postgres@localhost:5432/agentic_runtime"
+    ) == "postgresql://postgres:postgres@localhost:5432/agentic_runtime"
+    assert mission_graph._to_libpq_dsn("sqlite:///:memory:") == "sqlite:///:memory:"
+    # Unparseable input never raises — the caller's warning path handles it.
+    assert mission_graph._to_libpq_dsn("not a url at all") == "not a url at all"
+
+
+def test_to_libpq_dsn_result_parses_as_libpq():
+    """The converted DSN must actually parse with psycopg (the exact
+    failure tran reported). Skipped when psycopg is not installed."""
+    psycopg = pytest.importorskip("psycopg")
+    from psycopg.conninfo import conninfo_to_dict
+
+    converted = mission_graph._to_libpq_dsn(
+        "postgresql+psycopg://postgres:postgres@localhost:5432/agentic_runtime"
+    )
+    parsed = conninfo_to_dict(converted)
+    assert parsed["dbname"] == "agentic_runtime"
+    assert parsed["host"] == "localhost"
+    with pytest.raises(psycopg.ProgrammingError, match='missing "=" after'):
+        conninfo_to_dict(
+            "postgresql+psycopg://postgres:postgres@localhost:5432/agentic_runtime"
+        )

@@ -744,10 +744,11 @@ Lúc chạy, `deep_agent_node` dùng active version: prompt đã pin (không
 lookup MLflow), model/temperature đã pin, `allowed_tools` thành cổng
 chặn thật trong `registry.check()`. Drift (tool live khác manifest đã
 pin) được log warning và ghi `agent_version_drift=true` trên execution;
-mỗi execution cũng ghi `agent_version` đã chạy. Ngoại lệ: run hybrid
-chỉ chạy capability (không escalate tới Deep Agent) thì `agent_version`
-là NULL — NULL nghĩa là "không chạy Deep Agent", agent vẫn tra được
-qua `execution.agent_id`.
+mỗi execution cũng ghi `agent_version` đã chạy — version được resolve
+một lần trong `run_mission` trước khi rẽ nhánh nên cả run hybrid chỉ
+chạy capability cũng ghi version đã active. `agent_version` là NULL
+chỉ khi không có version nào active (hoặc mission không khai báo
+agent); agent vẫn tra được qua `execution.agent_id`.
 
 ## 19. Hooks — vòng đời của một lần chạy agent (trích xuất từ Hooks v2)
 
@@ -772,7 +773,7 @@ bao phủ cả run không chạy agent).
 
 Khai báo trong `execution:` của YAML mission (`hooks: [...]`, giống
 `skills:`); không khai báo thì mọi built-in đều chạy. `system_admin`
-khai báo tường minh đủ 6 hook. Mỗi lần dispatch ghi một record vào
+khai báo tường minh đủ 7 hook. Mỗi lần dispatch ghi một record vào
 `MissionState.hook_events`; can thiệp được tóm tắt một dòng trong
 `notes`. Chưa nối dây: `PermissionRequest` (cần quyết định kênh phê
 duyệt), `PreCompact` (không có compaction), `SubagentStart/Stop`

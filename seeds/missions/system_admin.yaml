@@ -32,6 +32,7 @@ execution:
   hooks:
     - audit
     - block_dangerous_tool_call
+    - guard_destructive_target
     - injection_feedback
     - tool_error_feedback
     - stop_completion

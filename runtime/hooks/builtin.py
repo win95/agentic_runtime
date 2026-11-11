@@ -1,6 +1,6 @@
 """Built-in hook handlers.
 
-Six handlers ship with the runtime (name -> [(event, handler)]):
+Eight handlers ship with the runtime (name -> [(event, handler)]):
 
 - ``audit`` — diagnostic logging for SessionStart, SessionEnd,
   Notification, SubagentStart, SubagentStop. Never changes a run.
@@ -8,6 +8,13 @@ Six handlers ship with the runtime (name -> [(event, handler)]):
   arguments contain destructive shell/SQL patterns. Our built-in fault
   tools are read-only, so this is defense in depth for MCP tools: they
   come from an external server and register ``read_only=False``.
+- ``guard_destructive_target`` (PreToolUse) — deterministic guard for
+  the two destructive admin tools: ``delete_mission`` and
+  ``cancel_execution`` may only target an id that appears verbatim in
+  the execution input. A model (or an injected instruction) naming a
+  target the user never named is denied before the tool runs. This is
+  the deterministic net the pattern matcher cannot be: it checks the
+  tool name + target id, not shell/SQL text.
 - ``injection_feedback`` (PostToolUse) — scans a tool result for
   instruction-like text (Layer 6 signals) and tells the agent, in the
   result itself, to treat it as data. Complements the Layer 5 flags,
@@ -116,6 +123,51 @@ def block_dangerous_tool_call(context: HookContext) -> HookDecision | None:
                 f"Tool '{context.tool_name}' denied by hook "
                 f"'block_dangerous_tool_call': arguments match destructive "
                 f"pattern {match.group(0)!r}. Refuse the action and report it."
+            )
+    return None
+
+
+# Destructive admin tools -> the id argument(s) that name their target.
+# A call is only legitimate when the target id was named in the
+# execution input (see guard_destructive_target).
+_DESTRUCTIVE_TARGET_ARGS = {
+    "delete_mission": ("mission_id",),
+    "cancel_execution": ("execution_id",),
+}
+
+
+def guard_destructive_target(context: HookContext) -> HookDecision | None:
+    """PreToolUse: a destructive call needs its target id in the input.
+
+    Deterministic, model-independent: for ``delete_mission`` /
+    ``cancel_execution`` every id-like argument must appear verbatim
+    as a substring of the JSON-serialized execution input
+    (``context.input``). A target the request never named — e.g. one
+    invented by the model or planted by an injected instruction — is
+    denied before the tool runs, and the agent sees the reason.
+
+    Known limit: the check proves the id was *in the request*, not
+    who put it there. If injected text itself names the id verbatim,
+    the call passes this hook (the pattern matcher, the system-prompt
+    hierarchy, and the tool's own guards are the remaining layers).
+    A missing/empty id arg is not denied here — the tool itself
+    reports the missing argument.
+    """
+    id_keys = _DESTRUCTIVE_TARGET_ARGS.get(context.tool_name)
+    if not id_keys:
+        return None
+    serialized_input = json.dumps(context.input, ensure_ascii=False, default=str)
+    for key in id_keys:
+        target = (context.tool_input or {}).get(key)
+        if not isinstance(target, str) or not target:
+            continue
+        if target not in serialized_input:
+            return HookDecision.deny(
+                f"Tool '{context.tool_name}' denied by hook "
+                f"'guard_destructive_target': target id {target!r} does "
+                "not appear in the execution input. Destructive actions "
+                "need the exact id named in the request — refuse the "
+                "action and ask for it."
             )
     return None
 
@@ -381,6 +433,7 @@ BUILTIN_HOOKS: dict[str, list[tuple[HookEvent, HookHandler]]] = {
         (HookEvent.SUBAGENT_STOP, audit_hook),
     ],
     "block_dangerous_tool_call": [(HookEvent.PRE_TOOL_USE, block_dangerous_tool_call)],
+    "guard_destructive_target": [(HookEvent.PRE_TOOL_USE, guard_destructive_target)],
     "injection_feedback": [(HookEvent.POST_TOOL_USE, injection_feedback)],
     "tool_error_feedback": [(HookEvent.POST_TOOL_USE_FAILURE, tool_error_feedback)],
     "stop_completion": [(HookEvent.STOP, stop_completion)],

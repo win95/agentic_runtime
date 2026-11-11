@@ -10,6 +10,7 @@ production.
 import pytest
 
 import infra.repositories as repositories
+from runtime import deep_agent as deep_agent_module
 from runtime.mission_graph import build_mission_graph, run_mission
 
 MISSION = {
@@ -96,3 +97,134 @@ def test_hybrid_run_succeeds_without_llm():
     final = run_mission(mission, INPUT, "exec_test_hybrid")
     assert final["status"] == "SUCCEEDED", f"errors: {final.get('errors')}"
     assert len(final["evidence"]) >= 3
+
+
+# --- Item 3 (2026-11-11, Option A): agent outcome maps to schema keys ---
+def _fake_deep_agent(monkeypatch, *, summary, evidence=None):
+    """Stand-in Deep Agent returning a canned outcome (no LLM)."""
+    outcome = {
+        "summary": summary,
+        "evidence": evidence
+        if evidence is not None
+        else [
+            {
+                "source": "deep_agent", "kind": "summary",
+                "summary": summary, "stub": False,
+            }
+        ],
+        "actions_taken": [],
+        "errors": [],
+    }
+
+    def fake_build(*args, **kwargs):
+        return object()
+
+    def fake_run(agent, mission_arg, input_data, callbacks=None, files=None):
+        return dict(outcome)
+
+    monkeypatch.setattr(deep_agent_module, "build_deep_agent", fake_build)
+    monkeypatch.setattr(deep_agent_module, "run_deep_agent", fake_run)
+
+
+def _autonomous_mission():
+    mission = dict(MISSION)
+    mission["execution"] = {"mode": "autonomous", "agent_id": "fault_investigator"}
+    return mission
+
+
+def test_autonomous_with_evidence_maps_root_causes(monkeypatch):
+    """Option A: substantive evidence items become root causes (one
+    line each, citing the item's own summary) — nothing invented."""
+    _fake_deep_agent(
+        monkeypatch,
+        summary="The faults point at the door sensor and the motor.",
+        evidence=[
+            {
+                "source": "deep_agent", "kind": "fault",
+                "summary": "F-101: Door sensor fault", "stub": False,
+            },
+            {
+                "source": "deep_agent", "kind": "document",
+                "summary": "Document: Door sensor manual", "stub": False,
+            },
+        ],
+    )
+    final = run_mission(_autonomous_mission(), INPUT, "exec_test_auto_evidence")
+    assert final["status"] == "SUCCEEDED", f"errors: {final.get('errors')}"
+    assert final["result"]["root_causes"] == [
+        "F-101: Door sensor fault",
+        "Document: Door sensor manual",
+    ]
+    # No actionable sentence in the summary -> honest generic item.
+    assert final["result"]["recommendations"] == [
+        "Investigate the listed causes with the available evidence"
+    ]
+
+
+def test_autonomous_without_evidence_uses_unknown_fallback(monkeypatch):
+    """Option A: with no substantive evidence the run still SUCCEEDS
+    with the same honest fallback the capability path uses — the agent
+    cannot invent root causes from nothing, and validation must not
+    punish that honesty with FAILED."""
+    _fake_deep_agent(
+        monkeypatch,
+        summary="No faults found in the available data.",
+    )
+    final = run_mission(_autonomous_mission(), INPUT, "exec_test_auto_no_evidence")
+    assert final["status"] == "SUCCEEDED", f"errors: {final.get('errors')}"
+    assert final["result"]["root_causes"] == ["unknown — insufficient evidence"]
+
+
+def test_autonomous_recommendations_quote_agent_summary(monkeypatch):
+    """Option A: recommendations quote actionable sentences from the
+    agent's own summary verbatim — no specific action is invented."""
+    _fake_deep_agent(
+        monkeypatch,
+        summary="The motor overheated. Recommend replacing the traction "
+        "motor soon. The door sensor looks fine.",
+        evidence=[
+            {
+                "source": "deep_agent", "kind": "fault",
+                "summary": "F-204: Motor overheating", "stub": False,
+            },
+        ],
+    )
+    final = run_mission(_autonomous_mission(), INPUT, "exec_test_auto_reco")
+    assert final["status"] == "SUCCEEDED", f"errors: {final.get('errors')}"
+    assert final["result"]["recommendations"] == [
+        "Recommend replacing the traction motor soon."
+    ]
+
+
+def test_hybrid_escalation_keeps_capability_root_causes(monkeypatch):
+    """Option A merge: on hybrid escalation the Deep Agent node must
+    not overwrite the capability subgraph's result — its
+    root_causes/recommendations survive when the agent provides none."""
+    # Empty stores: capability evidence is "empty" only, so the hybrid
+    # run escalates to the Deep Agent.
+    monkeypatch.setattr(
+        repositories, "search_fault_history", lambda *a, **k: ([], False)
+    )
+    monkeypatch.setattr(
+        repositories, "get_maintenance_records", lambda *a, **k: ([], False)
+    )
+    monkeypatch.setattr(
+        repositories, "search_documents", lambda *a, **k: ([], False)
+    )
+    monkeypatch.setattr(
+        repositories, "query_asset_relationships", lambda *a, **k: ([], False)
+    )
+    _fake_deep_agent(
+        monkeypatch,
+        summary="Nothing more to add.",
+    )
+    mission = dict(MISSION)
+    mission["execution"] = {"mode": "hybrid", "agent_id": "fault_investigator"}
+    final = run_mission(mission, INPUT, "exec_test_hybrid_merge")
+    assert final["status"] == "SUCCEEDED", f"errors: {final.get('errors')}"
+    # The capability aggregation's fallback + its two recommendations.
+    assert final["result"]["root_causes"] == ["unknown — insufficient evidence"]
+    assert final["result"]["recommendations"] == [
+        "Review the collected evidence and confirm the suspected root cause on site.",
+        "Schedule preventive maintenance for the affected component.",
+    ]

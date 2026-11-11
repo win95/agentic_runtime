@@ -1,10 +1,37 @@
-"""Settings tests — defaults and env loading (fresh Settings instances)."""
+"""Settings tests — defaults and env loading (fresh Settings instances).
+
+Item 10 (2026-11-11): Settings must be constructed with
+_env_file=None and the env vars the assertions depend on cleared,
+so these tests do not depend on the machine's .env file (or on
+foreign env vars leaking in from the shell). A .env present in the
+cwd must not change the outcome.
+"""
 
 from app.config import Settings
 
+# Env vars whose defaults test_settings_defaults asserts.
+_DEFAULTED_VARS = [
+    "LLM_API_BASE",
+    "LLM_MODEL",
+    "LLM_TEMPERATURE",
+    "LLM_API_KEY",
+    "EMBEDDING_MODEL",
+    "EMBEDDING_API_BASE",
+    "EMBEDDING_API_KEY",
+    "API_KEY",
+    "MINIO_REPORTS_BUCKET",
+    "LANGSMITH_TRACING",
+    "LANGSMITH_ENDPOINT",
+    "CHECKPOINT_ENABLED",
+    "EXECUTION_TIMEOUT_SECONDS",
+    "QDRANT_COLLECTION",
+]
 
-def test_settings_defaults():
-    settings = Settings()
+
+def test_settings_defaults(monkeypatch):
+    for var in _DEFAULTED_VARS:
+        monkeypatch.delenv(var, raising=False)
+    settings = Settings(_env_file=None)
     assert settings.llm_api_base == "http://localhost:4000"
     assert settings.llm_model == "gpt-4o-mini"
     assert settings.llm_temperature == 0.2
@@ -30,7 +57,7 @@ def test_settings_load_from_env(monkeypatch):
     monkeypatch.setenv("LLM_API_KEY", "dummy-key")
     monkeypatch.setenv("EMBEDDING_MODEL", "test-embed-456")
     monkeypatch.setenv("QDRANT_COLLECTION", "test-docs")
-    settings = Settings()
+    settings = Settings(_env_file=None)
     assert settings.llm_model == "test-model-123"
     assert settings.llm_api_base == "http://proxy.example:4000"
     assert settings.embedding_model == "test-embed-456"

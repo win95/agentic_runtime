@@ -9,6 +9,7 @@ import pytest
 
 import infra.repositories as repositories
 from app import models
+from app.config import settings
 from app.core.db import SessionLocal
 from app.services import agent_version_service as avs
 from app.services import mission_service
@@ -81,7 +82,9 @@ def test_create_version_idempotent_then_new_on_change(db_session):
     try:
         same, created = avs.create_version(db, "admin_bot", source="test")
         assert created is False and same.version == 1 and same.is_active
-        assert same.model == "gpt-4o-mini" and same.temperature == 0.0
+        # The seed YAML writes model: ${LLM_MODEL}, so the snapshot
+        # follows settings.llm_model (item 9, 2026-11-11).
+        assert same.model == settings.llm_model and same.temperature == 0.0
         assert set(same.allowed_tools) == ADMIN_TOOLS
         assert len(same.tool_manifest) == 17
         assert len(same.manifest_sha256) == 64
@@ -178,7 +181,7 @@ def test_node_uses_active_version(db_session, monkeypatch):
     assert out.get("agent_version_drift") is False
     assert set(seen["tools"]) == ADMIN_TOOLS
     assert seen["model_config"] is not None
-    assert seen["model_config"].llm_model == "gpt-4o-mini"
+    assert seen["model_config"].llm_model == settings.llm_model
     assert seen["model_config"].llm_temperature == 0.0
     # The pinned prompt text (from the agent row), not the registry lookup.
     assert seen["system_prompt"] is not None
@@ -290,12 +293,13 @@ def test_run_mission_carries_agent_version(db_session, monkeypatch):
     assert final.get("agent_version_drift") is False
 
 
-def test_capability_only_run_keeps_agent_version_null(db_session, monkeypatch):
-    """Option C semantics (tran, 2026-11-10): a hybrid run that never
-    escalates keeps agent_version NULL — even though v1 is active —
-    because the version is resolved inside deep_agent_node only.
-    NULL means "no Deep Agent ran (capability-only)". The guard below
-    fails loudly if the run ever reaches the Deep Agent."""
+def test_capability_only_run_records_agent_version(db_session, monkeypatch):
+    """Option C semantics, revised (item 4, 2026-11-11): the version is
+    resolved once in run_mission before branching, so a hybrid run
+    that never escalates RECORDS the active version — NULL now means
+    "no version active / no agent configured", not "no Deep Agent
+    ran". The guard below fails loudly if the run ever reaches the
+    Deep Agent."""
     _seed_agents(db_session)
     _patch_capability_repositories(monkeypatch)
 
@@ -312,7 +316,7 @@ def test_capability_only_run_keeps_agent_version_null(db_session, monkeypatch):
     )
     assert final["status"] == "SUCCEEDED", f"errors: {final.get('errors')}"
     assert len(final["evidence"]) >= 3  # the capability path really ran
-    assert final.get("agent_version") is None
+    assert final.get("agent_version") == 1
     assert not final.get("agent_version_drift")
 
 

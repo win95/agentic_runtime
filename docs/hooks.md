@@ -33,6 +33,7 @@ chính thức nằm trong trang nghiên cứu Hooks v2 đã gửi tran.
 |---|---|---|
 | `audit` | SessionStart, SessionEnd, Notification, SubagentStart, SubagentStop | Chỉ ghi log. Không đổi hành vi. |
 | `block_dangerous_tool_call` | PreToolUse | Chặn tool call có pattern phá hoại trong args. |
+| `guard_destructive_target` | PreToolUse | Chặn `delete_mission` / `cancel_execution` khi id đích không xuất hiện nguyên văn trong execution input. |
 | `injection_feedback` | PostToolUse | Báo agent khi tool output chứa text giống chỉ thị. |
 | `tool_error_feedback` | PostToolUseFailure | Nhắc agent báo lỗi thay vì bịa dữ liệu. |
 | `stop_completion` | Stop | Buộc chạy tiếp khi agent dừng mà chưa gọi tool nào (cap 3). |
@@ -79,6 +80,7 @@ execution:
   hooks:
     - audit
     - block_dangerous_tool_call
+    - guard_destructive_target
     - injection_feedback
     - tool_error_feedback
     - stop_completion
@@ -90,7 +92,7 @@ Không khai báo `hooks:` thì **mọi built-in đều chạy** (mặc định a
 toàn — chặn lệnh nguy hiểm và validate input là lưới an toàn, không
 phải opt-in). Tên lạ trong danh sách được bỏ qua kèm warning.
 
-`system_admin.yaml` khai báo tường minh đủ 6 hook; `fault_analysis.yaml`
+`system_admin.yaml` khai báo tường minh đủ 7 hook; `fault_analysis.yaml`
 không khai báo nên chạy mặc định.
 
 ## Thêm hook của riêng mình

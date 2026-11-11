@@ -42,11 +42,14 @@ POST /agents/{agent_id}/versions/{version}/activate
 
 ## Runtime dùng version như thế nào
 
-`deep_agent_node` (Mission Graph) làm như sau, theo thứ tự:
+`run_mission` resolve active version của `mission.agent_id` một lần
+trước khi rẽ nhánh (best-effort — DB lỗi hay chưa có version thì
+chạy như cũ: model từ env, prompt từ registry/fallback, không có
+cổng allowed_tools); `deep_agent_node` dùng lại version đó theo số
+version, chỉ resolve lại khi node được gọi trực tiếp mà state chưa
+có version. Sau đó node làm như sau, theo thứ tự:
 
-1. Lấy active version của `mission.agent_id` (best-effort — DB lỗi
-   hay chưa có version thì chạy như cũ: model từ env, prompt từ
-   registry/fallback, không có cổng allowed_tools).
+1. Lấy version đã resolve ở trên (hoặc tự resolve khi chưa có).
 2. Prompt chạy = `version.prompt_text` (text đã pin, không lookup
    MLflow lúc chạy — version vẫn tái lập được khi MLflow down).
 3. Model chạy = `version.model` + `version.temperature` (build qua
@@ -68,15 +71,14 @@ POST /agents/{agent_id}/versions/{version}/activate
 
 Mỗi execution ghi lại `agent_version` (version đã chạy) và
 `agent_version_drift` trên dòng `executions` — xem lại được lần chạy
-nào dùng config nào.
-
-`agent_version` là NULL khi run không qua Deep Agent — tức run hybrid
-chỉ chạy capability (đủ evidence nên không escalate) — dù đã có active
-version. NULL nghĩa là "không chạy Deep Agent (capability-only)",
-không phải "không có version". Agent vẫn tra lại được qua
+nào dùng config nào. Version được resolve một lần trong `run_mission`
+trước khi rẽ nhánh theo mode, nên cả run hybrid chỉ chạy capability
+(đủ evidence nên không escalate) cũng ghi version đã active.
+`agent_version` là NULL khi không có version nào active, hoặc mission
+không khai báo agent. NULL nghĩa là "không có version / không có
+agent", không phải "không chạy Deep Agent". Agent vẫn tra lại được qua
 `execution.agent_id` (lưu lúc tạo execution từ `mission.agent_id`).
-`agent_version_drift` khi đó là false (không có tool nào của agent
-được dùng nên không có gì để drift).
+`agent_version_drift` khi đó là false (không có version để so drift).
 
 ## Quan hệ với MLflow Prompt Registry
 

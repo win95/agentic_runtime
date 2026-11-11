@@ -11,6 +11,7 @@ import pathlib
 import runtime.deep_agent as deep_agent_module
 import runtime.tools.admin_tools as admin_tools  # noqa: F401 — importing registers them
 from app import models
+from app.config import settings
 from app.services import execution_service, mission_service
 from runtime.mission_graph import run_mission
 from runtime.tools.registry import registry
@@ -259,7 +260,9 @@ def test_seed_loads_system_admin_mission_and_agent(db_session):
     investigator = db_session.get(models.Agent, "fault_investigator")
     assert investigator is not None
     assert investigator.provider == "openai"
-    assert investigator.model == "gpt-4o-mini"
+    # The seed YAML writes model: ${LLM_MODEL}, so the seeded model
+    # follows settings.llm_model (item 9, 2026-11-11).
+    assert investigator.model == settings.llm_model
     assert set(investigator.allowed_tools or []) == {
         "calculate_failure_rate",
         "get_maintenance_records",
@@ -283,7 +286,7 @@ def test_seed_files_parse():
         BASE / "agents" / "fault_investigator.yaml"
     )
     assert investigator["id"] == "fault_investigator"
-    assert investigator["model"] == "gpt-4o-mini"
+    assert investigator["model"] == settings.llm_model
     assert investigator["temperature"] == 0.0
     assert set(investigator["allowed_tools"]) == {
         "calculate_failure_rate",

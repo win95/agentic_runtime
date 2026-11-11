@@ -140,6 +140,48 @@ def capability_node(state: MissionState) -> dict:
     return updates
 
 
+def _resolve_agent_version(agent_id: str) -> tuple[object | None, bool]:
+    """Resolve the active AgentVersion + drift flag for one agent.
+
+    Best-effort and never raising: any failure returns ``(None,
+    False)`` and the caller falls back to the pre-versioning
+    behaviour (env model + registry prompt, no allowed_tools gate).
+    Shared by ``run_mission`` (every execution, so capability-only
+    runs record their version too) and ``deep_agent_node``.
+    """
+    if not agent_id:
+        return None, False
+    agent_version = None
+    try:
+        from app.core.db import SessionLocal
+        from app.services import agent_version_service
+
+        _db = SessionLocal()
+        try:
+            agent_version = agent_version_service.get_active_version(_db, agent_id)
+        finally:
+            _db.close()
+    except Exception as exc:  # noqa: BLE001 — versioning never breaks a run
+        logger.debug("Could not resolve active agent version for %s: %s", agent_id, exc)
+        return None, False
+    if agent_version is None:
+        return None, False
+    drift = False
+    try:
+        from app.services import agent_version_service
+
+        _, live_digest = agent_version_service.compute_tool_manifest()
+        drift = live_digest != agent_version.manifest_sha256
+        if drift:
+            logger.warning(
+                "Agent %s v%d: live tool manifest drifted from the pinned one",
+                agent_id, agent_version.version,
+            )
+    except Exception as exc:  # noqa: BLE001 — drift is advisory
+        logger.debug("Could not compute live tool manifest: %s", exc)
+    return agent_version, drift
+
+
 def deep_agent_node(state: MissionState) -> dict:
     """Run the autonomous Deep Agent (Layer 4) with permission-filtered tools.
 
@@ -198,48 +240,45 @@ def deep_agent_node(state: MissionState) -> dict:
         if blocked:
             return {"errors": [f"Input blocked by hook: {blocked[0].message}"]}
 
-        # Option C: resolve the active AgentVersion for this mission's
-        # agent (best-effort — any failure falls back to the
+        # Option C: the active AgentVersion for this mission's agent.
+        # run_mission already resolved it for every execution (see
+        # run_mission) and put its number in the state — reuse that
+        # version by number instead of re-resolving, and keep the
+        # drift flag it computed. When the node is called directly
+        # without a state version (tests, langgraph dev), resolve the
+        # active version here instead. Any failure falls back to the
         # pre-versioning behaviour: env model + registry prompt, and no
-        # allowed_tools gate). When a version is active, its allowed
+        # allowed_tools gate. When a version is active, its allowed
         # tools gate the registry (registry.check enforces
         # context["allowed_tools"]) and its pinned prompt/model/
         # temperature run the agent; the tools themselves still come
         # from the live code registry.
         agent_version = None
-        agent_version_drift = False
+        agent_version_drift = bool(state.get("agent_version_drift"))
         agent_id = mission.get("agent_id") or ""
-        if agent_id:
+        state_version = state.get("agent_version")
+        if agent_id and state_version is not None:
             try:
                 from app.core.db import SessionLocal
                 from app.services import agent_version_service
 
                 _db = SessionLocal()
                 try:
-                    agent_version = agent_version_service.get_active_version(_db, agent_id)
+                    agent_version = agent_version_service.get_version(
+                        _db, agent_id, state_version
+                    )
                 finally:
                     _db.close()
             except Exception as exc:  # noqa: BLE001 — versioning never breaks a run
                 logger.debug(
-                    "Could not resolve active agent version for %s: %s", agent_id, exc
+                    "Could not load agent version %s v%s: %s",
+                    agent_id, state_version, exc,
                 )
                 agent_version = None
+        if agent_version is None:
+            agent_version, agent_version_drift = _resolve_agent_version(agent_id)
         if agent_version is not None:
             context["allowed_tools"] = list(agent_version.allowed_tools or [])
-            # Drift: the live toolset changed since this version was
-            # pinned. Advisory only — the run continues with live tools.
-            try:
-                from app.services import agent_version_service
-
-                _, live_digest = agent_version_service.compute_tool_manifest()
-                agent_version_drift = live_digest != agent_version.manifest_sha256
-                if agent_version_drift:
-                    logger.warning(
-                        "Agent %s v%d: live tool manifest drifted from the pinned one",
-                        agent_id, agent_version.version,
-                    )
-            except Exception as exc:  # noqa: BLE001 — drift is advisory
-                logger.debug("Could not compute live tool manifest: %s", exc)
 
         # Layer 4: MCP tools go through the registry permission check
         # like built-in tools. load_mcp_tools() registers only the MCP
@@ -391,12 +430,17 @@ def deep_agent_node(state: MissionState) -> dict:
                 "to fit the history budget"
             )
         # Fill the mission's declared output-schema keys from the agent
-        # outcome so an autonomous run can validate: without this, an
-        # autonomous mission could never SUCCEED, because validate_results
-        # requires every output key to be present and nothing ever set
-        # them. Keys the outcome cannot fill (e.g. root_causes) stay
-        # missing and validation still fails honestly.
-        result: dict = {}
+        # outcome so an autonomous run can validate (Option A, tran
+        # 2026-11-11). The result MERGES with the capability subgraph's
+        # result instead of overwriting it: on hybrid escalation the
+        # capability path's root_causes/recommendations survive when
+        # the agent provides none. Keys the outcome cannot fill
+        # directly are mapped from the evidence, never invented:
+        # root_causes come from substantive evidence items (same
+        # fallback as the capability path), recommendations quote
+        # actionable sentences from the agent's own summary, or a
+        # single honest generic item when there are none.
+        result: dict = dict(state.get("result") or {})
         required_keys = list((mission.get("output_schema") or {}).get("properties", {}).keys())
         summary = outcome.get("summary", "")
         if "answer" in required_keys:
@@ -406,12 +450,31 @@ def deep_agent_node(state: MissionState) -> dict:
         if "actions_taken" in required_keys:
             result["actions_taken"] = outcome.get("actions_taken") or []
         if "evidence" in required_keys:
-            result["evidence"] = outcome.get("evidence") or []
+            result["evidence"] = list(state.get("evidence") or []) or (
+                outcome.get("evidence") or []
+            )
+        all_evidence = list(state.get("evidence") or []) + list(
+            outcome.get("evidence") or []
+        )
+        if "root_causes" in required_keys and not result.get("root_causes"):
+            result["root_causes"] = _root_causes_from_evidence(all_evidence)
+        if "recommendations" in required_keys and not result.get("recommendations"):
+            result["recommendations"] = _recommendations_from_summary(summary)
+        tool_failures = outcome.get("errors") or []
+        if tool_failures:
+            # Business-level tool refusals (a delete refused, a cancel
+            # on a finished execution) are outcomes the agent handled
+            # by design — they stay visible in the result even when
+            # the run SUCCEEDs, instead of failing validation via
+            # state errors. The structured list is authoritative over
+            # the model's prose summary, which is not rewritten.
+            result["tool_failures"] = list(tool_failures)
+            notes.append("Tool failures reported: " + "; ".join(tool_failures))
         return {
             "evidence": outcome.get("evidence") or [],
             "result": result,
             "notes": notes,
-            "errors": outcome.get("errors") or [],
+            "errors": [],
             "agent_version": agent_version.version if agent_version is not None else None,
             "agent_version_drift": agent_version_drift,
             "hook_events": hook_events,
@@ -419,6 +482,53 @@ def deep_agent_node(state: MissionState) -> dict:
     except Exception as exc:  # noqa: BLE001 — model/package problems are state
         logger.warning("Deep agent unavailable: %s", exc)
         return {"errors": [f"Deep agent unavailable: {exc}"]}
+
+
+def _root_causes_from_evidence(evidence: list | None) -> list[str]:
+    """One root-cause line per substantive evidence item.
+
+    The line is the item's own summary, which already cites its
+    source (fault code/title, document title, relation). Only real
+    findings count — "error"/"empty"/"summary" items are not causes.
+    With no substantive evidence the honest fallback is the same one
+    the capability path uses. Nothing is invented here.
+    """
+    causes = [
+        str((item or {}).get("summary") or "").strip()
+        for item in (evidence or [])
+        if (item or {}).get("kind") in _SUBSTANTIVE_EVIDENCE_KINDS
+        and str((item or {}).get("summary") or "").strip()
+    ]
+    return causes[:5] if causes else ["unknown — insufficient evidence"]
+
+
+# Words that mark a summary sentence as an action the agent itself
+# proposed (used only to quote the agent's own words — never to
+# invent a specific action).
+_ACTIONABLE_WORDS = (
+    "recommend", "should", "must", "need to", "replace", "repair",
+    "schedule", "inspect", "monitor", "investigate", "fix",
+)
+
+
+def _recommendations_from_summary(summary: str) -> list[str]:
+    """Actionable sentences from the agent's own summary (max 3).
+
+    A sentence only qualifies when it reads as an action (see
+    ``_ACTIONABLE_WORDS``) — the returned text is quoted verbatim
+    from the summary. With no actionable sentence, a single honest
+    generic item is returned instead of an invented specific action.
+    """
+    actions: list[str] = []
+    for sentence in re.split(r"(?<=[.!?])\s+|\n+", summary or ""):
+        text = sentence.strip()
+        if not text:
+            continue
+        if any(word in text.lower() for word in _ACTIONABLE_WORDS):
+            actions.append(text)
+        if len(actions) >= 3:
+            break
+    return actions or ["Investigate the listed causes with the available evidence"]
 
 
 def _grounding_tokens(text: str) -> set[str]:
@@ -588,6 +698,33 @@ def build_mission_graph(checkpointer=None):
 mission_graph = build_mission_graph()
 
 
+def _to_libpq_dsn(url: str) -> str:
+    """Convert a SQLAlchemy postgres URL to a libpq DSN.
+
+    ``PostgresSaver.from_conn_string`` expects a libpq connection
+    string (``postgresql://...``), but ``settings.database_url`` is a
+    SQLAlchemy URL (``postgresql+psycopg://...``) — passing it through
+    verbatim fails at parse time with ``missing "=" after
+    "postgresql+psycopg://..."`` and the graph silently runs
+    stateless. Strip the driver (``postgresql+psycopg`` ->
+    ``postgresql``) via ``sqlalchemy.make_url``; already-plain
+    ``postgresql://`` URLs and non-postgres URLs pass through
+    untouched. Best-effort: any parse/import problem returns the
+    original URL and the caller's warning path reports the failure.
+    """
+    try:
+        from sqlalchemy.engine import make_url
+
+        parsed = make_url(url)
+        if parsed.drivername.startswith("postgresql+"):
+            return parsed.set(drivername="postgresql").render_as_string(
+                hide_password=False
+            )
+    except Exception:  # noqa: BLE001 — fall back to the original URL
+        logger.debug("Could not convert database URL to a libpq DSN: %r", url)
+    return url
+
+
 @contextlib.contextmanager
 def get_checkpointer():
     """Postgres checkpointer (optional, off by default), as a context manager.
@@ -615,7 +752,9 @@ def get_checkpointer():
             yield None
             return
     try:
-        with PostgresSaver.from_conn_string(settings.database_url) as checkpointer:
+        with PostgresSaver.from_conn_string(
+            _to_libpq_dsn(settings.database_url)
+        ) as checkpointer:
             try:
                 checkpointer.setup()
             except Exception as exc:  # noqa: BLE001 — checkpoint is best-effort
@@ -640,6 +779,15 @@ def run_mission(mission: dict, input_data: dict, execution_id: str) -> dict:
 
     setup_langsmith()
     setup_mlflow_tracing()
+    # Option C: resolve the active AgentVersion ONCE, up front, so
+    # every execution records it — including hybrid runs that never
+    # escalate to the Deep Agent (previously the version was resolved
+    # only inside deep_agent_node, so capability-only runs kept
+    # agent_version NULL). Best-effort: a DB failure leaves it NULL
+    # and the run continues as before.
+    agent_version, agent_version_drift = _resolve_agent_version(
+        mission.get("agent_id") or ""
+    )
     initial_state: MissionState = {
         "execution_id": execution_id,
         "mission_id": mission.get("mission_id", ""),
@@ -653,6 +801,8 @@ def run_mission(mission: dict, input_data: dict, execution_id: str) -> dict:
         "errors": [],
         "notes": [],
         "hook_events": [],
+        "agent_version": agent_version.version if agent_version is not None else None,
+        "agent_version_drift": agent_version_drift,
     }
     # The checkpointer context must stay open for the whole invoke: the
     # saver borrows the connection from PostgresSaver.from_conn_string.

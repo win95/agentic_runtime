@@ -5,7 +5,7 @@ monkeypatched per test, so no broker is needed.
 """
 
 import pathlib
-from datetime import datetime
+from datetime import datetime, timezone
 
 import pytest
 import yaml
@@ -267,7 +267,10 @@ def test_update_cron_recomputes_next_run(db_session):
     assert updated.cron == "0 8 * * *"
     assert updated.next_run_at is not None
     assert updated.next_run_at.hour == 8 and updated.next_run_at.minute == 0
-    assert updated.next_run_at > datetime.now()
+    # next_run_at is naive UTC (schedule_service._utcnow() convention),
+    # so compare against naive UTC now, not naive local now — the
+    # latter fails whenever the local zone is behind UTC (item 11).
+    assert updated.next_run_at > datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 def test_enable_recomputes_stale_next_run(db_session):
@@ -279,7 +282,10 @@ def test_enable_recomputes_stale_next_run(db_session):
     assert updated is not None
     assert updated.enabled is True
     assert updated.next_run_at is not None
-    assert updated.next_run_at > datetime.now()
+    # next_run_at is naive UTC (schedule_service._utcnow() convention),
+    # so compare against naive UTC now, not naive local now — the
+    # latter fails whenever the local zone is behind UTC (item 11).
+    assert updated.next_run_at > datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 # --- Router ---

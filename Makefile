@@ -30,7 +30,7 @@ migrate:
 	$(PYTHON) -m alembic upgrade head
 
 test:
-	pytest -q
+	$(PYTHON) -m pytest -q
 
 lint:
 	ruff check app runtime infra ingest tests seeds scripts alembic

@@ -121,11 +121,10 @@ def run_execution(self, execution_id: str) -> dict:
         execution.status = status
         execution.error = "; ".join(errors) if errors else None
         # Option C: record which agent version ran and whether the live
-        # tools had drifted from it. NULL when no version was active OR
-        # when the run never reached the Deep Agent (capability-only
-        # hybrid runs) — NULL means "no Deep Agent ran", see
-        # docs/agent-versioning.md. The agent is still recoverable via
-        # execution.agent_id.
+        # tools had drifted from it. The version is resolved in
+        # run_mission for every execution, so capability-only hybrid
+        # runs record it too — NULL now means "no version active / no
+        # agent configured", see docs/agent-versioning.md.
         execution.agent_version = final_state.get("agent_version")
         execution.agent_version_drift = bool(final_state.get("agent_version_drift"))
         execution.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
