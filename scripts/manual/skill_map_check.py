@@ -129,6 +129,12 @@ def cleanup(mission_ids: list[str]) -> None:
                 db.query(models.ExecutionResult).filter(
                     models.ExecutionResult.execution_id.in_(execution_ids)
                 ).delete(synchronize_session=False)
+                db.query(models.LLMUsage).filter(
+                    models.LLMUsage.execution_id.in_(execution_ids)
+                ).delete(synchronize_session=False)
+                db.query(models.AuditLog).filter(
+                    models.AuditLog.execution_id.in_(execution_ids)
+                ).delete(synchronize_session=False)
             executions = db.query(models.Execution).filter_by(
                 mission_id=mission_id
             ).delete(synchronize_session=False)
