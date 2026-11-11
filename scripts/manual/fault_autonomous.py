@@ -12,11 +12,11 @@ Usage (from the repo root, with the API + worker running):
     python scripts/manual/fault_autonomous.py
     python scripts/manual/fault_autonomous.py --keep   # leave the mission
 
-Expected today: the Deep Agent produces a real investigation summary
-(it calls search_fault_history), but the execution ends FAILED with
-``Result missing output-schema keys: ['root_causes', 'recommendations']``
-— the agent outcome only fills answer/summary/actions_taken/evidence.
-That is a product decision, documented in scripts/eval_mission.py.
+Expected today: the Deep Agent produces a real investigation summary and
+the run SUCCEEDS — the graph fills the declared output-schema keys from
+the agent outcome (root causes come from substantive evidence,
+recommendations from the agent's summary). This throwaway mission is the
+baseline "no plan" run; use ``skill_map_check.py`` to exercise skill maps.
 
 The script needs the project venv (SQLAlchemy cleanup imports app.*).
 """
