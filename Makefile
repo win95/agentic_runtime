@@ -1,4 +1,4 @@
-.PHONY: install install-requirements run-api run-worker run-beat migrate test lint docker-up docker-down seed seed-dry-run ingest ingest-dry-run demo eval eval-real eval-genai eval-genai-real langgraph-dev gen-synthetic-data eval-tool-use eval-retrieval train-embedding train-llm
+.PHONY: install install-requirements run-api run-worker run-beat migrate test lint docker-up docker-down seed seed-dry-run seed-edge ingest ingest-dry-run demo eval eval-real eval-genai eval-genai-real langgraph-dev gen-synthetic-data eval-tool-use eval-retrieval train-embedding train-llm
 
 # Prefer the project venv when it exists (this checkout), else system python.
 PYTHON := $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python)
@@ -51,6 +51,12 @@ seed:
 # Validate the seed data without touching any store.
 seed-dry-run:
 	$(PYTHON) -m seeds.seed_demo_data --dry-run
+
+# Opt-in edge-case seeds (NOT part of `make seed`): plant one poisoned
+# projection row (goes dead after 5 drains) for live drain/dead-path
+# checks. Idempotent — re-running plants nothing.
+seed-edge:
+	$(PYTHON) -m seeds.seed_edge_cases
 
 # Batch ingest (Option B): process JSON files in ingest/inbox.
 # See docs/ingest.md. Retries pending quarantined rows:

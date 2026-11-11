@@ -121,7 +121,7 @@ def test_run_batch_samples_then_skip_then_force(db_session, tmp_path, monkeypatc
     try:
         first = ingest_run.run_batch(source=LocalDirSource(inbox), db=db)
         assert first["files"] == 5
-        assert first["rows_ok"] == 7  # 2 faults + 1 maint + 2 sensors + 1 doc + 1 rel
+        assert first["rows_ok"] == 11  # 2 faults + 1 maint + 2 sensors + 1 doc + 5 rel
         assert first["rows_failed"] == 0
         assert db.query(FaultHistory).count() == 2
         assert db.query(SensorReading).count() == 2
@@ -132,7 +132,7 @@ def test_run_batch_samples_then_skip_then_force(db_session, tmp_path, monkeypatc
         assert len(second["skipped"]) == 5
 
         forced = ingest_run.run_batch(source=LocalDirSource(inbox), db=db, force=True)
-        assert forced["rows_ok"] == 7
+        assert forced["rows_ok"] == 11
         assert db.query(FaultHistory).count() == 2  # upsert, no duplicates
     finally:
         db.close()
@@ -171,7 +171,7 @@ def test_run_batch_dry_run_writes_nothing(db_session, tmp_path, monkeypatch):
     try:
         summary = ingest_run.run_batch(source=LocalDirSource(inbox), db=db,
                                        dry_run=True)
-        assert summary["rows_ok"] == 7
+        assert summary["rows_ok"] == 11
         assert db.query(IngestRun).count() == 0
         assert db.query(FaultHistory).count() == 0
     finally:
@@ -211,7 +211,7 @@ def test_ingest_service_uses_inbox(db_session, tmp_path, monkeypatch):
     db = SessionLocal()
     try:
         summary = ingest_service.run_ingest_batch(db, inbox=str(inbox))
-        assert summary["rows_ok"] == 7
+        assert summary["rows_ok"] == 11
         assert summary["failed"] == []
     finally:
         db.close()

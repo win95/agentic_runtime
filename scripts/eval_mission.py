@@ -54,6 +54,24 @@ TEST_CASES = [
         "input": {"asset_id": "O21", "start_date": "2026-10-01", "end_date": "2026-10-07"},
         "mode": "hybrid",
     },
+    # Edge-case assets (hybrid). The mock harness's fake model makes NO
+    # tool calls, so plan_trace is empty in mock eval and is NOT asserted
+    # here — the branch traces are asserted in tests/test_skill_maps.py
+    # with the recording fake model instead. These cases assert the
+    # result/validation outcome only: O23 (healthy, no substantive
+    # evidence) ends with "unknown — insufficient evidence"; O24
+    # (maintenance-only) ends with root causes grounded in its real
+    # maintenance rows — no invented causes, no faults claimed.
+    {
+        "name": "o23_healthy_hybrid",
+        "input": {"asset_id": "O23", "start_date": "2026-10-01", "end_date": "2026-10-31"},
+        "mode": "hybrid",
+    },
+    {
+        "name": "o24_maintenance_only_hybrid",
+        "input": {"asset_id": "O24", "start_date": "2026-10-01", "end_date": "2026-10-31"},
+        "mode": "hybrid",
+    },
 ]
 
 logger = logging.getLogger(__name__)

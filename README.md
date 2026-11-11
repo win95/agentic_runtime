@@ -113,15 +113,34 @@ Mission mẫu `fault_analysis` (định nghĩa trong
 python -m seeds.load_missions
 ```
 
-Dữ liệu demo cho thang máy O21, tháng 10/2026 (8 lỗi + 6 bảo trì trong
-PostgreSQL, 6 tài liệu kỹ thuật trong Qdrant, 5 quan hệ trong Neo4j)
-được nạp bằng:
+Dữ liệu demo cho thang máy O21/O22/O23/O24 (thêm O20 đã nghỉ hưu),
+tháng 10/2026 được nạp bằng:
 
 ```bash
 make seed
 # hoặc: python -m seeds.seed_demo_data
 # kiểm tra dữ liệu mà không chạm vào kho nào: make seed-dry-run
 # qua compose: docker compose --profile setup run --rm seed
+```
+
+Seed gồm: 10 lỗi + 9 bảo trì + 76 sensor readings trong PostgreSQL
+(O21: 8/6/62 — dataset gốc không đổi; O22: 2/1/6 với spike 88.5°C
+ứng với lỗi F-206; O23 khỏe mạnh: 0/0/4; O24 chỉ bảo trì: 0/2/4),
+7 tài liệu kỹ thuật trong Qdrant, 15 quan hệ trong Neo4j (gồm 3
+Document node nối bằng `DOCUMENTED_BY` và asset O20 ở trạng thái
+`archived`), 2 schedule mẫu (đều tắt mặc định), và 3 execution lịch
+sử (1 SUCCEEDED + 1 FAILED cho `fault_analysis`, 1 SUCCEEDED cho
+`system_admin`). Execution được seed KHÔNG gửi Slack notification —
+notifier chỉ chạy trong `run_execution` thật (xem §22).
+
+Edge-case seed (không nằm trong `make seed`, chỉ khi cần thử đường
+poison/dead của projection drain):
+
+```bash
+make seed-edge
+# trồng đúng 1 projection row bị poison (subject_ref không parse
+# được); chạy drain 5 lần thì row đó chuyển dead. Chạy lại không
+# trồng thêm.
 ```
 
 Seed là idempotent — chạy lại không nhân đôi dữ liệu. Qdrant cần
@@ -638,6 +657,11 @@ Seed mẫu: `seeds/schedules/system_admin_daily_health.yaml` — health
 check hàng ngày lúc 07:00 UTC cho mission `system_admin`, được nạp ở
 trạng thái **tắt** (`enabled: false`); nạp lại seed không tắt schedule
 mà bạn đã bật. Bật nó lên bằng `POST /schedules/sched_system_admin_daily_health/enable`.
+Seed thứ hai: `seeds/schedules/fault_analysis_weekly.yaml` — phân tích
+lỗi hàng tuần lúc 06:00 UTC thứ Hai cho mission `fault_analysis`
+(asset O21, tháng 10/2026), cũng **tắt** mặc định; bật bằng
+`POST /schedules/sched_fault_analysis_weekly/enable` (sửa
+`input_data` qua API trước khi bật nếu muốn asset/khoảng ngày khác).
 
 ## 16. Prompt-injection defense — 6 lớp đã triển khai (Lớp 7 chờ quyết định)
 
@@ -834,7 +858,11 @@ alembic downgrade base       # gỡ toàn bộ (dev/test)
 - **Env:** `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`,
   `GRAPH_DATABASE_BACKEND=neo4j` (xem `.env.example`).
 - **Seed:** `make migrate` rồi `make seed` (hoặc
-  `python -m seeds.seed_ontology_demo` chỉ ontology).
+  `python -m seeds.seed_ontology_demo` chỉ ontology) — 17 entity
+  (O21/O22/O23/O24, O20 archived, 2 building, 6 component, 3 Document)
+  + 15 relation. Endpoint có properties thật (tên, loại, trạng thái,
+  vị trí); chạy lại seed trên DB cũ (endpoint trần) sẽ điền properties
+  vào, lần sau nữa là noop.
 
 ## 21. Context window budget — 32.000 token (Phương án A)
 

@@ -383,3 +383,73 @@ def test_deep_agent_node_old_double_without_skill_maps_still_works(db_session, m
     )
     assert final["status"] == "SUCCEEDED", f"errors: {final.get('errors')}"
     assert "plan_trace" not in final["result"]
+
+
+# --- Mission-level branch traces for the edge-case assets ---
+#
+# The mock eval harness's fake model makes NO tool calls, so plan_trace
+# is empty there and asserting visited nodes in eval is meaningless —
+# these tests assert the branches with the recording fake model
+# instead. The tool sequences below are the ones the data-access map
+# prescribes for each asset (see skills/data-access/SKILL.md):
+# O23 (healthy): faults empty -> maintenance, then faults+maintenance
+# both empty -> skip sensors, go to graph-relations.
+# O24 (maintenance-only): faults empty -> maintenance (non-empty),
+# so sensors stay on the path.
+def _run_with_tool_sequence(db_session, monkeypatch, asset_id, calls):
+    load_missions.main()
+    mission = mission_service.get_mission(db_session, "fault_analysis")
+    mission_dict = mission_service.mission_to_dict(mission)
+    # Autonomous mode guarantees deep_agent_node runs (see the test above).
+    mission_dict["execution"]["mode"] = "autonomous"
+    monkeypatch.setattr(
+        deep_agent_module,
+        "build_deep_agent",
+        lambda tools, system_prompt=None, skills=None, model_config=None,
+        middleware=None: _ToolCallAgent(calls),
+    )
+    return run_mission(
+        mission_dict,
+        {"asset_id": asset_id, "start_date": "2026-10-01", "end_date": "2026-10-31"},
+        f"exec-plan-{asset_id.lower()}",
+    )
+
+
+def test_o23_healthy_branch_skips_sensors(db_session, monkeypatch):
+    final = _run_with_tool_sequence(db_session, monkeypatch, "O23", [
+        ("search_fault_history", True),
+        ("get_maintenance_records", True),
+        ("query_asset_relationships", True),
+        ("search_technical_documents", True),
+    ])
+    assert final["status"] == "SUCCEEDED", f"errors: {final.get('errors')}"
+    trace = final["result"]["plan_trace"]["data-access"]
+    assert trace["visited"] == [
+        "postgres-faults",
+        "postgres-maintenance",
+        "graph-relations",
+        "qdrant-documents",
+    ]
+    assert trace["skipped"] == ["identify", "postgres-sensors", "synthesize"]
+    assert trace["deviations"] == []
+
+
+def test_o24_maintenance_only_branch_keeps_sensors(db_session, monkeypatch):
+    final = _run_with_tool_sequence(db_session, monkeypatch, "O24", [
+        ("search_fault_history", True),
+        ("get_maintenance_records", True),
+        ("get_sensor_data", True),
+        ("query_asset_relationships", True),
+        ("search_technical_documents", True),
+    ])
+    assert final["status"] == "SUCCEEDED", f"errors: {final.get('errors')}"
+    trace = final["result"]["plan_trace"]["data-access"]
+    assert trace["visited"] == [
+        "postgres-faults",
+        "postgres-maintenance",
+        "postgres-sensors",
+        "graph-relations",
+        "qdrant-documents",
+    ]
+    assert trace["skipped"] == ["identify", "synthesize"]
+    assert trace["deviations"] == []

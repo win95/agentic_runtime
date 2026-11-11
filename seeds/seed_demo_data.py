@@ -30,7 +30,9 @@ logger = logging.getLogger(__name__)
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Seed demo data (asset O21, Oct 2026).")
+    parser = argparse.ArgumentParser(
+        description="Seed demo data (assets O21/O22/O23/O24 + archived O20, Oct 2026)."
+    )
     parser.add_argument(
         "--dry-run", action="store_true",
         help="validate the seed data and print counts without touching any store",
@@ -45,14 +47,15 @@ def main(argv: list[str] | None = None) -> int:
             f"Dry run OK: {counts['faults']} faults + {counts['maintenance']} "
             f"maintenance rows + {counts['sensor_readings']} sensor readings + "
             f"{counts['documents']} documents + "
-            f"{counts['relations']} relations for asset O21 (October 2026). "
-            "No store was touched."
+            f"{counts['relations']} relations for assets O21/O22/O23/O24 "
+            "(+ archived O20) (October 2026). No store was touched."
         )
         return 0
 
     init_db()
 
     from seeds.demo_data import (
+        seed_executions_demo,
         seed_falkor_demo,
         seed_policies_demo,
         seed_postgres_demo,
@@ -69,13 +72,16 @@ def main(argv: list[str] | None = None) -> int:
         counts = seed_postgres_demo(db)
         tools = seed_tools_demo(db)
         policies = seed_policies_demo(db)
+        executions = seed_executions_demo(db)
     finally:
         db.close()
     print(
         f"PostgreSQL: seeded {counts['faults']} fault rows + "
         f"{counts['maintenance']} maintenance rows + "
-        f"{counts['sensor_readings']} sensor readings for asset O21; "
-        f"{tools['tools']} tool rows + {policies['policies']} policy row"
+        f"{counts['sensor_readings']} sensor readings for assets "
+        f"O21/O22/O23/O24; {tools['tools']} tool rows + "
+        f"{policies['policies']} policy row + "
+        f"{executions['executions']} historical executions"
     )
 
     try:
@@ -94,7 +100,8 @@ def main(argv: list[str] | None = None) -> int:
         falkor = seed_falkor_demo()
         print(
             f"Ontology/Neo4j: seeded {falkor.get('relations', 0)} relations "
-            f"for asset O21 (projection={falkor.get('projection', {})})"
+            f"for assets O21/O22/O23/O24 (+ archived O20) "
+            f"(projection={falkor.get('projection', {})})"
         )
     except Exception as exc:  # noqa: BLE001 — best-effort, reported clearly
         print(

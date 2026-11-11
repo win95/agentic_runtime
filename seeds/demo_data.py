@@ -1,9 +1,23 @@
 """Demo seed data — real rows in real stores, not hardcoded stub returns.
 
-Asset: O21, a passenger elevator in building B1, October 2026.
-- PostgreSQL: 8 fault_history rows + 6 maintenance_records rows.
-- Qdrant: 6 technical documents, embedded with the configured model.
-- Ontology (PG + Neo4j): asset relations via canonical write + projection.
+Assets: O21, O22, O23 and O24, October 2026. O21 is the original
+passenger elevator in building B1 (8 fault_history rows, 6
+maintenance_records rows, 62 sensor readings, 6 technical documents,
+5 relations) — it is UNTOUCHED: the classic eval cases and several
+tests depend on its exact rows. O22 is a second elevator in the new
+building B2 (2 faults, 1 maintenance row, 6 sensor readings, one
+temperature spike coherent with its F-206 fault). O23 is a healthy
+elevator in B2 (no faults, no maintenance — it exercises the
+skill-map "no faults → maintenance → skip sensors" branch). O24 is
+a maintenance-only elevator in B2 (no faults, 2 maintenance rows).
+O20 is a retired (archived) elevator in B1, present only in the
+ontology seed — it has no faults, maintenance or sensor rows.
+
+- PostgreSQL: 10 fault_history rows + 9 maintenance_records rows +
+  76 sensor readings in total.
+- Qdrant: 7 technical documents, embedded with the configured model.
+- Ontology (PG + Neo4j): 15 asset relations via canonical write +
+  projection, plus Document nodes linked by DOCUMENTED_BY.
 
 All seed functions are idempotent: re-running them changes nothing
 (deterministic ids / MERGE / point-id skip).
@@ -115,6 +129,33 @@ FAULTS = [
         "technician": "Tran Thi B",
         "action": "Inspected all safety switches; replaced faulty pit switch.",
     },
+    # --- Asset O22 (passenger elevator, building B2) ----------------------
+    {
+        "id": "fh-o22-001",
+        "asset_id": "O22",
+        "code": "F-206",
+        "title": "Traction motor overheating",
+        "description": "Motor winding temperature reached 88.5C during peak hours.",
+        "severity": "high",
+        "occurred_at": datetime(2026, 10, 11, 15, 20),
+        "resolved_at": datetime(2026, 10, 11, 19, 5),
+        "technician": "Le Van C",
+        "action": "Cleaned cooling fan; replaced air filter.",
+    },
+    {
+        "id": "fh-o22-002",
+        "asset_id": "O22",
+        "code": "F-207",
+        "title": "Controller communication error",
+        "description": "Intermittent CAN bus errors between controller and drive.",
+        "severity": "medium",
+        "occurred_at": datetime(2026, 10, 18, 9, 40),
+        "resolved_at": datetime(2026, 10, 18, 12, 10),
+        "technician": "Nguyen Van A",
+        "action": "Reseated CAN connectors; verified bus load.",
+    },
+    # O23 (healthy) and O24 (maintenance-only) have NO fault rows — that
+    # absence is the point: it exercises the skill-map branches.
 ]
 
 MAINTENANCE = [
@@ -166,6 +207,33 @@ MAINTENANCE = [
         "technician": "Tran Thi B",
         "notes": "Follow-up to safety trip F-103.",
     },
+    # --- Asset O22 (building B2) ------------------------------------------
+    {
+        "id": "mr-o22-001",
+        "asset_id": "O22",
+        "date": datetime(2026, 10, 12, 10, 0),
+        "action": "Motor cooling system service: fan, vents, air filter.",
+        "technician": "Le Van C",
+        "notes": "Follow-up to overheating F-206.",
+    },
+    # --- Asset O24 (maintenance-only, building B2) ------------------------
+    {
+        "id": "mr-o24-001",
+        "asset_id": "O24",
+        "date": datetime(2026, 10, 6, 9, 0),
+        "action": "Monthly routine inspection: doors, ropes, brakes, safety gear.",
+        "technician": "Nguyen Van A",
+        "notes": "All items within spec.",
+    },
+    {
+        "id": "mr-o24-002",
+        "asset_id": "O24",
+        "date": datetime(2026, 10, 20, 14, 0),
+        "action": "Door operator check and lubrication.",
+        "technician": "Tran Thi B",
+        "notes": "Door closing time within spec.",
+    },
+    # O23 (healthy) has NO maintenance rows.
 ]
 
 # Technical documents for the Qdrant collection. `id` is stable so the
@@ -241,6 +309,18 @@ DOCUMENTS = [
         ),
         "category": "ropes",
     },
+    {
+        "id": "doc-o23-overview",
+        "title": "Elevator O23 — operation and routine checks",
+        "content": (
+            "Elevator O23 is a passenger elevator in building B2. Monthly "
+            "routine checks cover doors, ropes, brakes and safety gear. "
+            "Normal motor temperature is 68–73C and normal vibration is "
+            "2.5–3.5 mm/s at full load. No fault history is recorded for "
+            "O23 in October 2026."
+        ),
+        "category": "operation",
+    },
 ]
 
 # (from_id, from_label, relation, to_id, to_label)
@@ -250,6 +330,21 @@ RELATIONS = [
     ("O21", "Asset", "HAS_COMPONENT", "door-sensor-DS1", "Component"),
     ("O21", "Asset", "HAS_COMPONENT", "controller-C1", "Component"),
     ("O21", "Asset", "HAS_COMPONENT", "brake-BK1", "Component"),
+    # O22 (building B2) + its components.
+    ("O22", "Asset", "PART_OF", "building-B2", "Building"),
+    ("O22", "Asset", "HAS_COMPONENT", "motor-M3", "Component"),
+    ("O22", "Asset", "HAS_COMPONENT", "controller-C2", "Component"),
+    # O20 (archived, building B1) + its one component.
+    ("O20", "Asset", "PART_OF", "building-B1", "Building"),
+    ("O20", "Asset", "HAS_COMPONENT", "motor-M0", "Component"),
+    # O23 / O24 (building B2).
+    ("O23", "Asset", "PART_OF", "building-B2", "Building"),
+    ("O24", "Asset", "PART_OF", "building-B2", "Building"),
+    # Document links — the Document key is the Qdrant doc id, which is
+    # what ontology/knowledge/graph_query.py `linked_documents` matches.
+    ("O21", "Asset", "DOCUMENTED_BY", "doc-door-sensor", "Document"),
+    ("O21", "Asset", "DOCUMENTED_BY", "doc-motor-overheat", "Document"),
+    ("O21", "Asset", "DOCUMENTED_BY", "doc-brake-inspection", "Document"),
 ]
 
 
@@ -278,6 +373,46 @@ def _sensor_readings() -> list[dict]:
             "id": f"sr-o21-vib-{day:02d}", "asset_id": ASSET_ID,
             "metric": "vibration_mm_s", "value": round(vib, 1),
             "unit": "mm/s", "at": at,
+        })
+    # A handful of readings for the newer assets — same noon cadence, no
+    # full month. O22's temperature spike (88.5C on 11 Oct) is coherent
+    # with its F-206 fault; O23/O24 stay inside normal ranges.
+    for day, temp, vib in (
+        (10, 74.0, 3.0),
+        (11, 88.5, 3.2),  # F-206 day
+        (12, 71.5, 2.9),
+    ):
+        rows.append({
+            "id": f"sr-o22-temp-{day:02d}", "asset_id": "O22",
+            "metric": "motor_temperature_c", "value": temp,
+            "unit": "C", "at": datetime(2026, 10, day, 12, 0),
+        })
+        rows.append({
+            "id": f"sr-o22-vib-{day:02d}", "asset_id": "O22",
+            "metric": "vibration_mm_s", "value": vib,
+            "unit": "mm/s", "at": datetime(2026, 10, day, 12, 0),
+        })
+    for day, temp, vib in ((15, 70.5, 2.9), (16, 71.0, 3.1)):
+        rows.append({
+            "id": f"sr-o23-temp-{day:02d}", "asset_id": "O23",
+            "metric": "motor_temperature_c", "value": temp,
+            "unit": "C", "at": datetime(2026, 10, day, 12, 0),
+        })
+        rows.append({
+            "id": f"sr-o23-vib-{day:02d}", "asset_id": "O23",
+            "metric": "vibration_mm_s", "value": vib,
+            "unit": "mm/s", "at": datetime(2026, 10, day, 12, 0),
+        })
+    for day, temp, vib in ((6, 70.2, 3.0), (20, 70.8, 2.8)):
+        rows.append({
+            "id": f"sr-o24-temp-{day:02d}", "asset_id": "O24",
+            "metric": "motor_temperature_c", "value": temp,
+            "unit": "C", "at": datetime(2026, 10, day, 12, 0),
+        })
+        rows.append({
+            "id": f"sr-o24-vib-{day:02d}", "asset_id": "O24",
+            "metric": "vibration_mm_s", "value": vib,
+            "unit": "mm/s", "at": datetime(2026, 10, day, 12, 0),
         })
     return rows
 
@@ -417,12 +552,21 @@ def validate() -> dict:
     """Check the seed data's own invariants (no store access).
 
     Used by `seeds/seed_demo_data.py --dry-run` and the seed tests:
-    ids unique per list, every row for asset O21, all fault/maintenance
+    ids unique per list, per-asset row counts, all fault/maintenance
     dates inside October 2026, resolved_at after occurred_at, every
     document has a non-empty title + content, every relation starts at
-    O21. Raises ValueError on the first violation (plain checks, never
-    ``assert`` — validation must survive ``python -O``).
+    a known asset. Raises ValueError on the first violation (plain
+    checks, never ``assert`` — validation must survive ``python -O``).
     """
+    # Per-asset counts — the O21 October 2026 dataset is fixed (8/6/62);
+    # O23 must stay empty of faults + maintenance and O24 empty of faults:
+    # those absences are what exercise the skill-map branches.
+    expected_per_asset = {
+        "O21": (8, 6, 62),
+        "O22": (2, 1, 6),
+        "O23": (0, 0, 4),
+        "O24": (0, 2, 4),
+    }
     for name, rows, key in (
         ("faults", FAULTS, "id"),
         ("maintenance", MAINTENANCE, "id"),
@@ -432,8 +576,15 @@ def validate() -> dict:
         ids = [row[key] for row in rows]
         if not (len(ids) == len(set(ids))):
             raise ValueError(f"duplicate ids in {name}: {ids}")
+    for asset, (faults, maintenance, sensors) in expected_per_asset.items():
+        if not (sum(1 for r in FAULTS if r["asset_id"] == asset) == faults):
+            raise ValueError(f"asset {asset} fault count changed")
+        if not (sum(1 for r in MAINTENANCE if r["asset_id"] == asset) == maintenance):
+            raise ValueError(f"asset {asset} maintenance count changed")
+        if not (sum(1 for r in SENSOR_READINGS if r["asset_id"] == asset) == sensors):
+            raise ValueError(f"asset {asset} sensor count changed")
     for row in FAULTS + MAINTENANCE:
-        if not (row["asset_id"] == ASSET_ID):
+        if row["asset_id"] not in expected_per_asset:
             raise ValueError(f"wrong asset in {row['id']}")
     for row in FAULTS:
         if not (row["occurred_at"].month == 10 and row["occurred_at"].year == 2026):
@@ -448,13 +599,16 @@ def validate() -> dict:
     for doc in DOCUMENTS:
         if not (doc["title"].strip() and doc["content"].strip()):
             raise ValueError(f"document {doc['id']} has empty title or content")
+    doc_ids = {doc["id"] for doc in DOCUMENTS}
     for rel in RELATIONS:
-        if not (rel[0] == ASSET_ID):
-            raise ValueError(f"relation does not start at {ASSET_ID}: {rel}")
         if not (len(rel) == 5):
             raise ValueError(f"malformed relation: {rel}")
+        if rel[0] not in {*expected_per_asset, "O20"}:
+            raise ValueError(f"relation does not start at a known asset: {rel}")
+        if rel[2] == "DOCUMENTED_BY" and (rel[4] != "Document" or rel[3] not in doc_ids):
+            raise ValueError(f"DOCUMENTED_BY target is not a seeded document: {rel}")
     for row in SENSOR_READINGS:
-        if not (row["asset_id"] == ASSET_ID):
+        if row["asset_id"] not in expected_per_asset:
             raise ValueError(f"wrong asset in {row['id']}")
         if row["metric"] not in ("motor_temperature_c", "vibration_mm_s"):
             raise ValueError(f"unknown sensor metric in {row['id']}")
@@ -466,6 +620,8 @@ def validate() -> dict:
         raise ValueError("F-204 temperature spike missing")
     if not (by_id["sr-o21-vib-19"]["value"] == 6.8):
         raise ValueError("F-205 vibration spike missing")
+    if not (by_id["sr-o22-temp-11"]["value"] == 88.5):
+        raise ValueError("F-206 temperature spike missing")
     return {
         "faults": len(FAULTS),
         "maintenance": len(MAINTENANCE),
@@ -473,4 +629,115 @@ def validate() -> dict:
         "relations": len(RELATIONS),
         "sensor_readings": len(SENSOR_READINGS),
     }
+
+
+def seed_executions_demo(db) -> dict:
+    """Seed 3 finished executions (idempotent by fixed ids).
+
+    One SUCCEEDED fault_analysis (O21), one FAILED fault_analysis
+    (O22, store outage), one SUCCEEDED system_admin. Each has a
+    matching ExecutionResult row — the Execution table has no result
+    column, so the output/evidence live there, as in real runs.
+
+    These rows do NOT trigger Slack notifications: the notifier only
+    runs inside real ``run_execution`` (app/worker/tasks.py), never on
+    seeded rows.
+    """
+    from app.models import Execution, ExecutionResult
+
+    executions = [
+        Execution(
+            id="exec-seed-fa-001",
+            mission_id="fault_analysis",
+            mission_version=1,
+            agent_id="fault_investigator",
+            agent_version=None,
+            input={
+                "asset_id": "O21",
+                "start_date": "2026-10-01",
+                "end_date": "2026-10-31",
+            },
+            status="SUCCEEDED",
+            created_at=datetime(2026, 10, 28, 9, 0),
+            started_at=datetime(2026, 10, 28, 9, 0, 5),
+            finished_at=datetime(2026, 10, 28, 9, 2, 40),
+        ),
+        Execution(
+            id="exec-seed-fa-002",
+            mission_id="fault_analysis",
+            mission_version=1,
+            agent_id="fault_investigator",
+            agent_version=None,
+            input={
+                "asset_id": "O22",
+                "start_date": "2026-10-01",
+                "end_date": "2026-10-31",
+            },
+            status="FAILED",
+            error="Neo4j unavailable during projection drain; graph evidence missing.",
+            created_at=datetime(2026, 10, 29, 10, 0),
+            started_at=datetime(2026, 10, 29, 10, 0, 4),
+            finished_at=datetime(2026, 10, 29, 10, 1, 12),
+        ),
+        Execution(
+            id="exec-seed-sa-001",
+            mission_id="system_admin",
+            mission_version=1,
+            agent_id="admin_bot",
+            agent_version=None,
+            input={"request": "Kiểm tra sức khỏe hệ thống và báo cáo các mission đang chạy."},
+            status="SUCCEEDED",
+            created_at=datetime(2026, 10, 28, 7, 0),
+            started_at=datetime(2026, 10, 28, 7, 0, 2),
+            finished_at=datetime(2026, 10, 28, 7, 0, 55),
+        ),
+    ]
+    results = [
+        ExecutionResult(
+            id="res-seed-fa-001",
+            execution_id="exec-seed-fa-001",
+            output={
+                "root_causes": [
+                    "Traction motor overheating (F-204): clogged cooling fan, 92C on 2026-10-07.",
+                    "Motor vibration (F-205): sheave imbalance, 6.8 mm/s on 2026-10-19.",
+                ],
+                "recommendations": [
+                    "Clean cooling fan and vents monthly during peak season.",
+                    "Rebalance traction sheave after any vibration above 4.5 mm/s.",
+                ],
+                "answer": "Root causes for O21 (October 2026): motor overheating and vibration.",
+            },
+            evidence=[
+                {"kind": "fault", "asset_id": "O21", "code": "F-204"},
+                {"kind": "fault", "asset_id": "O21", "code": "F-205"},
+                {"kind": "sensor", "asset_id": "O21", "metric": "motor_temperature_c"},
+            ],
+        ),
+        ExecutionResult(
+            id="res-seed-fa-002",
+            execution_id="exec-seed-fa-002",
+            output={
+                "errors": ["Neo4j unavailable during projection drain; graph evidence missing."],
+            },
+            evidence=[],
+        ),
+        ExecutionResult(
+            id="res-seed-sa-001",
+            execution_id="exec-seed-sa-001",
+            output={
+                "answer": "System healthy: 2 missions, 1 schedule, no failures in the last 24h.",
+                "actions_taken": ["list_executions", "list_missions", "system_health"],
+            },
+            evidence=[
+                {"kind": "system", "detail": "system_health"},
+            ],
+        ),
+    ]
+    for row in executions:
+        db.merge(row)
+    for row in results:
+        db.merge(row)
+    db.commit()
+    logger.info("Seeded %d historical executions", len(executions))
+    return {"executions": len(executions)}
 

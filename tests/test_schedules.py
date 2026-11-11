@@ -387,6 +387,9 @@ def test_seed_loads_example_schedule_disabled(db_session):
     assert data["enabled"] is False
     assert "kiểm tra sức khỏe hệ thống" in data["input_data"]["request"]
 
+    # The weekly fault_analysis schedule is seeded by the same glob —
+    # its mission must exist too, or seed_schedules raises.
+    _make_mission(db_session)
     seed_schedules(db_session)
 
     schedule = schedule_service.get_schedule(
@@ -396,6 +399,14 @@ def test_seed_loads_example_schedule_disabled(db_session):
     assert schedule.enabled is False
     assert schedule.cron == "0 7 * * *"
     assert schedule.next_run_at is not None
+
+    weekly = schedule_service.get_schedule(
+        db_session, "sched_fault_analysis_weekly"
+    )
+    assert weekly is not None
+    assert weekly.enabled is False
+    assert weekly.cron == "0 6 * * 1"
+    assert weekly.input_data["asset_id"] == "O21"
 
 
 def test_seed_preserves_enabled(db_session):

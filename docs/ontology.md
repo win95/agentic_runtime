@@ -176,7 +176,9 @@ docker compose up -d neo4j
 # Apply migrations (creates the ontology_* tables):
 make migrate
 
-# Seed the demo ontology (O21 + 5 relations) and project it:
+# Seed the demo ontology (17 entities + 15 relations: O21/O22/O23/O24,
+# O20 archived, 2 buildings, 6 components, 3 Document nodes) and
+# project it:
 make seed
 # or ontology only: python -m seeds.seed_ontology_demo
 
@@ -185,6 +187,11 @@ python -m scripts.project_ontology_queue
 # or via the API:
 curl -X POST http://localhost:8000/ontology/internal/project-drain \
   -H "X-API-Key: $API_KEY"
+
+# Opt-in edge-case seed (NOT in `make seed`): plant one poisoned
+# projection row; drain 5 times and it goes dead:
+make seed-edge
+python -m scripts.project_ontology_queue  # repeat 5x, or wait for 5 beats
 ```
 
 ## Backfill — FalkorDB → canonical
@@ -234,6 +241,35 @@ Rules and guarantees:
 - After the backfill, run the drain (`python -m
   scripts.project_ontology_queue`) and check the Neo4j graph before
   deleting the FalkorDB service.
+
+### Backfill fixture — test the script without production data
+
+`seeds/backfill_fixture.json` is a small legacy FalkorDB graph that is
+NOT in canonical: asset O19 (freight elevator) + building B1 +
+component motor-M9 + a Document node, with PART_OF / HAS_COMPONENT /
+DOCUMENTED_BY edges. Load it into a FalkorDB instance, then run the
+backfill against that graph and verify O19 appears in canonical +
+Neo4j.
+
+No compose service is shipped for FalkorDB (it exists only for this
+one-off migration); run it externally:
+
+```bash
+docker run -d -p 6379:6379 falkordb/falkordb:latest
+
+# Load the fixture (idempotent MERGE; env FALKOR_HOST/FALKOR_PORT):
+python -m scripts.load_backfill_fixture
+# or dry-run (validate only, writes nothing):
+python -m scripts.load_backfill_fixture --dry-run
+
+# Backfill the fixture graph (not knowledge_graph):
+.venv/bin/python -m scripts.backfill_falkor_to_canonical \
+  --falkor-host localhost --falkor-port 6379 \
+  --falkor-graph backfill_fixture --dry-run
+.venv/bin/python -m scripts.backfill_falkor_to_canonical \
+  --falkor-host localhost --falkor-port 6379 \
+  --falkor-graph backfill_fixture
+```
 
 ## Deferred
 
