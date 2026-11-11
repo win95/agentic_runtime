@@ -315,6 +315,10 @@ def test_deep_agent_node_injects_plan_and_merges_trace(db_session, monkeypatch):
     load_missions.main()
     mission = mission_service.get_mission(db_session, "fault_analysis")
     mission_dict = mission_service.mission_to_dict(mission)
+    # Pin the autonomous path: a hybrid run may satisfy the capability
+    # graph and route straight to validate (evidence-dependent), which
+    # would skip deep_agent_node and this test's subject entirely.
+    mission_dict["execution"]["mode"] = "autonomous"
     seen: dict = {}
 
     def fake_build(tools, system_prompt=None, skills=None, model_config=None,
@@ -352,6 +356,8 @@ def test_deep_agent_node_old_double_without_skill_maps_still_works(db_session, m
     load_missions.main()
     mission = mission_service.get_mission(db_session, "fault_analysis")
     mission_dict = mission_service.mission_to_dict(mission)
+    # Autonomous mode guarantees deep_agent_node runs (see the test above).
+    mission_dict["execution"]["mode"] = "autonomous"
 
     def fake_build(tools, system_prompt=None, skills=None, model_config=None,
                    middleware=None):

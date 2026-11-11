@@ -42,7 +42,9 @@ def _tables(db_path):
 def _version(db_path):
     conn = sqlite3.connect(db_path)
     try:
-        return conn.execute("SELECT version_num FROM alembic_version").fetchall()
+        return conn.execute(
+            "SELECT version_num FROM alembic_version_agentic_runtime"
+        ).fetchall()
     finally:
         conn.close()
 
@@ -86,7 +88,7 @@ def test_alembic_upgrade_head_then_downgrade_base(tmp_path):
 
     result = _alembic(tmp_path, "downgrade", "base")
     assert result.returncode == 0, result.stderr
-    assert _tables(db_path) == {"alembic_version"}
+    assert _tables(db_path) == {"alembic_version_agentic_runtime"}
 
 
 def test_alembic_current_matches_head(tmp_path):

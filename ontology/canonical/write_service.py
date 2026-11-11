@@ -143,7 +143,14 @@ class OntologyWriteService:
         entity_key = _validate_key(entity_key, "entity_key")
         ref = entity_ref(entity_type, entity_key)
         existing = self._repo.get_entity(entity_type, entity_key)
-        new_hash = compute_state_hash(properties, status)
+        # ``properties=None`` means "no payload" — keep what the row
+        # already has (a relation-stub write must not wipe rich entity
+        # properties). Only an explicit dict replaces the value.
+        effective_properties = (
+            properties if properties is not None
+            else (existing.properties if existing else None)
+        )
+        new_hash = compute_state_hash(effective_properties, status)
 
         if existing and not force_update:
             if (
@@ -162,7 +169,7 @@ class OntologyWriteService:
             row = OntologyEntity(
                 entity_type=entity_type,
                 entity_key=entity_key,
-                properties=properties,
+                properties=effective_properties,
                 state_hash=new_hash,
                 version=version,
                 status=status,
@@ -173,7 +180,7 @@ class OntologyWriteService:
             )
         else:
             row = existing
-            row.properties = properties
+            row.properties = effective_properties
             row.state_hash = new_hash
             row.version = version
             row.status = status
@@ -184,7 +191,7 @@ class OntologyWriteService:
         snapshot = {
             "entity_type": entity_type,
             "entity_key": entity_key,
-            "properties": properties,
+            "properties": effective_properties,
             "status": status,
             "version": version,
         }
@@ -272,7 +279,13 @@ class OntologyWriteService:
         existing = self._repo.get_relationship(
             relationship_type, source_type, source_key, target_type, target_key
         )
-        new_hash = compute_state_hash(properties, status)
+        # Same "no payload" rule as entities: None keeps existing
+        # relationship properties instead of clearing them.
+        effective_properties = (
+            properties if properties is not None
+            else (existing.properties if existing else None)
+        )
+        new_hash = compute_state_hash(effective_properties, status)
 
         if existing and not force_update:
             if (
@@ -294,7 +307,7 @@ class OntologyWriteService:
                 source_key=source_key,
                 target_type=target_type,
                 target_key=target_key,
-                properties=properties,
+                properties=effective_properties,
                 state_hash=new_hash,
                 version=version,
                 status=status,
@@ -305,7 +318,7 @@ class OntologyWriteService:
             )
         else:
             row = existing
-            row.properties = properties
+            row.properties = effective_properties
             row.state_hash = new_hash
             row.version = version
             row.status = status
@@ -319,7 +332,7 @@ class OntologyWriteService:
             "source_key": source_key,
             "target_type": target_type,
             "target_key": target_key,
-            "properties": properties,
+            "properties": effective_properties,
             "status": status,
             "version": version,
         }

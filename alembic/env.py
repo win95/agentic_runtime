@@ -45,6 +45,12 @@ config.set_main_option("sqlalchemy.url", settings.database_url)
 
 target_metadata = Base.metadata
 
+# MLflow shares this PostgreSQL database (backend-store-uri) and owns the
+# default ``alembic_version`` table, so the app must record its own
+# migration state in a separate table. Keep the name stable: it already
+# exists in deployed databases.
+VERSION_TABLE = "alembic_version_agentic_runtime"
+
 
 def run_migrations_offline() -> None:
     """Run migrations in 'offline' mode (emit SQL, no DBAPI connection)."""
@@ -54,6 +60,7 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        version_table=VERSION_TABLE,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -67,7 +74,11 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            version_table=VERSION_TABLE,
+        )
         with context.begin_transaction():
             context.run_migrations()
 

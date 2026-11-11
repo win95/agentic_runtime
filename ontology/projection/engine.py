@@ -13,7 +13,6 @@ from ontology.graph.protocol import GraphStore
 from ontology.models import OntologyProjectionState
 from ontology.projection.handlers.entity import project_entity
 from ontology.projection.handlers.relationship import project_relationship
-from ontology.projection.provider import get_graph_store
 
 logger = logging.getLogger(__name__)
 
@@ -60,6 +59,11 @@ class ProjectionEngine:
 
     def _get_store(self) -> GraphStore:
         if self._store is None:
+            # Imported here (not at module import) so tests can patch
+            # ``ontology.projection.provider.get_graph_store`` and so a
+            # construction failure is raised inside drain_batch's guard.
+            from ontology.projection.provider import get_graph_store
+
             self._store = get_graph_store()
         return self._store
 

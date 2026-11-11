@@ -19,6 +19,7 @@ import contextlib
 import json
 import logging
 import re
+import threading
 
 from langgraph.graph import END, START, StateGraph
 
@@ -768,6 +769,10 @@ def _to_libpq_dsn(url: str) -> str:
     return url
 
 
+_CHECKPOINTER_SETUP_LOCK = threading.Lock()
+_checkpointer_setup_done = False
+
+
 @contextlib.contextmanager
 def get_checkpointer():
     """Postgres checkpointer (optional, off by default), as a context manager.
@@ -782,6 +787,7 @@ def get_checkpointer():
     run (see run_mission). Entering it opens the connection and `setup()`
     creates the checkpoint tables.
     """
+    global _checkpointer_setup_done
     if not settings.checkpoint_enabled:
         yield None
         return
@@ -798,12 +804,21 @@ def get_checkpointer():
         with PostgresSaver.from_conn_string(
             _to_libpq_dsn(settings.database_url)
         ) as checkpointer:
-            try:
-                checkpointer.setup()
-            except Exception as exc:  # noqa: BLE001 — checkpoint is best-effort
-                logger.warning("Could not set up Postgres checkpointer: %s", exc)
-                yield None
-                return
+            # setup() runs CREATE INDEX CONCURRENTLY, which waits for
+            # every older transaction and cannot run concurrently with
+            # itself. Set the schema up once per process (under a lock)
+            # instead of on every run: concurrent executions would
+            # otherwise race and block each other on the index lock.
+            if not _checkpointer_setup_done:
+                try:
+                    with _CHECKPOINTER_SETUP_LOCK:
+                        if not _checkpointer_setup_done:
+                            checkpointer.setup()
+                            _checkpointer_setup_done = True
+                except Exception as exc:  # noqa: BLE001 — checkpoint is best-effort
+                    logger.warning("Could not set up Postgres checkpointer: %s", exc)
+                    yield None
+                    return
             yield checkpointer
     except Exception as exc:  # noqa: BLE001 — checkpoint is best-effort
         logger.warning("Could not set up Postgres checkpointer: %s", exc)

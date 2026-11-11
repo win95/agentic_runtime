@@ -50,6 +50,13 @@ def run_execution(self, execution_id: str) -> dict:
         if mission is None:
             raise RuntimeError(f"Mission {execution.mission_id} not found")
         mission_dict = mission_service.mission_to_dict(mission)
+        # End the read transaction before entering the graph. The
+        # Postgres checkpointer's setup() runs CREATE INDEX CONCURRENTLY,
+        # which waits for every older transaction — including this
+        # worker's own idle-in-transaction connection. Leaving it open
+        # deadlocks the run against itself. The session stays usable;
+        # the next statement opens a fresh transaction.
+        db.commit()
 
         # Imported here so the worker process (not the API process) pays the
         # LangGraph import cost.

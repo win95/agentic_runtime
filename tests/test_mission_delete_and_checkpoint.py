@@ -29,6 +29,12 @@ from tests.test_mission_graph import INPUT, MISSION
 MISSION_PAYLOAD = {"id": "fault_analysis", "name": "Fault Analysis"}
 
 
+@pytest.fixture(autouse=True)
+def _fresh_checkpointer_setup(monkeypatch):
+    """setup() is cached per process; reset it between tests."""
+    monkeypatch.setattr(mission_graph, "_checkpointer_setup_done", False)
+
+
 def _create_mission(client):
     response = client.post("/missions", json=MISSION_PAYLOAD)
     assert response.status_code == 201
