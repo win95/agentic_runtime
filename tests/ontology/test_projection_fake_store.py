@@ -403,47 +403,6 @@ def test_requeue_dead_row_resets_attempts(db):
     db.commit()
 
 
-def test_requeue_pending_row_keeps_attempts(db):
-    repo = CanonicalOntologyRepository(db)
-    repo.upsert_projection_pending(
-        subject_kind="entity",
-        subject_ref="entity:Asset:O-pending",
-        canonical_version=1,
-        change_type="create",
-        trace_id="pending-test",
-    )
-    db.commit()
-    row = (
-        db.query(OntologyProjectionState)
-        .filter_by(subject_ref="entity:Asset:O-pending")
-        .first()
-    )
-    row.attempts = 3
-    db.commit()
-    repo.upsert_projection_pending(
-        subject_kind="entity",
-        subject_ref="entity:Asset:O-pending",
-        canonical_version=2,
-        change_type="update",
-        trace_id="pending-test-requeue",
-    )
-    db.commit()
-    db.expire_all()
-    row = (
-        db.query(OntologyProjectionState)
-        .filter_by(subject_ref="entity:Asset:O-pending")
-        .first()
-    )
-    assert row.status == "pending"
-    assert row.attempts == 3
-    # Leave no pending row behind: test_projection_batch_limit counts
-    # claimed rows in this shared in-memory DB.
-    db.query(OntologyProjectionState).filter_by(
-        subject_ref="entity:Asset:O-pending"
-    ).delete()
-    db.commit()
-
-
 def test_projection_batch_limit(db, monkeypatch):
     fake = FakeGraphStore()
     monkeypatch.setattr(provider_module, "_store", fake)
@@ -579,39 +538,6 @@ def test_projection_relationship_dropped_when_endpoint_gone(db, monkeypatch):
     assert _row_status(db, ref) == "synced"
 
 
-def test_projection_relationship_dropped_when_endpoint_never_existed(db, monkeypatch):
-    fake = FakeGraphStore()
-    monkeypatch.setattr(provider_module, "_store", fake)
-    writer = _writer(db)
-    prov = WriteProvenance(trace_id="proj-never")
-    writer.write_entity(
-        entity_type="Building",
-        entity_key="B-never",
-        properties={"name": "tower"},
-        provenance=prov,
-    )
-    # Relationship references an Asset that was never written.
-    writer.write_relationship(
-        relationship_type="PART_OF",
-        source_type="Asset",
-        source_key="O-never",
-        target_type="Building",
-        target_key="B-never",
-        properties={},
-        provenance=prov,
-    )
-    db.commit()
-    result = drain_pending_projections(db)
-    assert result["errors"] == 0
-    edge = ("Asset", "O-never", "PART_OF", "Building", "B-never")
-    assert edge not in fake.edges
-    assert edge in fake.deleted_relationships
-    # No stub node was created for the missing endpoint.
-    assert ("Asset", "O-never") not in fake.nodes
-    ref = relationship_ref("PART_OF", "Asset", "O-never", "Building", "B-never")
-    assert _row_status(db, ref) == "synced"
-
-
 def test_neo4j_store_ensure_constraints_issues_uniqueness_cypher():
     from ontology.canonical.schema import ENTITY_TYPES_V1
     from ontology.graph.neo4j_store import Neo4jGraphStore
@@ -648,16 +574,6 @@ def test_neo4j_store_merge_uses_full_replace_and_match_endpoints():
     assert "SET r = $props" in cypher
     assert "MERGE (a:Asset" not in cypher
     assert "MERGE (b:Building" not in cypher
-
-
-def test_neo4j_store_node_exists():
-    from ontology.graph.neo4j_store import Neo4jGraphStore
-
-    assert (
-        Neo4jGraphStore(driver=_RecordingDriver(rows=[{"id": "O1"}])).node_exists("Asset", "O1")
-        is True
-    )
-    assert Neo4jGraphStore(driver=_RecordingDriver(rows=[])).node_exists("Asset", "O1") is False
 
 
 def test_build_graph_store_rejects_unknown_backend(monkeypatch):

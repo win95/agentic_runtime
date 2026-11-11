@@ -958,3 +958,31 @@ số evidence, lỗi nếu có — không bơm full evidence).
   tracing off hay server down thì chạy không tag, không fail run.
 - Chi tiết (ngữ nghĩa, dạng từng lượt, bảng giới hạn, API, những gì
   KHÔNG có): `docs/sessions.md`.
+
+## 24. Sandbox backend — 1 OpenSandbox sandbox / session (opt-in)
+
+Mặc định file tools của Deep Agent chạy trên `StateBackend` trong bộ
+nhớ (không có shell). Khi bật sandbox, mỗi session của
+`fault_analysis` dùng chung 1 sandbox OpenSandbox tự host: agent
+viết + chạy code phân tích thật trong container cách ly, còn các tool
+truy vấn Postgres/Neo4j/Qdrant vẫn ở host-side (sandbox không nhận
+credential hay quyền truy cập DB).
+
+- Bật khi đủ 3 điều kiện: `SANDBOX_ENABLED=true` + `SANDBOX_API_KEY`
+  trong `.env`, mission opt-in (`execution.sandbox: true` — hiện chỉ
+  `fault_analysis`), execution có `session_id`. Thiếu 1 trong 3 thì
+  chạy như trước (in-memory backend). Server down / sandbox chết thì
+  run vẫn SUCCEEDED, chỉ ghi note `Sandbox unavailable`.
+- Vòng đời: lượt đầu của session tạo sandbox + ghi mapping vào bảng
+  `session_sandboxes` (migration `0007`); lượt sau re-attach theo id,
+  sandbox chết thì tạo mới thay thế; beat `reap_idle_sandboxes` hủy
+  sandbox idle quá `SANDBOX_IDLE_TTL_SECONDS` (mặc định 3600s).
+  File trong sandbox mất theo khi bị hủy — thứ cần giữ phải nằm ở
+  execution result hoặc report store phía host.
+- Image sandbox phải có python3 (file helpers của deepagents chạy
+  python trong sandbox); mặc định `python:3.12-slim`.
+- Sau khi pull: chạy server OpenSandbox trước (`uvx
+  opensandbox-server ...`, localhost:8080), rồi `pip install -r
+  requirements.txt`, `alembic upgrade head`, `make seed`, set
+  `.env`, restart worker + beat.
+- Chi tiết: `docs/sandbox.md`.

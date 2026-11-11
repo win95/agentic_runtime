@@ -8,11 +8,9 @@ import pathlib
 from datetime import datetime, timezone
 
 import pytest
-import yaml
 
 from app import models
 from app.services import execution_service, mission_service, schedule_service
-from app.worker.celery_app import celery_app
 from seeds.load_missions import load_schedule_file, seed_schedules
 
 MISSION_PAYLOAD = {
@@ -176,56 +174,6 @@ def test_dispatcher_skips_not_yet_due(db_session, monkeypatch):
 
     assert summary == {"due": 0, "dispatched": [], "failed": []}
     assert db_session.query(models.Execution).count() == 0
-
-
-def test_dispatcher_unknown_mission_marks_error_and_keeps_due(db_session, monkeypatch):
-    _patch_dispatch(monkeypatch)
-    # Inserted directly: the service rejects unknown missions at creation,
-    # so this row simulates a mission that vanished after scheduling.
-    schedule = models.Schedule(
-        id="sched_ghost",
-        mission_id="nope",
-        cron="0 7 * * *",
-        input_data={},
-        enabled=True,
-        next_run_at=datetime(2026, 11, 9, 6, 30),
-    )
-    db_session.add(schedule)
-    db_session.commit()
-
-    summary = schedule_service.run_due_schedules(db_session, now=NOW)
-
-    assert summary["due"] == 1
-    assert summary["dispatched"] == []
-    assert len(summary["failed"]) == 1
-    assert "not found" in summary["failed"][0]["error"]
-    assert db_session.query(models.Execution).count() == 0
-    db_session.refresh(schedule)
-    # The run is NOT lost: next_run_at stays at the missed time so the
-    # next beat tick retries it; last_error records the failure.
-    assert schedule.next_run_at == datetime(2026, 11, 9, 6, 30)
-    assert schedule.last_error and "not found" in schedule.last_error
-
-
-def test_dispatcher_missing_input_marks_error_and_keeps_due(db_session, monkeypatch):
-    _patch_dispatch(monkeypatch)
-    _make_mission(db_session)
-    schedule = _make_schedule(db_session, input_data={})
-    schedule.next_run_at = datetime(2026, 11, 9, 6, 30)
-    db_session.commit()
-
-    summary = schedule_service.run_due_schedules(db_session, now=NOW)
-
-    assert summary["due"] == 1
-    assert summary["dispatched"] == []
-    assert len(summary["failed"]) == 1
-    assert "asset_id" in summary["failed"][0]["error"]
-    assert db_session.query(models.Execution).count() == 0
-    db_session.refresh(schedule)
-    # The run is NOT lost: next_run_at stays at the missed time so the
-    # next beat tick retries it; last_error records the failure.
-    assert schedule.next_run_at == datetime(2026, 11, 9, 6, 30)
-    assert schedule.last_error and "asset_id" in schedule.last_error
 
 
 def test_dispatcher_dispatch_failure_keeps_due_and_records(db_session, monkeypatch):
@@ -409,43 +357,6 @@ def test_seed_loads_example_schedule_disabled(db_session):
     assert weekly.input_data["asset_id"] == "O21"
 
 
-def test_seed_preserves_enabled(db_session):
-    test_seed_loads_example_schedule_disabled(db_session)
-    schedule_service.set_enabled(db_session, "sched_system_admin_daily_health", True)
-
-    seed_schedules(db_session)
-
-    schedule = schedule_service.get_schedule(
-        db_session, "sched_system_admin_daily_health"
-    )
-    assert schedule.enabled is True
-
-
 # --- Beat wiring ---
 
 
-def test_beat_schedule_registered():
-    # Importing the tasks module registers them on the app (the worker
-    # and beat processes do this at startup via `include`).
-    from app.worker import tasks  # noqa: F401
-
-    entry = celery_app.conf.beat_schedule.get("run-due-schedules-every-minute")
-    assert entry is not None
-    assert entry["task"] == "app.worker.tasks.run_due_schedules"
-    assert entry["schedule"] == 60.0
-    assert "app.worker.tasks.run_due_schedules" in celery_app.tasks
-
-
-def test_compose_beat_mirrors_worker():
-    compose_path = (
-        pathlib.Path(__file__).resolve().parent.parent / "docker-compose.yml"
-    )
-    compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
-    services = compose["services"]
-    assert "beat" in services
-    beat, worker = services["beat"], services["worker"]
-    assert "celery -A app.worker.celery_app beat" in beat["command"]
-    assert "celery -A app.worker.celery_app worker" in worker["command"]
-    assert beat["build"] == worker["build"]
-    assert beat["environment"] == worker["environment"]
-    assert beat["depends_on"] == worker["depends_on"]

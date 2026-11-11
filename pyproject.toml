@@ -32,6 +32,10 @@ dependencies = [
     "langchain>=0.3,<2",
     "langchain-openai>=0.3,<2",
     "deepagents>=0.2,<1",
+    # opensandbox: Python SDK for the self-hosted OpenSandbox server
+    # (per-session sandbox backend for the Deep Agent — docs/sandbox.md).
+    # 1.2.x is the release the adapter was verified against.
+    "opensandbox>=1.2,<2",
     "langchain-mcp-adapters>=0.1,<1",
     "langsmith>=0.2,<1",
     "qdrant-client>=1.11,<2",

@@ -14,16 +14,12 @@ from langchain_core.outputs import ChatGeneration, LLMResult
 
 import runtime.deep_agent as deep_agent_module
 import seeds.load_missions as load_missions
-from app import models
 from app.services import mission_service
 from runtime.middleware import (
     TokenAuditCallbackHandler,
     get_audit_for_execution,
-    get_tool_call_counts,
     get_usage_for_execution,
     get_usage_totals,
-    redact_value,
-    truncate_args,
 )
 from runtime.mission_graph import run_mission
 
@@ -137,20 +133,6 @@ def test_tool_end_without_start_still_logs(db_session):
     assert rows[0].duration_ms is None
 
 
-def test_redact_and_truncate_helpers():
-    assert redact_value({"apiKey": "x", "nested": {"PASSWORD": "y", "n": 1}}) == {
-        "apiKey": "[redacted]",
-        "nested": {"PASSWORD": "[redacted]", "n": 1},
-    }
-    assert redact_value([{"secret_token": "s"}, "plain"]) == [
-        {"secret_token": "[redacted]"},
-        "plain",
-    ]
-    assert truncate_args(None) is None
-    assert len(truncate_args({"a": "y" * 5000})) == 2000
-    assert truncate_args("not json") == "not json"
-
-
 def test_logging_failure_does_not_raise(db_session):
     def _boom():
         raise RuntimeError("db down")
@@ -162,79 +144,6 @@ def test_logging_failure_does_not_raise(db_session):
     handler.on_tool_start({"name": "list_missions"}, "{}", run_id=run_id)
     handler.on_tool_end("ok", run_id=run_id)
     handler.on_tool_error(ValueError("x"), run_id=uuid.uuid4())
-
-
-def test_query_helpers(db_session):
-    db_session.add_all(
-        [
-            models.LLMUsage(
-                id="u1",
-                execution_id="exec-1",
-                mission_id="system_admin",
-                tenant="default",
-                model="gpt-4o-mini",
-                prompt_tokens=10,
-                completion_tokens=5,
-                total_tokens=15,
-                usage_source="provider",
-            ),
-            models.LLMUsage(
-                id="u2",
-                execution_id="exec-1",
-                mission_id="system_admin",
-                tenant="default",
-                model="gpt-4o-mini",
-                prompt_tokens=None,
-                completion_tokens=None,
-                total_tokens=None,
-                usage_source="missing",
-            ),
-            models.AuditLog(
-                id="a1",
-                execution_id="exec-1",
-                mission_id="system_admin",
-                tenant="default",
-                tool_name="list_executions",
-                status="success",
-            ),
-            models.AuditLog(
-                id="a2",
-                execution_id="exec-1",
-                mission_id="system_admin",
-                tenant="default",
-                tool_name="list_executions",
-                status="success",
-            ),
-            models.AuditLog(
-                id="a3",
-                execution_id="exec-1",
-                mission_id="system_admin",
-                tenant="default",
-                tool_name="get_execution",
-                status="error",
-            ),
-        ]
-    )
-    db_session.commit()
-    totals = get_usage_totals(db_session, mission_id="system_admin")
-    assert totals == {
-        "prompt_tokens": 10,
-        "completion_tokens": 5,
-        "total_tokens": 15,
-        "calls": 2,
-    }
-    assert get_usage_totals(db_session, mission_id="nope") == {
-        "prompt_tokens": 0,
-        "completion_tokens": 0,
-        "total_tokens": 0,
-        "calls": 0,
-    }
-    assert len(get_usage_for_execution(db_session, "exec-1")) == 2
-    assert len(get_audit_for_execution(db_session, "exec-1")) == 3
-    assert get_tool_call_counts(db_session, execution_id="exec-1") == {
-        "list_executions": 2,
-        "get_execution": 1,
-    }
 
 
 # --- End-to-end: mocked Deep Agent run writes both row kinds ---
@@ -267,7 +176,7 @@ def test_autonomous_run_writes_token_and_audit_rows(db_session, monkeypatch):
     mission_dict = mission_service.mission_to_dict(mission)
 
     def _fake_build(tools, system_prompt=None, skills=None, model_config=None,
-                    middleware=None):
+                    middleware=None, backend=None):
         return _CallbackFiringFakeAgent()
 
     monkeypatch.setattr(

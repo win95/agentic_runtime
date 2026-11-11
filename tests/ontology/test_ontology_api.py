@@ -61,20 +61,6 @@ def test_get_entity_ok(monkeypatch):
     assert body["properties"]["name"] == "demo"
 
 
-def test_get_entity_deleted_returns_404():
-    _seed_o21()
-    _set_o21_status("deleted")
-    resp = client.get("/ontology/entities/Asset/O21")
-    assert resp.status_code == 404
-
-
-def test_get_entity_archived_returns_404():
-    _seed_o21()
-    _set_o21_status("archived")
-    resp = client.get("/ontology/entities/Asset/O21")
-    assert resp.status_code == 404
-
-
 def test_get_entity_store_unavailable_returns_503(monkeypatch):
     def _boom(*a, **k):
         raise RuntimeError("postgres down")

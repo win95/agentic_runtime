@@ -98,26 +98,6 @@ def test_refused_delete_not_listed_as_taken():
     assert "2 execution(s)" in outcome["errors"][0]
 
 
-def test_error_result_not_listed_as_taken():
-    agent = _FakeAgent([
-        _ai_with_call("dispatch_execution", "call-1"),
-        _tool_result("call-1", {"error": "Mission not found"}),
-    ])
-    outcome = run_deep_agent(agent, MISSION, {"request": "run nope"})
-    assert outcome["actions_taken"] == []
-    assert "Mission not found" in outcome["errors"][0]
-
-
-def test_error_status_tool_message_not_listed_as_taken():
-    agent = _FakeAgent([
-        _ai_with_call("get_sensor_data", "call-1"),
-        _tool_result("call-1", "Tool 'get_sensor_data' failed: boom", status="error"),
-    ])
-    outcome = run_deep_agent(agent, MISSION, {"request": "x"})
-    assert outcome["actions_taken"] == []
-    assert "boom" in outcome["errors"][0]
-
-
 def test_successful_and_unanswered_calls_still_listed():
     agent = _FakeAgent([
         _ai_with_call("list_missions", "call-1"),

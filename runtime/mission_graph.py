@@ -418,6 +418,39 @@ def deep_agent_node(state: MissionState) -> dict:
                 (mission.get("execution") or {}).get("stop_max_continues", 3)
             ),
         )
+        # Sandbox backend (docs/sandbox.md): when the mission opts in
+        # (execution.sandbox: true) and this run has a session, the
+        # agent's file tools + `execute` run inside that session's
+        # OpenSandbox sandbox instead of the in-memory StateBackend.
+        # Resolution is best-effort and never breaks a run: a missing
+        # server, a dead sandbox, or a disabled switch falls back to
+        # the default backend, with a note on the execution. The
+        # backend handle lives only for this run — the sandbox itself
+        # persists server-side and the next run re-attaches by id.
+        sandbox_backend = None
+        sandbox_note = None
+        if (mission.get("execution") or {}).get("sandbox") is True and state.get("session_id"):
+            try:
+                from app.core.db import SessionLocal
+                from app.services import sandbox_service
+
+                _sdb = SessionLocal()
+                try:
+                    sandbox_backend = sandbox_service.resolve_session_sandbox(
+                        _sdb,
+                        session_id=state["session_id"],
+                        agent_id=agent_id,
+                        mission_id=state.get("mission_id") or "",
+                    )
+                finally:
+                    _sdb.close()
+            except Exception as exc:  # noqa: BLE001 — sandbox never breaks a run
+                logger.warning("Sandbox backend unavailable: %s", exc)
+                sandbox_backend = None
+            if sandbox_backend is None:
+                sandbox_note = "Sandbox unavailable — in-memory file backend"
+            else:
+                sandbox_note = f"Sandbox backend: {sandbox_backend.id}"
         # The fixed prefix measured against the system-prompt budget —
         # set in each branch below, BEFORE the history block is
         # appended (history is charged to the history bucket, not here).
@@ -444,6 +477,7 @@ def deep_agent_node(state: MissionState) -> dict:
                 skills=skill_sources,
                 model_config=version_cfg,
                 middleware=[hook_middleware],
+                backend=sandbox_backend,
             )
         elif (mission.get("agent_id") or "") == "admin_bot":
             from runtime.deep_agent import ADMIN_SYSTEM_PROMPT
@@ -462,6 +496,7 @@ def deep_agent_node(state: MissionState) -> dict:
                 system_prompt=system_prompt_text,
                 skills=skill_sources,
                 middleware=[hook_middleware],
+                backend=sandbox_backend,
             )
         else:
             from runtime.deep_agent import DEFAULT_SYSTEM_PROMPT
@@ -480,6 +515,7 @@ def deep_agent_node(state: MissionState) -> dict:
                 system_prompt=system_prompt_text,
                 skills=skill_sources,
                 middleware=[hook_middleware],
+                backend=sandbox_backend,
             )
         # Context budget (Phương án A): measure the fixed prefix —
         # system prompt, tool definitions, selected skill texts —
@@ -541,6 +577,11 @@ def deep_agent_node(state: MissionState) -> dict:
                 else:
                     raise
         notes = [f"Deep agent: {outcome.get('summary', '')}"] if outcome.get("summary") else []
+        # Sandbox backend (docs/sandbox.md): one line saying which
+        # backend ran — the sandbox id, or that the run fell back to
+        # the in-memory backend because no sandbox was available.
+        if sandbox_note:
+            notes.append(sandbox_note)
         # Option B session history: one line saying how many prior
         # turns the agent was shown (the turns themselves are in the
         # system prompt, not in the result). Counts are the turns

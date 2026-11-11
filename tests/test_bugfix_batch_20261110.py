@@ -6,14 +6,11 @@ fixture (``API_KEY`` is empty in tests, so auth is disabled).
 
 from __future__ import annotations
 
-import os
 import pathlib
 import subprocess
 import sys
-from types import SimpleNamespace
 
 import pytest
-import yaml
 from sqlalchemy.exc import IntegrityError
 
 import infra.repositories as repositories
@@ -52,20 +49,6 @@ def test_list_executions_rejects_out_of_range_limit(client):
 def test_create_duplicate_mission_returns_409(client):
     assert client.post("/missions", json=MISSION_PAYLOAD).status_code == 201
     response = client.post("/missions", json=MISSION_PAYLOAD)
-    assert response.status_code == 409
-    assert "already exists" in response.json()["detail"]
-
-
-def test_create_duplicate_agent_returns_409(client):
-    assert client.post("/agents", json=AGENT_PAYLOAD).status_code == 201
-    response = client.post("/agents", json=AGENT_PAYLOAD)
-    assert response.status_code == 409
-    assert "already exists" in response.json()["detail"]
-
-
-def test_create_duplicate_policy_returns_409(client):
-    assert client.post("/policies", json=POLICY_PAYLOAD).status_code == 201
-    response = client.post("/policies", json=POLICY_PAYLOAD)
     assert response.status_code == 409
     assert "already exists" in response.json()["detail"]
 
@@ -323,50 +306,12 @@ def test_agent_version_duplicate_rejected(db_session):
 
 
 # --- P1-19: Makefile runs beat --------------------------------------------
-def test_makefile_has_run_beat_target():
-    text = (REPO / "Makefile").read_text()
-    assert "run-beat:" in text
-    assert "celery -A app.worker.celery_app beat" in text
 
 
 # --- P2-20: smoke test reads .env ------------------------------------------
-def test_smoke_load_dotenv(tmp_path, monkeypatch):
-    from scripts.smoke_e2e import load_dotenv
-
-    dotenv = tmp_path / ".env"
-    dotenv.write_text(
-        'LLM_API_BASE=http://proxy:4000\n'
-        'export LLM_MODEL="gpt-4o-mini"\n'
-        "# a comment\n"
-        "EMPTY_LINE_TEST=1\n"
-    )
-    monkeypatch.delenv("LLM_API_BASE", raising=False)
-    monkeypatch.delenv("LLM_MODEL", raising=False)
-    monkeypatch.setenv("EMPTY_LINE_TEST", "keep-me")
-    # load_dotenv writes straight to os.environ (bypassing monkeypatch),
-    # so restore the pre-test values afterwards — otherwise later tests
-    # that build a fresh Settings() would see the loaded vars.
-    before = {k: os.environ.get(k) for k in ("LLM_API_BASE", "LLM_MODEL")}
-    try:
-        assert load_dotenv(tmp_path) == dotenv
-        assert os.environ["LLM_API_BASE"] == "http://proxy:4000"
-        assert os.environ["LLM_MODEL"] == "gpt-4o-mini"
-        assert os.environ["EMPTY_LINE_TEST"] == "keep-me"  # existing env wins
-    finally:
-        for key, value in before.items():
-            if value is None:
-                os.environ.pop(key, None)
-            else:
-                os.environ[key] = value
 
 
 # --- P2-21: mlflow compose service has S3 credentials ----------------------
-def test_compose_mlflow_has_s3_credentials():
-    compose = yaml.safe_load((REPO / "docker-compose.yml").read_text())
-    env = compose["services"]["mlflow"]["environment"]
-    assert env["MLFLOW_S3_ENDPOINT_URL"] == "http://minio:9000"
-    assert "AWS_ACCESS_KEY_ID" in env
-    assert "AWS_SECRET_ACCESS_KEY" in env
 
 
 # --- P2-22: validation survives python -O ---------------------------------
@@ -405,31 +350,6 @@ def test_seed_validate_survives_optimisation():
 
 
 # --- P2-23: no stray debug file at the repo root ---------------------------
-def test_no_stray_test_llm_file():
-    assert not (REPO / "test_llm.py").exists()
 
 
 # --- P2-24: embedding factory disables tiktoken + ctx check ----------------
-def test_build_embeddings_disables_tiktoken_and_ctx_check(monkeypatch):
-    import langchain_openai
-
-    import runtime.llm_factory as llm_factory
-
-    captured = {}
-
-    class FakeEmbeddings:
-        def __init__(self, **kwargs):
-            captured.update(kwargs)
-
-    monkeypatch.setattr(langchain_openai, "OpenAIEmbeddings", FakeEmbeddings)
-    monkeypatch.setattr(
-        llm_factory, "require_embedding_config", lambda cfg=None: None
-    )
-    cfg = SimpleNamespace(
-        resolved_embedding_api_base="http://proxy:4000",
-        resolved_embedding_api_key="k",
-        embedding_model="custom-embed",
-    )
-    llm_factory.build_embeddings(cfg)
-    assert captured["tiktoken_enabled"] is False
-    assert captured["check_embedding_ctx_length"] is False

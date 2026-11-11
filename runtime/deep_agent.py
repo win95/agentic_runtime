@@ -79,7 +79,7 @@ def get_chat_model():
 
 
 def build_deep_agent(tools: list, system_prompt: str | None = None, skills: list | None = None,
-                     model_config=None, middleware=None):
+                     model_config=None, middleware=None, backend=None):
     """Create a Deep Agent (compiled LangGraph) over the given tools.
 
     The system prompt defaults to DEFAULT_SYSTEM_PROMPT (the code
@@ -102,6 +102,12 @@ def build_deep_agent(tools: list, system_prompt: str | None = None, skills: list
     the hooks system (``runtime/hooks/``) can deny tool calls, inject
     feedback, and force extra turns. ``None`` means no extra
     middleware (the default deepagents middleware still applies).
+
+    ``backend`` is a deepagents ``BackendProtocol`` for the agent's
+    file tools + ``execute`` — e.g. an ``OpenSandboxBackend`` from
+    ``runtime/sandbox/`` (docs/sandbox.md). ``None`` (the default)
+    keeps deepagents' default in-memory ``StateBackend``: files live
+    only in the agent's state and there is no shell.
     """
     from deepagents import create_deep_agent
 
@@ -116,6 +122,7 @@ def build_deep_agent(tools: list, system_prompt: str | None = None, skills: list
         system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT,
         skills=skills,
         middleware=middleware,
+        backend=backend,
     )
 
 

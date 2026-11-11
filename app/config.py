@@ -109,6 +109,27 @@ class Settings(BaseSettings):
     # a webhook URL is set.
     slack_notifications_enabled: bool = True
 
+    # --- OpenSandbox (per-session sandbox backend, docs/sandbox.md) ---
+    # The Deep Agent's file tools + `execute` run inside one
+    # OpenSandbox sandbox per session — but ONLY when sandbox_enabled
+    # is true AND the mission opts in (execution.sandbox: true) AND
+    # the execution has a session_id. Everything else keeps the
+    # in-memory StateBackend. The server must be running first
+    # (see docs/sandbox.md); the API key is a secret, it lives only
+    # in .env, never in the repo. The image MUST contain python3:
+    # deepagents' file helpers run a small Python script inside the
+    # sandbox.
+    sandbox_enabled: bool = False
+    sandbox_domain: str = "localhost:8080"
+    sandbox_api_key: str = ""
+    sandbox_image: str = "python:3.12-slim"
+    # True when the server runs in Docker and this client on the host
+    # (sandbox container IPs unreachable — traffic goes via the server
+    # proxy instead).
+    sandbox_use_server_proxy: bool = False
+    # Beat reaps sandboxes idle longer than this (seconds).
+    sandbox_idle_ttl_seconds: int = 3600
+
     # Runtime
     checkpoint_enabled: bool = False
     execution_timeout_seconds: int = 3600

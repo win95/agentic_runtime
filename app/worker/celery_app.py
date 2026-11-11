@@ -49,5 +49,12 @@ celery_app.conf.update(
             "task": "ontology.projection_drain",
             "schedule": float(settings.projection_drain_interval_seconds),
         },
+        # Sandbox reap (docs/sandbox.md): destroy sandboxes idle
+        # longer than the TTL, so dead sessions stop leaking
+        # containers. Reap failures stay active for the next run.
+        "sandbox-reap-idle": {
+            "task": "app.worker.tasks.reap_idle_sandboxes",
+            "schedule": float(settings.sandbox_idle_ttl_seconds),
+        },
     },
 )

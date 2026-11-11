@@ -201,6 +201,32 @@ class Execution(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+class SessionSandbox(Base):
+    """One OpenSandbox sandbox per session (docs/sandbox.md).
+
+    A session's executions share one sandbox: the first execution
+    that opts in creates it, later executions re-attach by
+    ``sandbox_id``. The sandbox itself lives on the OpenSandbox
+    server; this row is only the mapping (session -> sandbox) plus
+    lifecycle state. ``status`` is "active" or "destroyed" — a row
+    whose sandbox died server-side is replaced, not resurrected
+    (the service creates a fresh sandbox and rewrites the id).
+    """
+
+    __tablename__ = "session_sandboxes"
+
+    session_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    sandbox_id: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    agent_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    mission_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="active")
+    image: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    last_used_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_utcnow, onupdate=_utcnow
+    )
+
+
 class ExecutionResult(Base):
     """Result of one execution (output + evidence)."""
 

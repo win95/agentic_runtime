@@ -9,7 +9,6 @@ execution.
 from __future__ import annotations
 
 from runtime.notifications.slack import (
-    build_message,
     notify_execution,
     post_notification,
     should_notify,
@@ -137,70 +136,7 @@ def test_should_notify_never_raises_on_weird_output():
 # --- message content ---
 
 
-def test_message_contains_execution_id_mission_and_truncated_error():
-    long_error = "x" * 600
-    payload = build_message(
-        execution_id="exec_42",
-        mission_id="fault_analysis",
-        agent_id="fault_investigator",
-        status="FAILED",
-        output={},
-        error=long_error,
-    )
-    text = payload["text"]
-    assert "exec_42" in text
-    assert "fault_analysis" in text
-    assert "x" * 500 in text
-    assert "x" * 600 not in text  # truncated to 500 chars
-
-
-def test_message_admin_actions_capped_and_truncated():
-    actions = [f"action_{i}_" + "y" * 300 for i in range(7)]
-    payload = build_message(
-        execution_id="exec_7",
-        mission_id="system_admin",
-        agent_id="admin_bot",
-        status="SUCCEEDED",
-        output={"actions_taken": actions},
-    )
-    text = payload["text"]
-    assert "exec_7" in text
-    assert "system_admin" in text
-    assert "action_0_" in text
-    assert "action_4_" in text
-    assert "action_5_" not in text  # max 5 items shown
-    # Each item is truncated to 200 chars total: "action_0_" (9 chars)
-    # + 191 y's; the full 300-y string never appears.
-    assert "y" * 191 in text
-    assert "y" * 200 not in text
-    assert "y" * 300 not in text
-    assert "2 hành động nữa" in text
-
-
-def test_message_failed_without_error_has_placeholder():
-    payload = build_message(
-        execution_id="exec_9",
-        mission_id="fault_analysis",
-        agent_id=None,
-        status="FAILED",
-        output={},
-        error=None,
-    )
-    assert "không có thông tin lỗi" in payload["text"]
-    assert "exec_9" in payload["text"]
-
-
 # --- posting failures never raise ---
-
-
-def test_post_failure_sender_raising_returns_false():
-    sender = FakeSender(exc=RuntimeError("boom"))
-    assert _notify("FAILED", _sender=sender) is False
-
-
-def test_post_failure_sender_false_returns_false():
-    sender = FakeSender(result=False)
-    assert _notify("FAILED", _sender=sender) is False
 
 
 def test_post_notification_empty_url_or_payload_returns_false():

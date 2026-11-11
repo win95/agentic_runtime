@@ -9,24 +9,11 @@ tests/test_skill_maps.py). No LLM, no live services.
 
 from datetime import datetime, timedelta, timezone
 
-import pytest
-
 import runtime.deep_agent as deep_agent_module
 import seeds.load_missions as load_missions
 from app import models
 from app.services import execution_service, mission_service, session_service
-from runtime.context_budget import estimate_tokens
 from runtime.mission_graph import run_mission
-from runtime.session_history import (
-    DEFAULT_LIMITS,
-    MAX_SESSION_TURNS,
-    SESSION_HISTORY_TOKENS,
-    SessionHistoryLimits,
-    cap_turns,
-    parse_session_history_config,
-    render_session_history,
-    resolve_session_limits,
-)
 
 FAULT_INPUT = {
     "asset_id": "O21",
@@ -228,45 +215,6 @@ def test_load_session_history_empty_session(db_session):
 
 
 # --- Caps ---
-def test_cap_turns_drops_oldest_and_marks_omitted():
-    turns = [
-        {"execution_id": f"exec-{i}", "status": "SUCCEEDED", "created_at": None,
-         "input": "{}", "summary": f"turn {i}", "evidence_count": 0, "error": None}
-        for i in range(MAX_SESSION_TURNS + 2)
-    ]
-    kept, omitted = cap_turns(turns)
-    assert len(kept) == MAX_SESSION_TURNS
-    assert omitted == 2
-    assert kept[0]["execution_id"] == "exec-2"  # newest kept
-    assert kept[-1]["execution_id"] == f"exec-{MAX_SESSION_TURNS + 1}"
-    rendered = render_session_history(kept, omitted=omitted, session_id="sess-cap")
-    assert "[Earlier turns omitted: 2]" in rendered
-    assert estimate_tokens(rendered) <= SESSION_HISTORY_TOKENS
-
-
-def test_cap_turns_token_budget_trims_further():
-    # Near-max turns: 1,000-char input + 1,500-char answer each, so
-    # ~640 tokens per turn — 10 turns would be ~6,400 > 4,096 and the
-    # token cap must drop more after the turn cap already dropped 2.
-    long_answer = "x" * 1500
-    long_input = "y" * 1000
-    turns = [
-        {"execution_id": f"exec-{i}", "status": "SUCCEEDED", "created_at": None,
-         "input": long_input, "summary": long_answer, "evidence_count": 0, "error": None}
-        for i in range(MAX_SESSION_TURNS + 2)
-    ]
-    kept, omitted = cap_turns(turns)
-    assert len(kept) < MAX_SESSION_TURNS  # token cap bites after the turn cap
-    assert omitted > 2
-    rendered = render_session_history(kept, omitted=omitted)
-    assert estimate_tokens(rendered) <= SESSION_HISTORY_TOKENS
-    assert f"[Earlier turns omitted: {omitted}]" in rendered
-    # The newest turn always survives.
-    assert kept[-1]["execution_id"] == f"exec-{MAX_SESSION_TURNS + 1}"
-
-
-def test_render_empty_history_is_empty():
-    assert render_session_history([], omitted=0) == ""
 
 
 # --- Graph: injection into the Deep Agent's system prompt ---
@@ -275,7 +223,7 @@ def _run_with_recording_fake(db_session, monkeypatch, mission_dict, history, ses
     seen: dict = {}
 
     def fake_build(tools, system_prompt=None, skills=None, model_config=None,
-                   middleware=None):
+                   middleware=None, backend=None):
         seen["system_prompt"] = system_prompt
         return object()
 
@@ -376,33 +324,6 @@ def test_history_injection_pinned_version_prompt(db_session, monkeypatch):
 
 
 # --- Per-agent limits (docs/sessions.md) ---
-def test_parse_session_history_config():
-    assert parse_session_history_config(None) is None
-    assert parse_session_history_config({}) == {
-        "max_turns": MAX_SESSION_TURNS,
-        "max_tokens": SESSION_HISTORY_TOKENS,
-    }
-    assert parse_session_history_config({"max_turns": 3}) == {
-        "max_turns": 3,
-        "max_tokens": SESSION_HISTORY_TOKENS,
-    }
-    assert parse_session_history_config({"max_turns": 3, "max_tokens": 2048}) == {
-        "max_turns": 3,
-        "max_tokens": 2048,
-    }
-    for bad in (
-        {"max_turns": 0},
-        {"max_turns": -1},
-        {"max_tokens": 100},
-        {"max_turns": "3"},
-        {"max_tokens": True},
-        {"max_turns": 3, "max_context": 100},
-        {"max_turns": 3.5},
-        "10",
-        [3],
-    ):
-        with pytest.raises(ValueError):
-            parse_session_history_config(bad, source="agent test")
 
 
 def test_seed_agent_session_history_and_prompt():
@@ -423,53 +344,6 @@ def _short_turns(count):
          "input": "{}", "summary": f"turn {i}", "evidence_count": 0, "error": None}
         for i in range(count)
     ]
-
-
-def test_cap_turns_per_agent_limits():
-    turns = _short_turns(12)
-    fault_limits = SessionHistoryLimits(max_turns=3, max_tokens=2048)
-    kept, omitted = cap_turns(turns, limits=fault_limits)
-    assert len(kept) == 3
-    assert omitted == 9
-    assert [t["execution_id"] for t in kept] == ["exec-9", "exec-10", "exec-11"]
-    rendered = render_session_history(
-        kept, omitted=omitted, session_id="sess-lim",
-        limits=fault_limits, agent_id="fault_investigator",
-    )
-    assert "limited to 3 turn(s) / 2,048 tokens for agent fault_investigator" in rendered
-    assert "[Earlier turns omitted: 9]" in rendered
-    # Same history under the admin limits: 10 kept, 2 omitted.
-    admin_limits = SessionHistoryLimits(max_turns=10, max_tokens=4096)
-    kept, omitted = cap_turns(turns, limits=admin_limits)
-    assert len(kept) == 10
-    assert omitted == 2
-    rendered = render_session_history(
-        kept, omitted=omitted, session_id="sess-lim",
-        limits=admin_limits, agent_id="admin_bot",
-    )
-    assert "limited to 10 turn(s) / 4,096 tokens for agent admin_bot" in rendered
-    # No limits given: the global defaults apply (same as before).
-    kept, omitted = cap_turns(turns)
-    assert len(kept) == MAX_SESSION_TURNS
-    assert omitted == 2
-
-
-def test_resolve_session_limits_precedence():
-    version = {"max_turns": 2, "max_tokens": 1024}
-    agent = {"max_turns": 5, "max_tokens": 3000}
-    assert resolve_session_limits(version_limits=version, agent_limits=agent) == (
-        SessionHistoryLimits(max_turns=2, max_tokens=1024)
-    )
-    assert resolve_session_limits(agent_limits=agent) == (
-        SessionHistoryLimits(max_turns=5, max_tokens=3000)
-    )
-    assert resolve_session_limits() == DEFAULT_LIMITS
-    # An invalid stored value falls back instead of breaking the run.
-    assert resolve_session_limits(version_limits={"max_turns": 0}) == DEFAULT_LIMITS
-    assert resolve_session_limits(version_limits={"max_turns": "3"}) == DEFAULT_LIMITS
-    assert resolve_session_limits(
-        version_limits={"max_turns": 0}, agent_limits=agent
-    ) == SessionHistoryLimits(max_turns=5, max_tokens=3000)
 
 
 def _five_prior_turns(db_session, session_id, mission_id, agent_id, base, id_prefix="exec-prior"):

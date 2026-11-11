@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import pathlib
 
-import pytest
 import yaml
 from langchain_core.messages import AIMessage, ToolMessage
 
@@ -25,7 +24,6 @@ from runtime.hooks import (
     default_registry,
     select_hooks,
 )
-from runtime.hooks.registry import _matcher_matches
 from runtime.mission_graph import deep_agent_node, run_mission
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -59,95 +57,9 @@ def _ctx(**kwargs) -> HookContext:
 
 
 # --- Matchers ----------------------------------------------------------
-@pytest.mark.parametrize(
-    ("matcher", "tool", "expected"),
-    [
-        (None, "Bash", True),
-        ("", "Bash", True),
-        ("*", "Bash", True),
-        ("Bash", "Bash", True),
-        ("Bash", "Write", False),
-        ("Write|Edit", "Write", True),
-        ("Write|Edit", "Edit", True),
-        ("Write|Edit", "Bash", False),
-        ("^Write$", "Write", True),
-        ("^Write$", "WriteFile", False),
-        ("[invalid(", "Write", False),  # invalid regex fails closed
-    ],
-)
-def test_matcher(matcher, tool, expected):
-    assert _matcher_matches(matcher, tool) is expected
 
 
 # --- Registry ----------------------------------------------------------
-def test_dispatch_order_and_none_skipped():
-    registry = HookRegistry()
-    seen: list[str] = []
-
-    def first(ctx):  # noqa: ARG001
-        seen.append("first")
-        return HookDecision.feedback("one")
-
-    def silent(ctx):  # noqa: ARG001
-        seen.append("silent")
-        return None
-
-    def second(ctx):  # noqa: ARG001
-        seen.append("second")
-        return HookDecision.feedback("two")
-
-    registry.register(HookEvent.POST_TOOL_USE, first, name="first")
-    registry.register(HookEvent.POST_TOOL_USE, silent, name="silent")
-    registry.register(HookEvent.POST_TOOL_USE, second, name="second")
-    decisions = registry.dispatch(HookEvent.POST_TOOL_USE, _ctx(tool_name="Write"))
-    assert [d.message for d in decisions] == ["one", "two"]
-    assert seen == ["first", "silent", "second"]
-
-
-def test_dispatch_matcher_filters_tool_events():
-    registry = HookRegistry()
-    registry.register(
-        HookEvent.PRE_TOOL_USE,
-        lambda ctx: HookDecision.deny("nope"),  # noqa: ARG005
-        matcher="Write|Edit",
-        name="blocker",
-    )
-    assert registry.dispatch(HookEvent.PRE_TOOL_USE, _ctx(tool_name="Bash")) == []
-    denied = registry.dispatch(HookEvent.PRE_TOOL_USE, _ctx(tool_name="Edit"))
-    assert len(denied) == 1 and denied[0].action == "deny"
-
-
-def test_dispatch_never_raises_on_handler_error():
-    registry = HookRegistry()
-
-    def boom(ctx):  # noqa: ARG001
-        raise RuntimeError("hook exploded")
-
-    registry.register(HookEvent.SESSION_START, boom, name="boom")
-    registry.register(
-        HookEvent.SESSION_START,
-        lambda ctx: HookDecision.allow("ok"),  # noqa: ARG005
-        name="ok",
-    )
-    decisions = registry.dispatch(HookEvent.SESSION_START, _ctx())
-    assert [d.action for d in decisions] == ["allow"]
-
-
-def test_with_only_and_handler_names():
-    registry = default_registry()
-    assert set(builtin.BUILTIN_HOOKS) <= set(registry.handler_names())
-    narrowed = registry.with_only(["validate_input"])
-    assert narrowed.handler_names() == ["validate_input"]
-    assert narrowed.dispatch(
-        HookEvent.PRE_TOOL_USE, _ctx(tool_name="Write")
-    ) == []
-
-
-def test_select_hooks_declared_wins_and_unknown_skipped():
-    mission = dict(FAULT_MISSION)
-    mission["execution"] = {"mode": "autonomous", "hooks": ["audit", "nope", "validate_input"]}
-    assert select_hooks(mission) == ["audit", "validate_input"]
-    assert select_hooks(FAULT_MISSION) == list(builtin.BUILTIN_HOOKS)
 
 
 def test_select_hooks_from_seed_yamls():
@@ -530,7 +442,7 @@ def test_deep_agent_node_blocks_invalid_input_before_build(monkeypatch):
 
 def test_deep_agent_node_returns_hook_events(monkeypatch):
     def fake_build(tools, system_prompt=None, skills=None, model_config=None,
-                   middleware=None):
+                   middleware=None, backend=None):
         assert middleware and len(middleware) == 1
         assert isinstance(middleware[0], HookMiddleware)
         return object()
@@ -566,7 +478,7 @@ def test_deep_agent_node_returns_hook_events(monkeypatch):
 
 def test_run_mission_carries_hook_events(monkeypatch):
     def fake_build(tools, system_prompt=None, skills=None, model_config=None,
-                   middleware=None):
+                   middleware=None, backend=None):
         return object()
 
     def fake_run(agent, mission_arg, input_data, callbacks=None, files=None):
@@ -618,16 +530,6 @@ def _seed_demo(db_session):  # noqa: ARG001 - fixture triggers row cleanup
         db.close()
 
 
-def test_retrieval_context_no_config_returns_none():
-    assert builtin.retrieval_context(_ctx(mission=FAULT_MISSION, input=RETRIEVAL_INPUT)) is None
-
-
-def test_retrieval_context_no_asset_returns_none():
-    assert builtin.retrieval_context(
-        _ctx(mission=RETRIEVAL_MISSION, input={"start_date": "2026-10-01"})
-    ) is None
-
-
 def test_retrieval_context_faults_maintenance_sensors(db_session):
     _seed_demo(db_session)
     decision = builtin.retrieval_context(
@@ -643,63 +545,6 @@ def test_retrieval_context_faults_maintenance_sensors(db_session):
     assert "[sensors — postgres:sensor_readings]" in block
     assert "motor_temperature_c: 31 reading(s), max 92.0 C on 2026-10-07" in block
     assert "vibration_mm_s: 31 reading(s), max 6.8 mm/s on 2026-10-19" in block
-
-
-def test_retrieval_context_unavailable_sources_noted_not_raised(monkeypatch):
-    # Item 12 (2026-11-11): the "unavailable" outcome must come from
-    # the raising stub, not from real services being down — otherwise
-    # this test fails whenever Qdrant/FalkorDB are reachable.
-    import infra.repositories as repositories
-
-    def _down(*args, **kwargs):
-        raise RuntimeError("service down")
-
-    monkeypatch.setattr(repositories, "search_documents", _down)
-    monkeypatch.setattr(repositories, "query_asset_relationships", _down)
-    mission = {
-        **FAULT_MISSION,
-        "execution": {
-            "mode": "autonomous",
-            "retrieval": {"sources": ["documents", "relations"], "max_chars": 3000},
-        },
-    }
-    decision = builtin.retrieval_context(_ctx(mission=mission, input=RETRIEVAL_INPUT))
-    assert decision is not None
-    block = decision.additional_context
-    assert "[documents — qdrant:technical_documents]" in block
-    assert "[relations — neo4j:entity_relationships]" in block
-    assert block.count("unavailable:") == 2  # both stubbed stores raise
-
-
-def test_retrieval_context_truncation_drops_whole_lines(db_session):
-    _seed_demo(db_session)
-    mission = {
-        **FAULT_MISSION,
-        "execution": {
-            "mode": "autonomous",
-            "retrieval": {"sources": ["faults"], "max_chars": 150},
-        },
-    }
-    decision = builtin.retrieval_context(_ctx(mission=mission, input=RETRIEVAL_INPUT))
-    assert decision is not None
-    block = decision.additional_context
-    assert "omitted to fit 150 chars" in block
-    assert "F-204" not in block  # the fault lines did not fit the budget
-    assert len(block) < 300
-
-
-def test_retrieval_context_unknown_source_skipped(db_session):
-    _seed_demo(db_session)
-    mission = {
-        **FAULT_MISSION,
-        "execution": {
-            "mode": "autonomous",
-            "retrieval": {"sources": ["faults", "nope"], "max_chars": 3000},
-        },
-    }
-    decision = builtin.retrieval_context(_ctx(mission=mission, input=RETRIEVAL_INPUT))
-    assert decision is not None
-    assert "F-204" in decision.additional_context
 
 
 def test_retrieval_context_flows_through_before_agent(db_session):

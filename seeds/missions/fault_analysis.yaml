@@ -39,6 +39,13 @@ execution:
   # context budget — 3,072 retrieval tokens).
   retrieval:
     sources: [faults, documents, relations]
+  # Sandbox backend (docs/sandbox.md): the agent's file tools +
+  # `execute` run inside one OpenSandbox sandbox per session (reused
+  # across the session's executions, reaped when idle). Needs
+  # SANDBOX_ENABLED=true + a running server; otherwise the run falls
+  # back to the in-memory backend. The sandbox image must contain
+  # python3 (deepagents' file helpers run python inside the sandbox).
+  sandbox: true
 
 capabilities:
   - fault_history

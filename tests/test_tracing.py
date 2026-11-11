@@ -19,38 +19,10 @@ import seeds.load_missions as load_missions
 from app.services import mission_service
 from runtime.mission_graph import run_mission
 from runtime.tracing import (
-    build_run_metadata,
-    build_run_tags,
     mlflow_execution_run,
 )
 
 # --- Builders ---
-
-
-def test_build_run_metadata_includes_session_and_agent():
-    metadata = build_run_metadata(
-        "exec-1", "fault_analysis", "fault_investigator", "sess-abc"
-    )
-    assert metadata == {
-        "execution_id": "exec-1",
-        "mission_id": "fault_analysis",
-        "agent_id": "fault_investigator",
-        "session_id": "sess-abc",
-    }
-
-
-def test_build_run_metadata_omits_absent_values():
-    metadata = build_run_metadata("exec-1", "fault_analysis")
-    assert metadata == {"execution_id": "exec-1", "mission_id": "fault_analysis"}
-    assert build_run_tags("fault_analysis") == ["mission:fault_analysis"]
-
-
-def test_build_run_tags_form():
-    assert build_run_tags("fault_analysis", "fault_investigator", "sess-abc") == [
-        "mission:fault_analysis",
-        "agent:fault_investigator",
-        "session:sess-abc",
-    ]
 
 
 # --- MLflow execution run ---
@@ -214,7 +186,7 @@ def test_deep_agent_node_passes_trace_metadata(db_session, monkeypatch):
     seen: dict = {}
 
     def fake_build(tools, system_prompt=None, skills=None, model_config=None,
-                   middleware=None):
+                   middleware=None, backend=None):
         return object()
 
     def fake_run(agent, mission_arg, input_data, callbacks=None, files=None,

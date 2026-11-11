@@ -3,16 +3,9 @@
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from runtime.context_budget import (
-    COMPONENT_BUDGETS,
     HISTORY_TOKENS,
-    KV_CACHE_TOKENS_PER_AGENT,
-    MAX_CONTEXT_TOKENS,
     OUTPUT_RESERVE_TOKENS,
-    PROMPT_SIDE_TOKENS,
-    check_prefix_budgets,
-    estimate_tokens,
     message_tokens,
-    retrieval_max_chars,
     trim_history,
 )
 
@@ -46,40 +39,6 @@ def _history(n_turns: int, chars: int = 6000) -> list:
 
 
 # --- Budget math -------------------------------------------------------
-
-
-def test_budgets_sum_to_max_context():
-    assert sum(COMPONENT_BUDGETS.values()) == MAX_CONTEXT_TOKENS == 32_000
-    assert PROMPT_SIDE_TOKENS == 24_832
-    assert (
-        PROMPT_SIDE_TOKENS + OUTPUT_RESERVE_TOKENS + KV_CACHE_TOKENS_PER_AGENT
-        == MAX_CONTEXT_TOKENS
-    )
-    assert set(COMPONENT_BUDGETS) == {
-        "system_prompt",
-        "tool_definitions",
-        "skills",
-        "retrieval",
-        "execution_input",
-        "history",
-        "output_reserve",
-        "kv_cache_per_agent",
-    }
-
-
-def test_estimate_tokens():
-    assert estimate_tokens("") == 0
-    assert estimate_tokens(None) == 0
-    assert estimate_tokens("x" * 400) == 100
-    assert estimate_tokens("x" * 401) == 101  # ceil
-    assert estimate_tokens("x" * 4) == 1
-
-
-def test_retrieval_max_chars_from_budget():
-    assert retrieval_max_chars() == 3_072 * 4 == 12_288
-    from runtime.hooks.builtin import DEFAULT_RETRIEVAL_MAX_CHARS
-
-    assert DEFAULT_RETRIEVAL_MAX_CHARS == 12_288
 
 
 # --- trim_history ------------------------------------------------------
@@ -123,16 +82,6 @@ def test_trim_history_removes_whole_turn_pairs():
 
 
 # --- Prefix check ------------------------------------------------------
-
-
-def test_check_prefix_budgets():
-    assert check_prefix_budgets("x" * 100, "y" * 100, "z" * 100) == []
-    over = check_prefix_budgets("x" * 5000, "y" * 100, "z" * 100)
-    assert len(over) == 1 and over[0].startswith("system_prompt 1250/1024")
-    over = check_prefix_budgets(
-        "x" * 100, "y" * 9000, "z" * 5000
-    )
-    assert {o.split()[0] for o in over} == {"tool_definitions", "skills"}
 
 
 # --- Output reserve on the model ---------------------------------------

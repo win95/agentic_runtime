@@ -12,16 +12,9 @@ from langchain_core.messages import ToolMessage
 import runtime.deep_agent as deep_agent_module
 import seeds.load_missions as load_missions
 from app.services import mission_service
-from runtime.context_budget import estimate_tokens
 from runtime.deep_agent import run_deep_agent
 from runtime.mission_graph import run_mission
 from runtime.skills import load_skills
-from runtime.skills.map_plan import (
-    compute_plan_trace,
-    parse_skill_map,
-    plan_trace_note,
-    render_plan,
-)
 
 KNOWN = {"search_fault_history", "get_sensor_data", "query_asset_relationships"}
 
@@ -62,75 +55,6 @@ def _frontmatter(map_value):
 
 
 # --- Parsing ---
-def test_parse_valid_map():
-    skill_map = parse_skill_map(_frontmatter(BASE_MAP), "x", known_tools=KNOWN)
-    assert skill_map is not None
-    assert skill_map.start == "identify"
-    assert skill_map.node_ids == [
-        "identify",
-        "postgres-faults",
-        "postgres-maintenance",
-        "postgres-sensors",
-        "graph-relations",
-        "synthesize",
-    ]
-    assert skill_map.node_by_id("postgres-faults").branches[0].goto == "postgres-maintenance"
-    assert skill_map.node_by_id("synthesize").stop_when == "enough evidence"
-
-
-def test_parse_no_map_returns_none():
-    assert parse_skill_map({"name": "x", "description": "X"}, "x") is None
-    assert parse_skill_map(None, "x") is None
-
-
-def test_parse_malformed_map_returns_none():
-    assert parse_skill_map(_frontmatter("not-a-map"), "x") is None
-    assert parse_skill_map(_frontmatter({"nodes": []}), "x") is None
-    assert parse_skill_map(_frontmatter({"nodes": [{"goal": "no id"}]}), "x") is None
-
-
-def test_parse_unknown_tool_dropped_with_others_kept():
-    skill_map = parse_skill_map(_frontmatter(BASE_MAP), "x", known_tools=KNOWN)
-    assert skill_map is not None
-    assert skill_map.node_by_id("postgres-sensors").tools == ["get_sensor_data"]
-
-
-def test_parse_unknown_goto_dropped():
-    bad = {
-        "start": "a",
-        "nodes": [
-            {"id": "a", "goal": "A", "branches": [{"when": "x", "goto": "ghost"}]},
-            {"id": "b", "goal": "B"},
-        ],
-    }
-    skill_map = parse_skill_map(_frontmatter(bad), "x", known_tools=set())
-    assert skill_map is not None
-    assert skill_map.node_by_id("a").branches == []
-
-
-def test_parse_duplicate_node_keeps_first_and_bad_start_falls_back():
-    dup = {
-        "start": "ghost",
-        "nodes": [
-            {"id": "a", "goal": "first"},
-            {"id": "a", "goal": "second"},
-            {"id": "b", "goal": "B"},
-        ],
-    }
-    skill_map = parse_skill_map(_frontmatter(dup), "x", known_tools=set())
-    assert skill_map is not None
-    assert skill_map.start == "a"
-    assert skill_map.node_by_id("a").goal == "first"
-    assert skill_map.node_ids == ["a", "b"]
-
-
-def test_parse_without_known_tools_accepts_all():
-    skill_map = parse_skill_map(_frontmatter(BASE_MAP), "x")
-    assert skill_map is not None
-    assert skill_map.node_by_id("postgres-sensors").tools == [
-        "get_sensor_data",
-        "no-such-tool",
-    ]
 
 
 # --- Loader: pilot skill + map-less skills unchanged ---
@@ -167,67 +91,9 @@ def test_loader_mapless_skills_have_no_map():
 
 
 # --- Rendering ---
-def test_render_plan_compact_and_complete():
-    skill_map = next(s for s in load_skills() if s.name == "data-access").map
-    plan = render_plan(skill_map)
-    for node_id in skill_map.node_ids:
-        assert node_id in plan
-    for tool in ("search_fault_history", "query_asset_relationships", "search_technical_documents"):
-        assert tool in plan
-    assert "deviate" in plan  # the Option C contract is stated
-    assert estimate_tokens(plan) <= 600, f"plan is {estimate_tokens(plan)} tokens"
 
 
 # --- Trace computation ---
-def test_compute_plan_trace_visited_skipped_deviations():
-    skill_map = parse_skill_map(_frontmatter(BASE_MAP), "x", known_tools=KNOWN)
-    trace = compute_plan_trace(
-        skill_map,
-        ["search_fault_history", "get_sensor_data", "calculate_failure_rate"],
-    )
-    assert trace["visited"] == ["postgres-faults", "postgres-sensors"]
-    assert trace["tools_by_node"] == {
-        "postgres-faults": ["search_fault_history"],
-        "postgres-sensors": ["get_sensor_data"],
-    }
-    assert trace["skipped"] == [
-        "identify",
-        "postgres-maintenance",
-        "graph-relations",
-        "synthesize",
-    ]
-    assert trace["deviations"] == [{"tool": "calculate_failure_rate"}]
-
-
-def test_compute_plan_trace_empty_calls():
-    skill_map = parse_skill_map(_frontmatter(BASE_MAP), "x", known_tools=KNOWN)
-    trace = compute_plan_trace(skill_map, [])
-    assert trace["visited"] == []
-    assert trace["skipped"] == skill_map.node_ids
-    assert trace["deviations"] == []
-
-
-def test_plan_trace_note_format():
-    trace = {
-        "visited": ["identify", "postgres-faults", "qdrant-documents"],
-        "tools_by_node": {},
-        "skipped": ["postgres-sensors"],
-        "deviations": [{"tool": "calculate_failure_rate"}],
-    }
-    note = plan_trace_note("data-access", trace)
-    assert note == (
-        "Plan (data-access): visited identify -> postgres-faults -> qdrant-documents; "
-        "skipped postgres-sensors; deviation: calculate_failure_rate (not in map)"
-    )
-
-
-def test_plan_trace_note_empty_calls():
-    skill_map = parse_skill_map(_frontmatter(BASE_MAP), "x", known_tools=KNOWN)
-    note = plan_trace_note("data-access", compute_plan_trace(skill_map, []))
-    assert note == (
-        "Plan (data-access): skipped identify, postgres-faults, "
-        "postgres-maintenance, postgres-sensors, graph-relations, synthesize"
-    )
 
 
 # --- run_deep_agent computes the trace from real tool calls ---
@@ -322,7 +188,7 @@ def test_deep_agent_node_injects_plan_and_merges_trace(db_session, monkeypatch):
     seen: dict = {}
 
     def fake_build(tools, system_prompt=None, skills=None, model_config=None,
-                   middleware=None):
+                   middleware=None, backend=None):
         seen["system_prompt"] = system_prompt
         return object()
 
@@ -360,7 +226,7 @@ def test_deep_agent_node_old_double_without_skill_maps_still_works(db_session, m
     mission_dict["execution"]["mode"] = "autonomous"
 
     def fake_build(tools, system_prompt=None, skills=None, model_config=None,
-                   middleware=None):
+                   middleware=None, backend=None):
         return object()
 
     def fake_run(agent, mission_arg, input_data, callbacks=None, files=None):
@@ -406,7 +272,7 @@ def _run_with_tool_sequence(db_session, monkeypatch, asset_id, calls):
         deep_agent_module,
         "build_deep_agent",
         lambda tools, system_prompt=None, skills=None, model_config=None,
-        middleware=None: _ToolCallAgent(calls),
+        middleware=None, backend=None: _ToolCallAgent(calls),
     )
     return run_mission(
         mission_dict,

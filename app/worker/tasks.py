@@ -294,3 +294,25 @@ def projection_drain() -> dict:
         return result
     finally:
         db.close()
+
+
+@celery_app.task(name="app.worker.tasks.reap_idle_sandboxes", max_retries=0)
+def reap_idle_sandboxes() -> dict:
+    """Beat task: destroy sandboxes idle longer than the TTL.
+
+    Thin wrapper — the logic lives in
+    ``app.services.sandbox_service.reap_idle_sandboxes`` so it is
+    testable without Celery. No retries here: beat re-fires on the
+    schedule anyway, and a failed destroy stays active for the next
+    reap.
+    """
+    db = SessionLocal()
+    try:
+        from app.services import sandbox_service
+
+        result = sandbox_service.reap_idle_sandboxes(db)
+        if result["failed"]:
+            logger.warning("Sandbox reap failed for: %s", result["failed"])
+        return result
+    finally:
+        db.close()

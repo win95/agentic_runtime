@@ -144,7 +144,7 @@ def test_seed_loader_creates_versions_once(db_session):
 
 def _fake_agent(monkeypatch, seen):
     def fake_build(tools, system_prompt=None, skills=None, model_config=None,
-                   middleware=None):
+                   middleware=None, backend=None):
         seen["tools"] = [t.name for t in tools]
         seen["system_prompt"] = system_prompt
         seen["model_config"] = model_config
