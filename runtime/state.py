@@ -16,6 +16,14 @@ class MissionState(TypedDict, total=False):
     mission_id: str
     mission: dict
     input: dict
+    # Option B session (docs/sessions.md): the session this execution
+    # belongs to, and its prior turns — {"turns": [...], "omitted": int,
+    # "total_prior": int} as loaded by session_service, or None when
+    # the run has no session history (fresh session, capability-only
+    # callers that pass nothing). deep_agent_node renders the turns
+    # into the system prompt; the capability subgraph ignores them.
+    session_id: str | None
+    session_history: dict | None
     # "deterministic" | "hybrid" | "autonomous" (from mission.execution.mode)
     mode: str
     # Option C: the AgentVersion that ran this execution (None when no

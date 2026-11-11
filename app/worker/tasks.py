@@ -50,6 +50,26 @@ def run_execution(self, execution_id: str) -> dict:
         if mission is None:
             raise RuntimeError(f"Mission {execution.mission_id} not found")
         mission_dict = mission_service.mission_to_dict(mission)
+        # Option B session history (docs/sessions.md): load the prior
+        # terminal turns of this execution's session BEFORE entering
+        # the graph, so deep_agent_node can show them to the agent.
+        # Best-effort — a load failure leaves the run with no history,
+        # exactly as before; it never fails the execution. The load
+        # runs inside this same read transaction on purpose: the
+        # commit below must end ALL reads before the checkpointer's
+        # CREATE INDEX CONCURRENTLY runs (see the deadlock note).
+        session_history = None
+        if execution.session_id:
+            try:
+                from app.services import session_service
+
+                session_history = session_service.load_session_history(
+                    db, execution.session_id, execution.id
+                )
+            except Exception as exc:  # noqa: BLE001 — history never blocks a run
+                logger.warning(
+                    "Could not load session history for %s: %s", execution_id, exc
+                )
         # End the read transaction before entering the graph. The
         # Postgres checkpointer's setup() runs CREATE INDEX CONCURRENTLY,
         # which waits for every older transaction — including this
@@ -64,7 +84,13 @@ def run_execution(self, execution_id: str) -> dict:
         from runtime.mission_graph import run_mission
 
         setup_langsmith()  # tracing for the worker process (no-op without key)
-        final_state = run_mission(mission_dict, execution.input or {}, execution_id)
+        final_state = run_mission(
+            mission_dict,
+            execution.input or {},
+            execution_id,
+            session_history=session_history,
+            session_id=execution.session_id,
+        )
 
         # A cancellation that arrived mid-run wins over the graph result.
         db.refresh(execution)

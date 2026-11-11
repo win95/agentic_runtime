@@ -917,3 +917,30 @@ text ngắn tiếng Việt: trạng thái + mission + execution id + lỗi (cắ
   kênh đã cấu hình lúc tạo), `SLACK_NOTIFICATIONS_ENABLED=true`.
 - Chi tiết (cách tạo Incoming Webhook, bảng phạm vi, cách kiểm tra):
   `docs/slack-notifications.md`.
+
+## 23. Sessions — lịch sử chạy + hội thoại của 1 agent (Phương án B)
+
+Mặc định mỗi execution độc lập, không nhớ gì về execution trước
+(quyết định 2026-11-07). Session là opt-in: các execution cùng
+`session_id` tạo thành một hội thoại của 1 agent, và Deep Agent của
+lượt chạy sau được xem lại các lượt trước (tóm tắt: input, kết quả,
+số evidence, lỗi nếu có — không bơm full evidence).
+
+- API: `POST /executions` nhận thêm `session_id` (tùy chọn, tự đặt;
+  không gửi thì server sinh `sess_...` mới, chạy như trước đây),
+  `GET /sessions/{session_id}` trả tóm tắt + các execution (cũ nhất
+  trước), `GET /executions?session_id=...` lọc theo session.
+- Ràng buộc: một session chỉ thuộc 1 agent + 1 mission (lượt đầu
+  tiên định nghĩa cả hai; lượt sau khác agent/mission bị 422).
+- Giới hạn theo từng agent (mặc định 10 lượt / 4.096 token):
+  `admin_bot` giữ 10 lượt / 4.096 token, `fault_investigator` chỉ
+  3 lượt / 2.048 token (mỗi phân tích trước đã lớn); agent không cấu
+  hình thì dùng mặc định. Cắt lượt cũ nhất trước, có marker
+  `[Earlier turns omitted: N]`, lấy từ HISTORY slice 15.616 token
+  của context budget. Skill `session-memory` (khai báo ở cả 2 mission)
+  hướng dẫn agent đọc lịch sử trong giới hạn — guidance only,
+  renderer mới là nơi enforce.
+- Checkpointer không đổi: `thread_id` vẫn là execution id (không
+  resume LangGraph theo session); lịch sử được inject tường minh.
+- Chi tiết (ngữ nghĩa, dạng từng lượt, bảng giới hạn, API, những gì
+  KHÔNG có): `docs/sessions.md`.

@@ -24,6 +24,7 @@ from app.routers import (
     policies,
     results,
     schedules,
+    sessions,
     tools,
 )
 from infra.langsmith_setup import setup_langsmith
@@ -67,6 +68,7 @@ def create_app() -> FastAPI:
     app.include_router(models.router)
     app.include_router(policies.router)
     app.include_router(executions.router)
+    app.include_router(sessions.router)
     app.include_router(results.router)
     app.include_router(schedules.router)
     app.include_router(ontology.router)

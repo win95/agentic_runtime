@@ -65,6 +65,11 @@ class Agent(Base):
     system_prompt: Mapped[str] = mapped_column(Text, nullable=False, default="")
     temperature: Mapped[float] = mapped_column(default=0.0)
     allowed_tools: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    # Per-agent session-history limits (docs/sessions.md): {"max_turns",
+    # "max_tokens"} or NULL (use the global caps). Seeded from the
+    # agent YAML's session_history block; pinned into the AgentVersion
+    # snapshot, so a limit change creates a new version on re-seed.
+    session_history: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
 
@@ -78,7 +83,9 @@ class AgentVersion(Base):
     allowed tool list, and the tool manifest (name, description, schema
     and permission of every tool the agent could call) with its SHA-256.
     ``git_sha`` records the code the snapshot was taken from (NULL when
-    taken outside a git checkout).
+    taken outside a git checkout). ``session_history`` pins the agent's
+    per-agent history-reading limits (NULL = the global caps at the
+    time) — activating an older version restores its old limits.
 
     Only one version per agent is active (``is_active``); the runtime
     uses the active version, and rollback is activating an older one.
@@ -107,6 +114,8 @@ class AgentVersion(Base):
     tool_manifest: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False, default="")
     git_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Pinned per-agent session-history limits (see Agent.session_history).
+    session_history: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     source: Mapped[str] = mapped_column(String(64), nullable=False, default="seed")
     is_active: Mapped[bool] = mapped_column(default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
@@ -156,13 +165,24 @@ class Policy(Base):
 
 class Execution(Base):
     """One run of a Mission. Each execution has its own state; executions
-    are independent (no conversation memory across executions)."""
+    are independent by default (no conversation memory across
+    executions) — unless they share a ``session_id`` (see
+    docs/sessions.md): executions in one session form a conversation,
+    and the Deep Agent of a later run is shown the prior turns."""
 
     __tablename__ = "executions"
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
     mission_id: Mapped[str] = mapped_column(
         String(128), ForeignKey("missions.id"), nullable=False
+    )
+    # Option B session (nullable: runs created before sessions, and
+    # runs whose client omitted the id — the service auto-generates
+    # one — both carry a value; NULL only predates the feature).
+    # A session is bound to one agent + one mission: the first
+    # execution in it defines both (enforced in execution_service).
+    session_id: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, index=True
     )
     mission_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     agent_id: Mapped[str | None] = mapped_column(String(128), nullable=True)

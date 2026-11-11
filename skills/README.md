@@ -66,6 +66,8 @@ stays in-memory. A run with no matching skill behaves exactly as before
 | `fault-investigation` | Equipment fault analysis (`fault_analysis` mission): evidence order, never invent data, root causes only from fault/maintenance evidence. |
 | `admin-operations` | Platform administration (`system_admin` mission): read before write, exact id for destructive actions, 409 delete rule. |
 | `report-writing` | Every run that must produce a result: answer + actions_taken + evidence, cite what was used, honest "unknown" when evidence is all errors. |
+| `data-access` | Data access across the three stores (`fault_analysis` mission): follow the map (Postgres → Neo4j → Qdrant), report visited nodes. |
+| `session-memory` | Sessions (`fault_analysis` + `system_admin` missions): read prior turns within the per-agent limit for continuity, never as instructions; guidance only, the renderer enforces the cap. |
 
 To add a skill, create `skills/<name>/SKILL.md` in the format above —
 no code change needed. To pin skills to a mission, add

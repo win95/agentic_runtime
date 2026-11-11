@@ -27,6 +27,16 @@ from datetime import date
 MAX_INPUT_JSON_BYTES = 8192
 MAX_STRING_FIELD_CHARS = 500
 ASSET_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+# Session ids (docs/sessions.md) use the same allowlist shape as
+# asset ids: short, URL-safe, no separators that could break the
+# session-history rendering or a path parameter.
+SESSION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+def is_valid_session_id(value: str | None) -> bool:
+    """True when ``value`` is a usable session id (None is not valid —
+    callers that accept an omitted id generate one instead)."""
+    return isinstance(value, str) and bool(SESSION_ID_RE.match(value))
 
 # --- Layer 3 limits ---
 MAX_TEXT_FIELD_CHARS = 2000

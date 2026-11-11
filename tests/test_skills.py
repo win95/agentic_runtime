@@ -64,7 +64,10 @@ NEUTRAL_MISSION = {
     "agent_id": "general",
 }
 
-ALL_SKILL_NAMES = {"fault-investigation", "admin-operations", "report-writing", "data-access"}
+ALL_SKILL_NAMES = {
+    "fault-investigation", "admin-operations", "report-writing",
+    "data-access", "session-memory",
+}
 
 
 # --- Loader ---
@@ -144,9 +147,14 @@ def test_seed_yaml_declares_skills():
         "fault-investigation",
         "data-access",
         "report-writing",
+        "session-memory",
     ]
     admin = load_missions.load_mission_file(BASE / "missions" / "system_admin.yaml")
-    assert admin["execution_config"]["skills"] == ["admin-operations", "report-writing"]
+    assert admin["execution_config"]["skills"] == [
+        "admin-operations",
+        "report-writing",
+        "session-memory",
+    ]
 
 
 # --- Wiring: run_deep_agent passes files through ---
@@ -209,6 +217,7 @@ def test_deep_agent_node_injects_declared_skills(db_session, monkeypatch):
     assert set(seen["files"]) == {
         "/skills/admin-operations/SKILL.md",
         "/skills/report-writing/SKILL.md",
+        "/skills/session-memory/SKILL.md",
     }
     assert "admin-operations" in seen["files"]["/skills/admin-operations/SKILL.md"]["content"]
 

@@ -183,6 +183,32 @@ def _resolve_agent_version(agent_id: str) -> tuple[object | None, bool]:
     return agent_version, drift
 
 
+def _load_agent_session_limits(agent_id: str) -> dict | None:
+    """Best-effort live-row session_history limits for one agent.
+
+    Only used when the resolved AgentVersion carries no limits (older
+    versions predate the field). Never raises: any failure means the
+    caller falls back to the global caps.
+    """
+    if not agent_id:
+        return None
+    try:
+        from app import models
+        from app.core.db import SessionLocal
+
+        _db = SessionLocal()
+        try:
+            agent = _db.get(models.Agent, agent_id)
+            if agent is None or not agent.session_history:
+                return None
+            return dict(agent.session_history)
+        finally:
+            _db.close()
+    except Exception as exc:  # noqa: BLE001 — limits never break a run
+        logger.debug("Could not load agent %s session limits: %s", agent_id, exc)
+        return None
+
+
 def deep_agent_node(state: MissionState) -> dict:
     """Run the autonomous Deep Agent (Layer 4) with permission-filtered tools.
 
@@ -328,6 +354,51 @@ def deep_agent_node(state: MissionState) -> dict:
             if mapped_skills
             else ""
         )
+        # Option B session history (docs/sessions.md): prior turns of
+        # this execution's session, rendered into the system prompt in
+        # ALL branches below (pinned version prompt, admin prompt,
+        # default) — the agent reads back what earlier runs did. The
+        # block is measured against its own budget at render time
+        # (charged to the history slice of the context budget, not the
+        # system-prompt bucket), so the prefix check below measures the
+        # prompt WITHOUT it (see prompt_for_budget).
+        #
+        # Per-agent limits: the pinned AgentVersion carries the agent's
+        # session_history when it was snapshotted with one; older
+        # versions predate the field, so fall back to the live agent
+        # row, then to the global caps. The load-time cap in
+        # session_service is the global safety net; re-capping here
+        # enforces the agent's own (possibly tighter) limit, and the
+        # omitted counts add up.
+        from runtime.session_history import (
+            cap_turns,
+            render_session_history,
+            resolve_session_limits,
+        )
+
+        _history = state.get("session_history") or {}
+        _version_limits = (
+            getattr(agent_version, "session_history", None)
+            if agent_version is not None
+            else None
+        )
+        _limits = resolve_session_limits(
+            version_limits=_version_limits,
+            agent_limits=(
+                _load_agent_session_limits(agent_id) if not _version_limits else None
+            ),
+        )
+        _shown_turns, _render_omitted = cap_turns(
+            _history.get("turns") or [], limits=_limits
+        )
+        _shown_omitted = (_history.get("omitted") or 0) + _render_omitted
+        history_block = render_session_history(
+            _shown_turns,
+            omitted=_shown_omitted,
+            session_id=state.get("session_id"),
+            limits=_limits,
+            agent_id=agent_id or None,
+        )
         # Hooks (in-agent half): one middleware instance per run, over
         # the same registry the node already dispatched UserPromptSubmit
         # on. It denies dangerous tool calls, injects feedback on tool
@@ -347,6 +418,10 @@ def deep_agent_node(state: MissionState) -> dict:
                 (mission.get("execution") or {}).get("stop_max_continues", 3)
             ),
         )
+        # The fixed prefix measured against the system-prompt budget —
+        # set in each branch below, BEFORE the history block is
+        # appended (history is charged to the history bucket, not here).
+        prompt_for_budget = ""
         if agent_version is not None:
             # Option C: the pinned prompt + model/temperature run the agent.
             # The config (not a built model) is passed down so the model
@@ -360,6 +435,9 @@ def deep_agent_node(state: MissionState) -> dict:
             system_prompt_text = agent_version.prompt_text
             if plan_block:
                 system_prompt_text = system_prompt_text + "\n\n" + plan_block
+            prompt_for_budget = system_prompt_text
+            if history_block:
+                system_prompt_text = system_prompt_text + "\n\n" + history_block
             agent = build_deep_agent(
                 tools,
                 system_prompt=system_prompt_text,
@@ -376,6 +454,9 @@ def deep_agent_node(state: MissionState) -> dict:
             )
             if plan_block:
                 system_prompt_text = system_prompt_text + "\n\n" + plan_block
+            prompt_for_budget = system_prompt_text
+            if history_block:
+                system_prompt_text = system_prompt_text + "\n\n" + history_block
             agent = build_deep_agent(
                 tools,
                 system_prompt=system_prompt_text,
@@ -389,6 +470,9 @@ def deep_agent_node(state: MissionState) -> dict:
             system_prompt_text = get_system_prompt(DEFAULT_SYSTEM_PROMPT)
             if plan_block:
                 system_prompt_text = system_prompt_text + "\n\n" + plan_block
+            prompt_for_budget = system_prompt_text
+            if history_block:
+                system_prompt_text = system_prompt_text + "\n\n" + history_block
             agent = build_deep_agent(
                 tools,
                 system_prompt=system_prompt_text,
@@ -399,7 +483,9 @@ def deep_agent_node(state: MissionState) -> dict:
         # system prompt, tool definitions, selected skill texts —
         # against its buckets. Advisory only: an overrun is logged and
         # noted on the execution; the run still proceeds (these are
-        # pinned config, not run data).
+        # pinned config, not run data). The session-history block is
+        # measured against its own budget at render time and is NOT
+        # part of this check (prompt_for_budget excludes it).
         from runtime.context_budget import check_prefix_budgets
 
         tools_text = "".join(
@@ -410,7 +496,7 @@ def deep_agent_node(state: MissionState) -> dict:
         )
         skills_text = "".join(s.raw for s in (selected_skills or []))
         prefix_overruns = check_prefix_budgets(
-            system_prompt_text, tools_text, skills_text
+            prompt_for_budget, tools_text, skills_text
         )
         for overrun in prefix_overruns:
             logger.warning("Context budget overrun: %s", overrun)
@@ -429,6 +515,15 @@ def deep_agent_node(state: MissionState) -> dict:
             run_kwargs.pop("skill_maps", None)
             outcome = run_deep_agent(agent, mission, input_data, **run_kwargs)
         notes = [f"Deep agent: {outcome.get('summary', '')}"] if outcome.get("summary") else []
+        # Option B session history: one line saying how many prior
+        # turns the agent was shown (the turns themselves are in the
+        # system prompt, not in the result). Counts are the turns
+        # actually shown after the per-agent cap, not the loaded ones.
+        if _shown_turns:
+            _history_note = f"Session history: {len(_shown_turns)} prior turn(s)"
+            if _shown_omitted:
+                _history_note += f" ({_shown_omitted} earlier omitted)"
+            notes.append(_history_note)
         # Plan trace (Option C): deterministic audit of the run against
         # each map — visited nodes, skipped nodes, tools outside the map.
         plan_trace = outcome.get("plan_trace") or {}
@@ -825,12 +920,24 @@ def get_checkpointer():
         yield None
 
 
-def run_mission(mission: dict, input_data: dict, execution_id: str) -> dict:
+def run_mission(
+    mission: dict,
+    input_data: dict,
+    execution_id: str,
+    session_history: dict | None = None,
+    session_id: str | None = None,
+) -> dict:
     """Run one execution through the Mission Graph and return final state.
 
     Reuses the module-level compiled `mission_graph` unless a Postgres
     checkpointer is enabled (then a graph is built with it).
+
+    ``session_history`` is the Option B history dict from
+    ``session_service.load_session_history`` ({"turns", "omitted",
+    "total_prior"}) — None means no history, and the run behaves
+    exactly as before (fresh session, or callers that pass nothing).
     """
+
     # Tracing for direct callers (worker, eval, langgraph dev): the API
     # lifespan already calls this for its own process. No-op without a key.
     from infra.langsmith_setup import setup_langsmith
@@ -861,6 +968,8 @@ def run_mission(mission: dict, input_data: dict, execution_id: str) -> dict:
         "hook_events": [],
         "agent_version": agent_version.version if agent_version is not None else None,
         "agent_version_drift": agent_version_drift,
+        "session_id": session_id,
+        "session_history": session_history,
     }
     # The checkpointer context must stay open for the whole invoke: the
     # saver borrows the connection from PostgresSaver.from_conn_string.

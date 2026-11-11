@@ -28,6 +28,7 @@ def _to_read(execution) -> schemas.ExecutionRead:
         agent_id=execution.agent_id,
         agent_version=execution.agent_version,
         agent_version_drift=execution.agent_version_drift,
+        session_id=execution.session_id,
         status=execution.status,
         error=execution.error,
         created_at=execution.created_at,
@@ -40,7 +41,7 @@ def _to_read(execution) -> schemas.ExecutionRead:
 def create_execution(payload: schemas.ExecutionCreate, db: Session = Depends(get_db)):
     try:
         execution, problems = execution_service.create_execution(
-            db, payload.mission_id, payload.input
+            db, payload.mission_id, payload.input, session_id=payload.session_id
         )
     except Exception as exc:  # dispatch failure (broker down, ...)
         raise HTTPException(status_code=502, detail=f"dispatch failed: {exc}") from exc
@@ -56,9 +57,15 @@ def create_execution(payload: schemas.ExecutionCreate, db: Session = Depends(get
 @router.get("", response_model=list[schemas.ExecutionRead])
 def list_executions(
     limit: int = Query(default=50, ge=1, le=100),
+    session_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    return [_to_read(e) for e in execution_service.list_executions(db, limit=limit)]
+    return [
+        _to_read(e)
+        for e in execution_service.list_executions(
+            db, limit=limit, session_id=session_id
+        )
+    ]
 
 
 @router.get("/{execution_id}", response_model=schemas.ExecutionRead)

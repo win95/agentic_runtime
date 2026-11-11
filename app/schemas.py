@@ -35,6 +35,9 @@ class AgentCreate(BaseModel):
     system_prompt: str = ""
     temperature: float = 0.0
     allowed_tools: list[str] = Field(default_factory=list)
+    # Per-agent session-history limits (docs/sessions.md): None means
+    # the global caps. Seeded from the agent YAML, not via the API.
+    session_history: dict[str, Any] | None = None
 
 
 class AgentRead(AgentCreate):
@@ -55,6 +58,8 @@ class AgentVersionRead(BaseModel):
     tool_manifest: list[dict[str, Any]] = Field(default_factory=list)
     manifest_sha256: str = ""
     git_sha: str | None = None
+    # Pinned per-agent session-history limits (None = global caps).
+    session_history: dict[str, Any] | None = None
     source: str = "seed"
     is_active: bool = False
     created_at: datetime | None = None
@@ -96,6 +101,12 @@ class PolicyRead(PolicyCreate):
 class ExecutionCreate(BaseModel):
     mission_id: str
     input: dict[str, Any] = Field(default_factory=dict)
+    # Option B session (docs/sessions.md): optional, client-supplied.
+    # Omitted -> the service generates a fresh sess_ id, so the run
+    # behaves exactly as before (its own one-turn session).
+    session_id: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$"
+    )
 
 
 class ExecutionRead(BaseModel):
@@ -108,11 +119,24 @@ class ExecutionRead(BaseModel):
     agent_id: str | None = None
     agent_version: int | None = None
     agent_version_drift: bool = False
+    session_id: str | None = None
     status: str
     error: str | None = None
     created_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
+
+
+# --- Session (Option B) ---
+class SessionRead(BaseModel):
+    session_id: str
+    agent_id: str | None = None
+    mission_id: str
+    execution_count: int
+    first_created_at: datetime | None = None
+    last_created_at: datetime | None = None
+    # The session's executions, oldest first (conversation order).
+    executions: list[ExecutionRead] = Field(default_factory=list)
 
 
 class ExecutionResultRead(BaseModel):

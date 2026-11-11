@@ -26,6 +26,7 @@ execution:
   skills:
     - admin-operations
     - report-writing
+    - session-memory
   # Hooks run for this mission (explicit declaration wins; see
   # docs/hooks.md). The admin bot can call write tools, so the
   # dangerous-call blocker and the input validator matter most here.

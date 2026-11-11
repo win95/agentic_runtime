@@ -87,6 +87,8 @@ def load_agent_file(path: pathlib.Path) -> dict:
         yaml.safe_load(path.read_text(encoding="utf-8")),
         defaults={"LLM_MODEL": settings.llm_model},
     )
+    from runtime.session_history import parse_session_history_config
+
     return {
         "id": data["id"],
         "name": data.get("name", data["id"]),
@@ -95,6 +97,11 @@ def load_agent_file(path: pathlib.Path) -> dict:
         "system_prompt": data.get("system_prompt", ""),
         "temperature": float(data.get("temperature", 0.0)),
         "allowed_tools": data.get("allowed_tools") or [],
+        # Per-agent session-history limits (docs/sessions.md): validated
+        # here — a bad block fails the seed loudly, never silently.
+        "session_history": parse_session_history_config(
+            data.get("session_history"), source=f"agent {data['id']}"
+        ),
     }
 
 

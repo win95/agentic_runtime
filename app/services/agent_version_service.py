@@ -137,6 +137,9 @@ def snapshot_agent_config(agent: models.Agent, *,
         "model": agent.model,
         "temperature": agent.temperature,
         "allowed_tools": list(agent.allowed_tools or []),
+        "session_history": (
+            dict(agent.session_history) if agent.session_history else None
+        ),
         "tool_manifest": manifest,
         "manifest_sha256": digest,
         "git_sha": _git_sha(),
@@ -150,6 +153,7 @@ def _snapshots_equal(a: dict, b: models.AgentVersion) -> bool:
         and a["model"] == b.model
         and a["temperature"] == b.temperature
         and sorted(a["allowed_tools"]) == sorted(b.allowed_tools or [])
+        and (a.get("session_history") or None) == (b.session_history or None)
         and a["manifest_sha256"] == b.manifest_sha256
     )
 

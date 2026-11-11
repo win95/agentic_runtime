@@ -9,7 +9,8 @@ vi — đổi một dòng mô tả tool cũng đổi cách agent chọn tool, m�
 Phương án C version **toàn bộ agent config như một đơn vị**: mỗi
 `AgentVersion` là một snapshot bất biến gồm prompt text chính xác,
 MLflow prompt version (nếu có), provider/model/temperature, allowed
-tools, và tool manifest (tên, mô tả, capability, permission, input
+tools, giới hạn đọc session-history (`session_history`, NULL = dùng
+cap toàn cục), và tool manifest (tên, mô tả, capability, permission, input
 schema, implementation, timeout, retry, read_only) kèm SHA-256.
 `git_sha` ghi lại code lúc snapshot (NULL khi chụp ngoài git checkout).
 
