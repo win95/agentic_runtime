@@ -32,7 +32,7 @@ and later runs see the prior turns (`docs/sessions.md`).
 | `agent_turns.py` | Proves the agent loop runs **multiple model/tool turns inside one execution** (`system_admin`). Reads `llm_usage` + `audit_logs` from Postgres to print a timeline (model turn → its tools → next model turn) and checks: SUCCEEDED, `--min-turns` model calls (default 2), `--min-tools` tool calls (default 2), every audit row terminal. `--strict` also requires tools in ≥ 2 different model turns. `--request` overrides the admin request; `--cleanup` deletes the run's execution/result/usage/audit rows. |
 | `session_conversation.py` | Drives a real **conversation across executions** using Option B sessions (`docs/sessions.md`): 3 turns share one `session_id`; the bot must recall a random code it was given in turn 1, then carry it across 2 prior turns; `GET /sessions/{id}` must list the executions oldest first. `--control` asks the same question in a fresh session (must not know the code). `--cleanup` deletes the session's rows. |
 | `agent_config_check.py` | Asserts that runs use the config pinned in the active `AgentVersion`. Static: seed YAML ↔ `agents` row ↔ version snapshot, tool-manifest drift, `allowed_tools` in the registry, mission skills/hooks resolve, session limits parse. Live (2 turns, one fresh session): both runs record the version + no drift, `llm_usage` model matches, and the MLflow trace shows the system prompt **starts with** the pinned text, the pinned model/temperature, all `allowed_tools` at the model call (no registry tool leaks), the selected skills, and turn 2's session-history header with the agent's limits. `--no-trace` skips the MLflow assertions; `--cleanup` deletes the runs. |
-| `hotel_reception.py` | Drives the `hotel_receptionist` agent end to end through the real API → worker → LLM → MCP client → mock PMS server. **Preflight** checks the pinned 14-tool contract, the `MCP_TOOL_CAPABILITIES` map, the server's tool list, and the capability gate. Scenarios: `availability`, `soldout`, `policy`, `task`, `booking` (2-turn confirmation gate with a direct `get_booking` cross-check), `memory` (3-turn recall + `GET /sessions/{id}`). `--scenario` is repeatable; `--session-id`, `--timeout`, `--cleanup` as usual. |
+| `hotel_reception.py` | Drives the `hotel_receptionist` agent end to end through the real API → worker → LLM → MCP client → mock PMS server. **Preflight** checks the pinned 14-tool contract, the `MCP_TOOL_CAPABILITIES` map, the server's tool list, and the capability gate. Scenarios: `availability`, `soldout`, `policy`, `task`, `booking` (confirmation gate: best-effort with the 3B model, direct `get_booking` cross-check, booking-code recall turn), `memory` (3-turn recall + `GET /sessions/{id}`). `--scenario` is repeatable; `--session-id`, `--timeout`, `--cleanup` as usual. |
 
 `_api.py` is the shared helper (`.env` loading, JSON calls, poll-until-terminal).
 
@@ -275,16 +275,25 @@ and later runs see the prior turns (`docs/sessions.md`).
   `get_booking` MCP call then proves the booking really exists and is
   `CONFIRMED` — a hallucinated `BK-*` code fails the check. It uses
   Deluxe (2,000,000 VND/night) because the 3B model reliably misroutes
-  Standard price questions to policy/staff tools.
+  Standard price questions to policy/staff tools. Booking is
+  best-effort with the 3B model: a model that never completes the
+  booking, or omits the code from its prose, only WARNs — but booking
+  before confirmation and a `create_booking` error still FAIL, and a
+  booking that exists is always cross-checked strictly. Turn 3 then
+  asks "Cho tôi xin mã booking vừa tạo": when the code reached the
+  prior-turn history the agent must recall that exact code; when it
+  never reached the conversation the turn only WARNs, since the
+  session-history summary is the prose answer and the agent has no
+  other way to know the code. Turn 3 must never book again.
 - The small model sometimes books during the quote turn anyway, or ends
   it in hook feedback. The quote is therefore retried up to 4 times in
   fresh `<session>-qN` conversations with a new date window; the gate
   needs one attempt that neither writes nor derails. Confirmation also
   allows two natural follow-ups in the same session before the tool/
   audit/MCP checks are evaluated.
-- Restart the mock before a clean full run: preflight asserts exactly
+- `--reseed` the mock before a clean full run: preflight asserts exactly
   5 Deluxe rooms on 2026-12-20, and earlier ad-hoc bookings can reduce
-  that count.
+  that count (restart alone no longer resets the SQLite store).
 - `memory` proves recall across executions, not inside one: turn 2 must
   repeat the random `HOTEL-*` code from turn 1, and the script also
   renders the exact prior-turn block the runtime gave turn 2 and turn 3.
@@ -292,6 +301,6 @@ and later runs see the prior turns (`docs/sessions.md`).
   answer is hook feedback.
 - `--cleanup` deletes the run's `ExecutionResult`, `LLMUsage`,
   `AuditLog`, then `Execution` rows per session; MLflow traces are kept,
-  and the mock's in-memory bookings/tasks are only reset by restarting
-  the mock server.
+  and the mock's SQLite bookings/tasks persist — use `--reseed` on the
+  mock for a clean state.
 

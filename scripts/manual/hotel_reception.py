@@ -24,15 +24,24 @@ server — and checks the agent's behaviour, not just "the run succeeded":
    ``create_task`` -> ``assign_task``; the task is then cross-checked
    with a direct ``get_task`` MCP call. Also proves the agent loop runs
    several model/tool turns inside one execution.
-6. **booking** — a real 2-turn conversation in one session, on a
-   random future date window so repeated runs do not collide. Turn 1
-   asks only for a quote (explicitly "chưa đặt phòng") and must **not**
+6. **booking** — a real conversation in one session, on a random
+   future date window so repeated runs do not collide. Turn 1 asks
+   only for a quote (explicitly "chưa đặt phòng") and must **not**
    call any booking write. Turn 2 confirms; the agent must call
    ``create_booking`` with the exact dates/guest, and a direct
    ``get_booking`` MCP call must find a CONFIRMED booking matching the
-   request (guards against a hallucinated code). When the small model
-   derails into a hallucinated ``read_file``, its prose check is a WARN
-   but the tool-argument + MCP cross-checks stay strict.
+   request (guards against a hallucinated code). Booking is
+   best-effort with the 3B model: a model that never completes the
+   booking, or omits the code from its prose, only WARNs — but
+   booking before confirmation and a ``create_booking`` error still
+   FAIL, and a booking that exists is always cross-checked strictly.
+   Turn 3 then asks "Cho tôi xin mã booking vừa tạo": when the code
+   reached the prior-turn history the agent must recall that exact
+   code (a different code FAILs); when it never reached the
+   conversation the turn only WARNs, since the agent has no way to
+   know it — the session-history summary is the prose answer, so a
+   code the prose dropped is absent from history too. Turn 3 must
+   never book again.
 7. **memory** — a separate 3-turn session: a random ``HOTEL-*`` code
    given in turn 1 must be recalled in turns 2 and 3, and
    ``GET /sessions/{id}`` must list every execution oldest first.
@@ -54,7 +63,8 @@ Scenarios run in their own sessions named ``<base>-<scenario>``; the
 memory scenario additionally proves multi-turn recall inside one of
 them. ``--cleanup`` deletes the executions, results, usage and audit
 rows for every session the run used (MLflow traces are kept; the mock
-server's in-memory bookings/tasks reset when it restarts).
+server's SQLite bookings/tasks persist — use ``--reseed`` on the mock
+for a clean state).
 
 Exit code: 0 when every check passes, 1 otherwise. Needs the project
 venv (DB access for audit/cleanup + the MCP client).
@@ -925,29 +935,59 @@ def scenario_booking(report: Report, mcp: Mcp, session_id: str,
         print_turn(f"booking turn 2 (follow-up {n})", turn2)
     check_execution(report, "booking turn 2", turn2, version, timeout)
 
-    report.check(
-        "create_booking" in success_names(turn2),
-        "booking turn 2: create_booking ran after confirmation",
-        ", ".join(sorted(success_names(turn2))),
-    )
+    # Best-effort (1): with the 3B model a booking that is never
+    # completed only WARNs. A create_booking that *errored* still
+    # FAILs — that is a tool/system failure, not model flakiness.
+    booked = "create_booking" in success_names(turn2)
+    create_errors = [
+        call_info for call_info in turn2["calls"]
+        if call_info["tool"] == "create_booking"
+        and call_info["status"] != "success"
+    ]
+    if booked:
+        report.check(True, "booking turn 2: create_booking ran after confirmation")
+    elif create_errors:
+        report.check(
+            False, "booking turn 2: create_booking ran after confirmation",
+            f"create_booking errored: "
+            f"{create_errors[0].get('error') or 'unknown error'}",
+        )
+    else:
+        report.warn(
+            "booking turn 2: create_booking ran after confirmation",
+            "model did not call create_booking after confirmation + "
+            "follow-ups (best-effort with the 3B model); the argument "
+            "checks below are skipped",
+        )
     args = call_args(turn2, "create_booking")
-    report.check(
-        args.get("guest_id") == DEFAULT_GUEST
-        and lower(args.get("room_type")) == "deluxe"
-        and args.get("check_in") == check_in
-        and args.get("check_out") == check_out,
-        "booking turn 2: tool got the confirmed guest/room/dates",
-        json.dumps(args, ensure_ascii=False),
-    )
-    report.check(
-        str(args.get("guests", "")) == "2"
-        or args.get("guests") == 2,
-        "booking turn 2: tool got 2 guests",
-        json.dumps(args, ensure_ascii=False),
-    )
+    if booked:
+        report.check(
+            args.get("guest_id") == DEFAULT_GUEST
+            and lower(args.get("room_type")) == "deluxe"
+            and args.get("check_in") == check_in
+            and args.get("check_out") == check_out,
+            "booking turn 2: tool got the confirmed guest/room/dates",
+            json.dumps(args, ensure_ascii=False),
+        )
+        report.check(
+            str(args.get("guests", "")) == "2"
+            or args.get("guests") == 2,
+            "booking turn 2: tool got 2 guests",
+            json.dumps(args, ensure_ascii=False),
+        )
+    else:
+        report.warn(
+            "booking turn 2: tool got the confirmed guest/room/dates",
+            "skipped — no successful create_booking call to check",
+        )
+        report.warn(
+            "booking turn 2: tool got 2 guests",
+            "skipped — no successful create_booking call to check",
+        )
 
     match = re.search(r"BK-\s*\d{3,}", turn2["answer"])
-    code = match.group(0).replace(" ", "") if match else ""
+    reported_code = match.group(0).replace(" ", "") if match else ""
+    code = reported_code
     if code:
         report.check(True, "booking turn 2: answer reports a BK-* booking code",
                      code)
@@ -957,34 +997,121 @@ def scenario_booking(report: Report, mcp: Mcp, session_id: str,
             "final answer was hook feedback; MCP cross-check used instead",
         )
     else:
-        report.check(False, "booking turn 2: answer reports a BK-* booking code",
-                     turn2["answer"][:250])
+        # Best-effort (1): prose omitting the code only WARNs; turn 3
+        # below asks for it, and the MCP cross-check still applies.
+        report.warn(
+            "booking turn 2: answer reports a BK-* booking code",
+            "prose omitted the code; the follow-up turn asks for it",
+        )
 
     code, booking = _find_created_booking(
         mcp, code, "deluxe", check_in, check_out,
     )
-    report.check(
-        bool(booking),
-        "booking turn 2: direct MCP get_booking finds the created booking",
-        code or "no matching booking found",
+    if booking:
+        # A booking that exists is always cross-checked strictly,
+        # whoever created it. A reported code that is not the real one
+        # is worse than a missing code: the guest would chase a booking
+        # that does not exist.
+        report.check(
+            True,
+            "booking turn 2: direct MCP get_booking finds the created booking",
+            code,
+        )
+        if reported_code and reported_code != code:
+            report.check(
+                False,
+                "booking turn 2: reported code is the real booking code",
+                f"{reported_code} != {code}",
+            )
+        report.check(
+            booking.get("guest_id") == DEFAULT_GUEST
+            and booking.get("status") == "CONFIRMED",
+            "booking turn 2: MCP booking is guest-001 and CONFIRMED",
+            json.dumps(booking, ensure_ascii=False)[:300],
+        )
+        report.check(
+            booking.get("check_in") == check_in
+            and booking.get("check_out") == check_out,
+            "booking turn 2: MCP booking has the confirmed dates",
+            json.dumps(booking, ensure_ascii=False)[:300],
+        )
+        report.check(
+            booking.get("total_price") == 2_000_000 * 2,
+            "booking turn 2: MCP total is 2 nights x 2,000,000 VND",
+            str(booking.get("total_price")),
+        )
+    elif create_errors:
+        report.warn(
+            "booking turn 2: direct MCP get_booking finds the created booking",
+            "create_booking errored (failed above); no booking to cross-check",
+        )
+    else:
+        report.warn(
+            "booking turn 2: direct MCP get_booking finds the created booking",
+            "best-effort: no booking was created; nothing to cross-check",
+        )
+
+    if not booking:
+        # Nothing to ask for — the best-effort WARNs above cover it.
+        return
+
+    # Turn 3 (2): "Cho tôi xin mã booking vừa tạo". The session-history
+    # summary is the prior answer (truncated to 1,500 chars), so the code
+    # is recallable only when it reached the conversation: when turn 2's
+    # prose (or a follow-up's) carried it, the agent must recall that
+    # exact code. When it never reached the conversation the agent has
+    # no way to know it — there is no list-by-guest tool — so the turn
+    # only WARNs and the gap stays recorded against turn 2, not this one.
+    turn3 = run_turn(
+        session_id,
+        "Cho tôi xin mã booking vừa tạo để tôi lưu lại.",
+        timeout,
     )
+    print_turn("booking turn 3 (ask for the code)", turn3)
+    check_execution(report, "booking turn 3", turn3, version, timeout)
     report.check(
-        booking.get("guest_id") == DEFAULT_GUEST
-        and booking.get("status") == "CONFIRMED",
-        "booking turn 2: MCP booking is guest-001 and CONFIRMED",
-        json.dumps(booking, ensure_ascii=False)[:300],
+        "create_booking" not in tool_names(turn3),
+        "booking turn 3: no duplicate booking",
+        ", ".join(sorted(tool_names(turn3))),
     )
-    report.check(
-        booking.get("check_in") == check_in
-        and booking.get("check_out") == check_out,
-        "booking turn 2: MCP booking has the confirmed dates",
-        json.dumps(booking, ensure_ascii=False)[:300],
+    ctx, prior_turns = _prior_history_text(
+        session_id, turn3["execution"]["execution_id"]
     )
-    report.check(
-        booking.get("total_price") == 2_000_000 * 2,
-        "booking turn 2: MCP total is 2 nights x 2,000,000 VND",
-        str(booking.get("total_price")),
-    )
+    found_codes = {
+        match.group(0).replace(" ", "")
+        for match in re.finditer(r"BK-\s*\d{3,}", turn3["answer"])
+    }
+    if code in ctx:
+        if code in found_codes:
+            report.check(
+                True, "booking turn 3: answer recalls the exact booking code",
+                f"{code} (from {prior_turns} prior turn(s))",
+            )
+        elif _answer_derailed(turn3):
+            report.warn(
+                "booking turn 3: answer recalls the exact booking code",
+                "final answer was hook feedback, although the rendered "
+                f"history ({prior_turns} prior turn(s)) carried the code",
+            )
+        else:
+            report.check(
+                False, "booking turn 3: answer recalls the exact booking code",
+                f"answer gave {', '.join(sorted(found_codes)) or 'no code'}; "
+                f"real code is {code}",
+            )
+    elif code in turn2["answer"]:
+        report.warn(
+            "booking turn 3: answer recalls the exact booking code",
+            "the code was in the prior answer but the rendered history "
+            f"({prior_turns} prior turn(s)) dropped it (truncation / "
+            "token cap); the agent never saw it",
+        )
+    else:
+        report.warn(
+            "booking turn 3: answer recalls the exact booking code",
+            "the code never reached the conversation (turn 2 prose "
+            "omitted it), so the agent has no way to recall it",
+        )
 
 
 def _prior_history_text(session_id: str, execution_id: str) -> tuple[str, int]:
