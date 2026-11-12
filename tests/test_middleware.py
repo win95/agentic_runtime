@@ -83,7 +83,7 @@ def test_tool_audit_redacts_truncates_and_times(db_session):
     run_id = uuid.uuid4()
     long_value = "x" * 3000
     handler.on_tool_start(
-        {"name": "get_execution"},
+        {"name": "get_executions"},
         json.dumps(
             {
                 "execution_id": "exec-9",
@@ -96,7 +96,7 @@ def test_tool_audit_redacts_truncates_and_times(db_session):
     )
     rows = get_audit_for_execution(db_session, "exec-1")
     assert len(rows) == 1
-    assert rows[0].tool_name == "get_execution"
+    assert rows[0].tool_name == "get_executions"
     assert rows[0].status == "started"
     assert "sk-secret" not in (rows[0].args_truncated or "")
     assert rows[0].args_truncated.count("[redacted]") == 2
@@ -114,7 +114,7 @@ def test_tool_audit_redacts_truncates_and_times(db_session):
 def test_tool_error_row(db_session):
     handler = _handler(db_session)
     run_id = uuid.uuid4()
-    handler.on_tool_start({"name": "list_missions"}, "{}", run_id=run_id)
+    handler.on_tool_start({"name": "get_missions"}, "{}", run_id=run_id)
     handler.on_tool_error(ValueError("boom"), run_id=run_id)
     rows = get_audit_for_execution(db_session, "exec-1")
     assert len(rows) == 1
@@ -141,7 +141,7 @@ def test_logging_failure_does_not_raise(db_session):
     run_id = uuid.uuid4()
     # None of these may propagate, even though every write fails.
     handler.on_llm_end(_llm_result({"prompt_tokens": 1}), run_id=run_id)
-    handler.on_tool_start({"name": "list_missions"}, "{}", run_id=run_id)
+    handler.on_tool_start({"name": "get_missions"}, "{}", run_id=run_id)
     handler.on_tool_end("ok", run_id=run_id)
     handler.on_tool_error(ValueError("x"), run_id=uuid.uuid4())
 
@@ -164,7 +164,7 @@ class _CallbackFiringFakeAgent:
             )
             tool_run_id = uuid.uuid4()
             cb.on_tool_start(
-                {"name": "list_executions"}, '{"status": "FAILED"}', run_id=tool_run_id
+                {"name": "get_executions"}, '{"status": "FAILED"}', run_id=tool_run_id
             )
             cb.on_tool_end('{"executions": []}', run_id=tool_run_id)
         return {"messages": [AIMessage(content="Có 0 execution lỗi hôm nay.")]}
@@ -194,7 +194,7 @@ def test_autonomous_run_writes_token_and_audit_rows(db_session, monkeypatch):
     assert usage[0].usage_source == "provider"
     audit = get_audit_for_execution(db_session, "exec-mw-e2e")
     assert len(audit) == 1
-    assert audit[0].tool_name == "list_executions"
+    assert audit[0].tool_name == "get_executions"
     assert audit[0].status == "success"
     assert audit[0].duration_ms is not None
     assert get_usage_totals(db_session, mission_id="system_admin")["total_tokens"] == 100

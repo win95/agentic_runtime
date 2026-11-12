@@ -557,7 +557,7 @@ curl -X POST localhost:8000/executions \
   -d '{"mission_id": "system_admin", "input": {"request": "execution nào lỗi hôm nay?"}}'
 ```
 
-Phạm vi **đọc + ghi** — bot có 11 admin tool trong
+Phạm vi **đọc + ghi** — bot có 8 admin tool trong
 `runtime/tools/admin_tools.py`, tất cả `permission="admin"`. Registry chỉ
 đưa các tool này cho mission nào khai `capabilities: [system_admin]`
 (mission `fault_analysis` không bao giờ thấy chúng). Hành động phá hủy
@@ -750,7 +750,7 @@ thật sự đã lưu.
 
 Sensor đã có store thật: bảng Postgres `sensor_readings`
 (`get_sensor_data` đọc từ đó, thiếu số liệu thì trả danh sách rỗng).
-`GET /tools/db` giờ trả 17 tool (mirror từ registry, nạp bởi
+`GET /tools/db` giờ trả 14 tool (mirror từ registry, nạp bởi
 `make seed`) và có 1 policy mặc định cho tenant `default`.
 
 ## 18. Agent versioning — version toàn bộ agent config (Phương án C)
@@ -877,7 +877,7 @@ alembic downgrade base       # gỡ toàn bộ (dev/test)
 
 Một nguồn duy nhất: `runtime/context_budget.py`. Cửa sổ 32.000 token
 chia như sau (đo thực tế trước khi chia: system prompt 200–266 token,
-17 tool ~1.275 token, 2 skill tối đa ~773 token, retrieval cap cũ 750
+14 tool ~1.050 token, 2 skill tối đa ~773 token, retrieval cap cũ 750
 token, input cap 8 KB = 2.048 token):
 
 | Thành phần | Token | Tỉ lệ |
@@ -986,3 +986,28 @@ credential hay quyền truy cập DB).
   requirements.txt`, `alembic upgrade head`, `make seed`, set
   `.env`, restart worker + beat.
 - Chi tiết: `docs/sandbox.md`.
+
+## 25. Hotel receptionist — lễ tân khách sạn
+
+Agent `hotel_receptionist` + mission `hotel_reception` (autonomous,
+capability `hotel_reception`): phục vụ khách bằng tiếng Việt qua
+Slack, nhận đặt phòng, trả lời chính sách, giao việc cho buồng phòng /
+kỹ thuật. Prompt tiếng Việt, skill `reception` với skill map 16 node
+(đặt phòng → xác nhận trong chat → tạo booking; giao việc → báo khách),
+session 10 turns / 4.096 token.
+
+- **Quy tắc xác nhận:** trước mọi thao tác ghi của booking
+  (`create_booking`, `cancel_booking`, `change_booking_dates`), agent
+  tóm tắt booking rồi hỏi khách xác nhận trong chat; chỉ gọi tool sau
+  khi khách xác nhận (prompt + node `confirm-booking` trong map).
+- **Tool là hợp đồng MCP:** 14 tên tool trong `allowed_tools` (PMS,
+  task, tài liệu) là những gì MCP server phải expose; khi connect, map
+  từng tool sang capability `hotel_reception` trong
+  `MCP_TOOL_CAPABILITIES`. Adapter hiện chỉ load một server
+  (`MCP_SERVER_URL`).
+- **Chưa có:** MCP server thật, Slack adapter, chạy live với LLM
+  thật, eval cases. Mock server: `scripts/mock_hotel_mcp_server.py`
+  (chạy `python -m scripts.mock_hotel_mcp_server`, rồi set
+  `MCP_SERVER_URL` + `MCP_TOOL_CAPABILITIES` trong `.env` — xem
+  `docs/hotel-reception.md`).
+  Chi tiết: `docs/hotel-reception.md`.

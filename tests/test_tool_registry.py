@@ -15,14 +15,11 @@ EXPECTED_TOOLS = {
     "get_sensor_data",
     "calculate_failure_rate",
     # Admin tools (runtime/tools/admin_tools.py).
-    "list_executions",
-    "get_execution",
-    "list_missions",
-    "get_mission",
+    "get_executions",
+    "get_missions",
     "list_agents",
     "system_health",
-    "create_mission",
-    "update_mission",
+    "save_mission",
     "delete_mission",
     "dispatch_execution",
     "cancel_execution",
@@ -48,8 +45,7 @@ def test_tool_schemas_valid():
         assert entry.capability
         assert entry.tool is not None
         # LangChain infers the args schema from the typed signature; it is
-        # legitimately empty for parameterless tools (list_missions,
-        # list_agents, system_health).
+        # legitimately empty for parameterless tools (system_health).
         assert isinstance(entry.input_schema, dict)
 
 

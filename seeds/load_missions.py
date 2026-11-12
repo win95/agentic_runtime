@@ -1,7 +1,13 @@
 """Mission + agent loader — upsert YAML missions and agents into PostgreSQL.
 
 Usage:
-    python -m seeds.load_missions
+    python -m seeds.load_missions [--agent ID] [--mission ID]
+
+Per-file isolation: a broken file is skipped (logged + printed) and
+the rest still seed; the failures are returned, and the CLI exits 1
+when any file failed. A filter narrows the run to the matching file
+only (by file stem, e.g. --agent hotel_receptionist); schedules seed
+only in an unfiltered run.
 """
 
 from __future__ import annotations
@@ -118,65 +124,150 @@ def load_schedule_file(path: pathlib.Path) -> dict:
     }
 
 
-def seed_schedules(db) -> None:
+def seed_schedules(db) -> tuple:
     """Upsert schedules from seeds/schedules/*.yaml.
 
     A re-seed never flips a schedule the user enabled: the stored
-    ``enabled`` value wins over the YAML one.
+    ``enabled`` value wins over the YAML one. Per-file isolation like
+    ``main()``: a broken file is skipped. Returns
+    (seeded_count, [(path, error), ...]).
     """
+    failures: list = []
+    seeded = 0
     schedules_dir = BASE / "schedules"
     if not schedules_dir.is_dir():
-        return
+        return seeded, failures
     for path in sorted(schedules_dir.glob("*.yaml")):
-        data = load_schedule_file(path)
-        existing = schedule_service.get_schedule(db, data["id"])
-        if existing is not None:
-            data["enabled"] = existing.enabled
-        schedule = schedule_service.upsert_schedule(db, data)
-        logger.info(
-            "Seeded schedule %s (cron=%s, enabled=%s)",
-            schedule.id,
-            schedule.cron,
-            schedule.enabled,
-        )
-        print(
-            f"Seeded schedule {schedule.id} "
-            f"(cron={schedule.cron}, enabled={schedule.enabled})"
-        )
+        try:
+            data = load_schedule_file(path)
+            existing = schedule_service.get_schedule(db, data["id"])
+            if existing is not None:
+                data["enabled"] = existing.enabled
+            schedule = schedule_service.upsert_schedule(db, data)
+            seeded += 1
+            logger.info(
+                "Seeded schedule %s (cron=%s, enabled=%s)",
+                schedule.id,
+                schedule.cron,
+                schedule.enabled,
+            )
+            print(
+                f"Seeded schedule {schedule.id} "
+                f"(cron={schedule.cron}, enabled={schedule.enabled})"
+            )
+        except Exception as exc:  # noqa: BLE001 — one bad file skips only itself
+            db.rollback()
+            failures.append((str(path), str(exc)))
+            logger.warning("Skipping schedule file %s: %s", path, exc)
+            print(f"FAILED schedule {path.name}: {exc}")
+    return seeded, failures
 
 
-def main() -> None:
+def _select_files(directory: pathlib.Path, wanted: str | None,
+                  kind: str) -> list:
+    """Files to seed: all *.yaml, or the one whose stem matches `wanted`."""
+    paths = sorted(directory.glob("*.yaml")) if directory.is_dir() else []
+    if wanted is None:
+        return paths
+    for path in paths:
+        if path.stem == wanted:
+            return [path]
+    available = ", ".join(p.stem for p in paths) or "(none)"
+    raise ValueError(f"Unknown {kind} {wanted!r}; available: {available}")
+
+
+def main(agent: str | None = None, mission: str | None = None) -> list:
+    """Upsert missions, agents and schedules from YAML.
+
+    Per-file isolation: a broken file (bad YAML, missing placeholder,
+    invalid session_history, ...) is skipped and recorded; the rest
+    still seed. Returns the failures as [(path, error), ...] — the
+    caller decides whether to fail. The CLI exits 1 on any failure.
+    A filter narrows the run to the matching file only (by file stem);
+    schedules seed only in an unfiltered run.
+    """
     init_db()
     db = SessionLocal()
+    failures: list = []
+    counts = {"missions": 0, "agents": 0, "schedules": 0}
     try:
-        for path in sorted((BASE / "missions").glob("*.yaml")):
-            mission = upsert_mission(db, load_mission_file(path))
-            logger.info("Seeded mission %s (v%s)", mission.id, mission.version)
-            print(f"Seeded mission {mission.id} (v{mission.version})")
-        agents_dir = BASE / "agents"
-        if agents_dir.is_dir():
-            from app.services import agent_version_service
+        # A filter narrows the run to the matching file only: --agent
+        # skips missions, --mission skips agents; both together seed
+        # the two files.
+        if agent is None:
+            for path in _select_files(BASE / "missions", mission, "mission"):
+                try:
+                    row = upsert_mission(db, load_mission_file(path))
+                    counts["missions"] += 1
+                    logger.info("Seeded mission %s (v%s)", row.id, row.version)
+                    print(f"Seeded mission {row.id} (v{row.version})")
+                except Exception as exc:  # noqa: BLE001 — one bad file skips itself
+                    db.rollback()
+                    failures.append((str(path), str(exc)))
+                    logger.warning("Skipping mission file %s: %s", path, exc)
+                    print(f"FAILED mission {path.name}: {exc}")
+        if mission is None:
+            agents_dir = BASE / "agents"
+            if agents_dir.is_dir():
+                from app.services import agent_version_service
 
-            for path in sorted(agents_dir.glob("*.yaml")):
-                agent = db.merge(models.Agent(**load_agent_file(path)))
-                db.commit()
-                logger.info("Seeded agent %s", agent.id)
-                print(f"Seeded agent {agent.id}")
-                # Option C: snapshot the agent's config as a version
-                # when it changed (or when no version exists yet).
-                # Re-seeding an unchanged agent creates nothing.
-                version, created = agent_version_service.ensure_version_for_agent(
-                    db, agent.id, source="seed"
-                )
-                if created:
-                    print(f"  agent version v{version.version} created (active)")
-                else:
-                    print(f"  agent version v{version.version} already active")
-        seed_schedules(db)
+                for path in _select_files(agents_dir, agent, "agent"):
+                    try:
+                        row = db.merge(models.Agent(**load_agent_file(path)))
+                        db.commit()
+                        counts["agents"] += 1
+                        logger.info("Seeded agent %s", row.id)
+                        print(f"Seeded agent {row.id}")
+                        # Option C: snapshot the agent's config as a version
+                        # when it changed (or when no version exists yet).
+                        # Re-seeding an unchanged agent creates nothing.
+                        version, created = (
+                            agent_version_service.ensure_version_for_agent(
+                                db, row.id, source="seed"
+                            )
+                        )
+                        if created:
+                            print(
+                                f"  agent version v{version.version} created (active)"
+                            )
+                        else:
+                            print(
+                                f"  agent version v{version.version} already active"
+                            )
+                    except Exception as exc:  # noqa: BLE001 — one bad file skips itself
+                        db.rollback()
+                        failures.append((str(path), str(exc)))
+                        logger.warning("Skipping agent file %s: %s", path, exc)
+                        print(f"FAILED agent {path.name}: {exc}")
+        if agent is None and mission is None:
+            seeded_schedules, schedule_failures = seed_schedules(db)
+            counts["schedules"] += seeded_schedules
+            failures.extend(schedule_failures)
     finally:
         db.close()
+    print(
+        f"Seed done: {counts['missions']} missions, {counts['agents']} agents, "
+        f"{counts['schedules']} schedules, {len(failures)} failed"
+    )
+    for path, error in failures:
+        print(f"  FAILED {path}: {error}")
+    return failures
 
 
 if __name__ == "__main__":
+    import argparse
+    import sys
+
     logging.basicConfig(level=logging.INFO)
-    main()
+    _parser = argparse.ArgumentParser(
+        description="Seed missions/agents/schedules from YAML")
+    _parser.add_argument(
+        "--agent", default=None,
+        help="seed only this agent (file stem, e.g. hotel_receptionist)")
+    _parser.add_argument(
+        "--mission", default=None,
+        help="seed only this mission (file stem, e.g. hotel_reception)")
+    _args = _parser.parse_args()
+    _failures = main(agent=_args.agent, mission=_args.mission)
+    if _failures:
+        sys.exit(1)

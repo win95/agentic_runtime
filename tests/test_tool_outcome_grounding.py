@@ -100,14 +100,14 @@ def test_refused_delete_not_listed_as_taken():
 
 def test_successful_and_unanswered_calls_still_listed():
     agent = _FakeAgent([
-        _ai_with_call("list_missions", "call-1"),
+        _ai_with_call("get_missions", "call-1"),
         _tool_result("call-1", {"missions": []}),
         _ai_with_call("system_health", "call-2"),
         # No ToolMessage for call-2 (e.g. a mock agent): nothing
         # contradicts the call, so it still counts.
     ])
     outcome = run_deep_agent(agent, MISSION, {"request": "x"})
-    assert outcome["actions_taken"] == ["list_missions", "system_health"]
+    assert outcome["actions_taken"] == ["get_missions", "system_health"]
     assert outcome["errors"] == []
 
 

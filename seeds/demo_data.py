@@ -726,7 +726,7 @@ def seed_executions_demo(db) -> dict:
             execution_id="exec-seed-sa-001",
             output={
                 "answer": "System healthy: 2 missions, 1 schedule, no failures in the last 24h.",
-                "actions_taken": ["list_executions", "list_missions", "system_health"],
+                "actions_taken": ["get_executions", "get_missions", "system_health"],
             },
             evidence=[
                 {"kind": "system", "detail": "system_health"},

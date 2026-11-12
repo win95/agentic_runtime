@@ -81,7 +81,7 @@ Không gửi secret, input hay toàn bộ output — chỉ lỗi / tên hành đ
 ## 6. Kiểm tra sau khi set webhook
 
 1. Dispatch một execution `system_admin` chỉ đọc (ví dụ
-   `list_executions`) → không có tin nhắn.
+   `get_executions`) → không có tin nhắn.
 2. Dispatch một execution `system_admin` có ghi (ví dụ tạo mission) →
    có tin nhắn liệt kê hành động.
 3. Gây một execution lỗi (mission không tồn tại / input sai) → có tin

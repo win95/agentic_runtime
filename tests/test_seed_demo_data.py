@@ -128,8 +128,8 @@ def test_seed_tools_and_policies_demo(db_session):
     try:
         first = demo_data.seed_tools_demo(db)
         second = demo_data.seed_tools_demo(db)
-        assert first == second == {"tools": 17}
-        assert db.query(Tool).count() == 17
+        assert first == second == {"tools": 14}
+        assert db.query(Tool).count() == 14
         assert db.get(Tool, "tool_get_sensor_data") is not None
         assert db.get(Tool, "tool_dispatch_execution") is not None
         policies = demo_data.seed_policies_demo(db)

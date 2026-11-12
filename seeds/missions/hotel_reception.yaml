@@ -1,0 +1,58 @@
+# Hotel reception mission: serve guests as a front-desk receptionist.
+# A Mission is CONFIG, not a LangGraph.
+mission_id: hotel_reception
+version: 1
+name: Hotel Reception
+objective: >
+  Serve hotel guests in Vietnamese over Slack: take room bookings,
+  answer questions about bookings and policies, and assign service
+  tasks to housekeeping and technicians. Only use the hotel tools.
+  Never invent availability, prices, policies or staff: report exactly
+  what the tools return. Before any booking write (create, cancel,
+  change dates), summarize the booking and ask the guest to confirm in
+  chat; call the write tool only after the guest confirms.
+
+input_schema:
+  type: object
+  properties:
+    message:
+      type: string
+    guest_id:
+      type: string
+    channel:
+      type: string
+  required:
+    - message
+
+execution:
+  mode: autonomous
+  agent_id: hotel_receptionist
+  skills:
+    - reception
+    - session-memory
+  # Hooks run for this mission (explicit declaration wins; see
+  # docs/hooks.md). The receptionist can call write tools, so the
+  # dangerous-call blocker, the destructive-target guard (booking /
+  # task ids must appear in the request) and the input validator
+  # matter most here.
+  hooks:
+    - audit
+    - block_dangerous_tool_call
+    - guard_destructive_target
+    - injection_feedback
+    - tool_error_feedback
+    - stop_completion
+    - validate_input
+
+capabilities:
+  - hotel_reception
+
+output_schema:
+  type: object
+  properties:
+    answer:
+      type: string
+    actions_taken:
+      type: array
+    evidence:
+      type: array

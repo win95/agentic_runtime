@@ -105,6 +105,20 @@ _KNOWN_TOOLS_CACHE: set[str] | None = None
 _KNOWN_TOOLS_TRIED = False
 
 
+def reset_known_tools_cache() -> None:
+    """Forget the cached registry snapshot.
+
+    Called when MCP tools load (``runtime/tools/mcp_adapter.py``):
+    the registry gains tools after startup, and the next
+    ``load_skills()`` must re-read it — otherwise a skill map whose
+    tools are all MCP tools (e.g. reception) would keep them dropped
+    forever and its plan trace would stay empty.
+    """
+    global _KNOWN_TOOLS_CACHE, _KNOWN_TOOLS_TRIED
+    _KNOWN_TOOLS_CACHE = None
+    _KNOWN_TOOLS_TRIED = False
+
+
 def _known_tool_names() -> set[str] | None:
     """Registered tool names for map validation, best-effort.
 
@@ -113,7 +127,8 @@ def _known_tool_names() -> set[str] | None:
     the import fails — e.g. a test process without the infra stack —
     return None and skip tool validation (structure is still checked).
     Tried once per process; a later caller that needs validation reuses
-    the cached set.
+    the cached set — until ``reset_known_tools_cache()`` runs (MCP
+    tools loaded) and the next call re-reads the registry.
     """
     global _KNOWN_TOOLS_CACHE, _KNOWN_TOOLS_TRIED
     if _KNOWN_TOOLS_TRIED:

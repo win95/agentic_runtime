@@ -48,14 +48,11 @@ temperature: 0.0
 # re-seed (the limits are pinned in the snapshot).
 session_history: {max_turns: 10, max_tokens: 4096}
 allowed_tools:
-  - list_executions
-  - get_execution
-  - list_missions
-  - get_mission
+  - get_executions
+  - get_missions
   - list_agents
   - system_health
-  - create_mission
-  - update_mission
+  - save_mission
   - delete_mission
   - dispatch_execution
   - cancel_execution

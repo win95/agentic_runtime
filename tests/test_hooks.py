@@ -140,7 +140,7 @@ def test_guard_destructive_target():
     assert builtin.guard_destructive_target(
         _ctx(
             input={"request": "list missions"},
-            tool_name="list_missions",
+            tool_name="get_missions",
             tool_input={},
         )
     ) is None

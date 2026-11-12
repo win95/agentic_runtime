@@ -20,8 +20,8 @@ from runtime.mission_graph import deep_agent_node, run_mission
 from seeds import load_missions
 
 ADMIN_TOOLS = {
-    "list_executions", "get_execution", "list_missions", "get_mission",
-    "list_agents", "system_health", "create_mission", "update_mission",
+    "get_executions", "get_missions",
+    "list_agents", "system_health", "save_mission",
     "delete_mission", "dispatch_execution", "cancel_execution",
 }
 
@@ -64,7 +64,7 @@ def _patch_capability_repositories(monkeypatch):
 
 def test_manifest_covers_all_built_in_tools():
     manifest, digest = avs.compute_tool_manifest()
-    assert len(manifest) == 17
+    assert len(manifest) == 14
     assert {e["name"] for e in manifest} == ADMIN_TOOLS | {
         "calculate_failure_rate", "get_maintenance_records", "get_sensor_data",
         "query_asset_relationships", "search_fault_history",
@@ -88,7 +88,7 @@ def test_create_version_idempotent_then_new_on_change(db_session):
         # follows settings.llm_model (item 9, 2026-11-11).
         assert same.model == settings.llm_model and same.temperature == 0.0
         assert set(same.allowed_tools) == ADMIN_TOOLS
-        assert len(same.tool_manifest) == 17
+        assert len(same.tool_manifest) == 14
         assert len(same.manifest_sha256) == 64
         assert len(avs.list_versions(db, "admin_bot")) == 1
 
@@ -194,7 +194,7 @@ def test_node_records_drift_when_tools_change(db_session, monkeypatch):
     _seed_agents(db_session)
     from runtime.tools.registry import registry
 
-    entry = registry.get("list_executions")
+    entry = registry.get("get_executions")
     assert entry is not None
     original = entry.description
     entry.description = "CHANGED description"
@@ -339,7 +339,7 @@ def test_versions_router(db_session, client):
     assert [v["version"] for v in versions] == [2, 1]
     assert versions[0]["is_active"] is True
     assert versions[0]["temperature"] == 0.7
-    assert len(versions[0]["tool_manifest"]) == 17
+    assert len(versions[0]["tool_manifest"]) == 14
 
     resp = client.get("/agents/admin_bot/versions/1")
     assert resp.status_code == 200

@@ -70,7 +70,7 @@ def test_succeeded_system_admin_with_actions_notifies():
         _notify(
             "SUCCEEDED",
             mission_id="system_admin",
-            output={"actions_taken": ["create_mission"]},
+            output={"actions_taken": ["save_mission"]},
             _sender=sender,
         )
         is True
@@ -128,7 +128,7 @@ def test_should_notify_never_raises_on_weird_output():
     ) is False
     assert should_notify(
         mission_id="system_admin", status="SUCCEEDED",
-        output={"actions_taken": "create_mission"}, webhook_url=WEBHOOK,
+        output={"actions_taken": "save_mission"}, webhook_url=WEBHOOK,
     ) is False
     assert should_notify(mission_id=None, status=None, webhook_url=WEBHOOK) is False
 

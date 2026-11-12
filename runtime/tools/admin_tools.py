@@ -1,7 +1,7 @@
 """Admin tools (Layer 5) — administer the agentic-runtime platform itself.
 
 Read tools inspect the platform (executions, missions, agents, dependency
-health). Write tools manage it (create/update/delete missions, dispatch
+health). Write tools manage it (save/delete missions, dispatch
 and cancel executions). Every tool here is registered with
 ``capability="system_admin"`` and ``permission="admin"``: the registry
 permission check (``runtime/tools/registry.py``) only hands them to a
@@ -74,53 +74,67 @@ def _agent_to_dict(agent) -> dict:
 
 # --- Read tools ---
 @tool
-def list_executions(status: str | None = None, mission_id: str | None = None,
-                    limit: int = 20) -> dict:
-    """List executions, newest first. Optional filters: status, mission_id."""
+def get_executions(execution_id: str | None = None, status: str | None = None,
+                   mission_id: str | None = None, limit: int = 20,
+                   include_result: bool = False) -> dict:
+    """Get executions, newest first — or one execution when execution_id is
+    given. Optional list filters: status, mission_id, limit (max 50).
+    A single execution always carries its result and evidence; a list
+    carries them only when include_result is true, so listings stay small."""
     from app import models
 
-    limit = max(1, min(int(limit), 100))
     db = SessionLocal()
     try:
+        if execution_id:
+            execution = execution_service.get_execution(db, execution_id)
+            if execution is None:
+                return {"error": "Execution not found", "execution_id": execution_id}
+            out = _execution_to_dict(execution)
+            result = execution_service.get_execution_result(db, execution_id)
+            if result is not None:
+                out["result"] = result.output or {}
+                out["evidence_count"] = len(result.evidence or [])
+                out["evidence"] = result.evidence or []
+            else:
+                out["result"] = None
+                out["evidence_count"] = 0
+                out["evidence"] = []
+            return out
+        limit = max(1, min(int(limit), 50))
         query = db.query(models.Execution).order_by(models.Execution.created_at.desc())
         if status:
             query = query.filter(models.Execution.status == status)
         if mission_id:
             query = query.filter(models.Execution.mission_id == mission_id)
         rows = query.limit(limit).all()
-        return {"executions": [_execution_to_dict(r) for r in rows], "count": len(rows)}
+        items = [_execution_to_dict(r) for r in rows]
+        if include_result:
+            for item in items:
+                result = execution_service.get_execution_result(db, item["execution_id"])
+                if result is not None:
+                    item["result"] = result.output or {}
+                    item["evidence_count"] = len(result.evidence or [])
+                    item["evidence"] = result.evidence or []
+                else:
+                    item["result"] = None
+                    item["evidence_count"] = 0
+                    item["evidence"] = []
+        return {"executions": items, "count": len(items)}
     finally:
         db.close()
 
 
 @tool
-def get_execution(execution_id: str) -> dict:
-    """Get one execution with its result and error (if any)."""
+def get_missions(mission_id: str | None = None) -> dict:
+    """List all missions (id, name, version, objective, agent, capabilities)
+    — or get one mission's full config when mission_id is given."""
     db = SessionLocal()
     try:
-        execution = execution_service.get_execution(db, execution_id)
-        if execution is None:
-            return {"error": "Execution not found", "execution_id": execution_id}
-        result = execution_service.get_execution_result(db, execution_id)
-        out = _execution_to_dict(execution)
-        if result is not None:
-            out["result"] = result.output or {}
-            out["evidence_count"] = len(result.evidence or [])
-            out["evidence"] = result.evidence or []
-        else:
-            out["result"] = None
-            out["evidence_count"] = 0
-            out["evidence"] = []
-        return out
-    finally:
-        db.close()
-
-
-@tool
-def list_missions() -> dict:
-    """List all missions (id, name, version, objective, agent, capabilities)."""
-    db = SessionLocal()
-    try:
+        if mission_id:
+            mission = mission_service.get_mission(db, mission_id)
+            if mission is None:
+                return {"error": "Mission not found", "mission_id": mission_id}
+            return _mission_to_dict(mission)
         rows = mission_service.list_missions(db)
         return {"missions": [_mission_to_dict(r) for r in rows], "count": len(rows)}
     finally:
@@ -128,25 +142,18 @@ def list_missions() -> dict:
 
 
 @tool
-def get_mission(mission_id: str) -> dict:
-    """Get one mission's full config."""
-    db = SessionLocal()
-    try:
-        mission = mission_service.get_mission(db, mission_id)
-        if mission is None:
-            return {"error": "Mission not found", "mission_id": mission_id}
-        return _mission_to_dict(mission)
-    finally:
-        db.close()
-
-
-@tool
-def list_agents() -> dict:
-    """List all agents (id, name, provider, model, allowed tools)."""
+def list_agents(agent_id: str | None = None) -> dict:
+    """List all agents (id, name, provider, model, allowed tools) — or one
+    agent when agent_id is given."""
     from app import models
 
     db = SessionLocal()
     try:
+        if agent_id:
+            agent = db.query(models.Agent).filter(models.Agent.id == agent_id).first()
+            if agent is None:
+                return {"error": "Agent not found", "agent_id": agent_id}
+            return _agent_to_dict(agent)
         rows = db.query(models.Agent).order_by(models.Agent.id).all()
         return {"agents": [_agent_to_dict(r) for r in rows], "count": len(rows)}
     finally:
@@ -229,57 +236,33 @@ def system_health() -> dict:
 
 # --- Write tools ---
 @tool
-def create_mission(mission_id: str, name: str, objective: str = "",
-                   input_schema: dict | None = None, output_schema: dict | None = None,
-                   execution_mode: str = "hybrid", agent_id: str | None = None,
-                   capabilities: list | None = None) -> dict:
-    """Create a new mission. Fails (structured error, no raise) when a
-    mission with the same id already exists — use update_mission then."""
+def save_mission(mission_id: str, name: str | None = None, objective: str | None = None,
+                 input_schema: dict | None = None, output_schema: dict | None = None,
+                 execution_mode: str | None = None, agent_id: str | None = None,
+                 capabilities: list | None = None,
+                 on_exists: str = "error") -> dict:
+    """Save a mission (create or overwrite). on_exists selects the behaviour
+    when the id already exists: "error" (default) refuses with a structured
+    error, like the old create_mission; "overwrite" updates the existing
+    mission in place, like the old update_mission. When the id does not
+    exist yet, a new mission is created: "error" mode requires a name,
+    "overwrite" mode defaults the name to the mission id."""
     from sqlalchemy.exc import IntegrityError
 
-    data = {
-        "id": mission_id,
-        "name": name,
-        "version": 1,
-        "objective": objective,
-        "input_schema": input_schema or {},
-        "output_schema": output_schema or {},
-        "execution_config": {"mode": execution_mode, "agent_id": agent_id},
-        "capabilities": capabilities or [],
-        "agent_id": agent_id,
-    }
-    db = SessionLocal()
-    try:
-        try:
-            mission = mission_service.create_mission(db, data)
-        except mission_service.MissionAlreadyExistsError:
-            db.rollback()
-            return {
-                "error": f"Mission {mission_id} already exists",
-                "mission_id": mission_id,
-            }
-        except IntegrityError:
-            db.rollback()
-            return {
-                "error": f"Mission {mission_id} already exists",
-                "mission_id": mission_id,
-            }
-        return {"created": True, **_mission_to_dict(mission)}
-    finally:
-        db.close()
-
-
-@tool
-def update_mission(mission_id: str, name: str | None = None, objective: str | None = None,
-                   input_schema: dict | None = None, output_schema: dict | None = None,
-                   execution_mode: str | None = None, agent_id: str | None = None,
-                   capabilities: list | None = None) -> dict:
-    """Update a mission (upsert: creates it when the id does not exist yet).
-    Only the fields given are changed; the rest keep their current values."""
+    if on_exists not in ("error", "overwrite"):
+        return {
+            "error": f"on_exists must be 'error' or 'overwrite', got {on_exists!r}",
+            "mission_id": mission_id,
+        }
     db = SessionLocal()
     try:
         existing = mission_service.get_mission(db, mission_id)
         if existing is None:
+            if on_exists == "error" and not name:
+                return {
+                    "error": "name is required to create a new mission",
+                    "mission_id": mission_id,
+                }
             data = {
                 "id": mission_id,
                 "name": name or mission_id,
@@ -291,28 +274,47 @@ def update_mission(mission_id: str, name: str | None = None, objective: str | No
                 "capabilities": capabilities or [],
                 "agent_id": agent_id,
             }
-        else:
-            current = _mission_to_dict(existing)
-            execution_config = dict(current["execution"])
-            if execution_mode is not None:
-                execution_config["mode"] = execution_mode
-            if agent_id is not None:
-                execution_config["agent_id"] = agent_id
-
-            def _pick(new, old):
-                return old if new is None else new
-
-            data = {
-                "id": mission_id,
-                "name": _pick(name, current["name"]),
-                "version": current["version"],
-                "objective": _pick(objective, current["objective"]),
-                "input_schema": _pick(input_schema, current["input_schema"]),
-                "output_schema": _pick(output_schema, current["output_schema"]),
-                "execution_config": execution_config,
-                "capabilities": _pick(capabilities, current["capabilities"]),
-                "agent_id": _pick(agent_id, current["agent_id"]),
+            try:
+                mission = mission_service.create_mission(db, data)
+            except mission_service.MissionAlreadyExistsError:
+                db.rollback()
+                return {
+                    "error": f"Mission {mission_id} already exists",
+                    "mission_id": mission_id,
+                }
+            except IntegrityError:
+                db.rollback()
+                return {
+                    "error": f"Mission {mission_id} already exists",
+                    "mission_id": mission_id,
+                }
+            return {"created": True, **_mission_to_dict(mission)}
+        if on_exists == "error":
+            return {
+                "error": f"Mission {mission_id} already exists",
+                "mission_id": mission_id,
             }
+        current = _mission_to_dict(existing)
+        execution_config = dict(current["execution"])
+        if execution_mode is not None:
+            execution_config["mode"] = execution_mode
+        if agent_id is not None:
+            execution_config["agent_id"] = agent_id
+
+        def _pick(new, old):
+            return old if new is None else new
+
+        data = {
+            "id": mission_id,
+            "name": _pick(name, current["name"]),
+            "version": current["version"],
+            "objective": _pick(objective, current["objective"]),
+            "input_schema": _pick(input_schema, current["input_schema"]),
+            "output_schema": _pick(output_schema, current["output_schema"]),
+            "execution_config": execution_config,
+            "capabilities": _pick(capabilities, current["capabilities"]),
+            "agent_id": _pick(agent_id, current["agent_id"]),
+        }
         mission = mission_service.upsert_mission(db, data)
         return {"updated": True, **_mission_to_dict(mission)}
     finally:
@@ -404,30 +406,24 @@ def cancel_execution(execution_id: str) -> dict:
         db.close()
 
 
-# Register all eleven admin tools with their business capability + permission.
+# Register all eight admin tools with their business capability + permission.
 # NOTE: create_agent is deliberately NOT here — no agent service exists
 # (agents are created directly by the API router), so there is no safe
 # service to delegate to.
-# Layer 4: the six read tools are read_only=True; the five write tools
-# (create/update/delete mission, dispatch/cancel execution) are
+# Layer 4: the four read tools are read_only=True; the four write tools
+# (save/delete mission, dispatch/cancel execution) are
 # read_only=False — they are only visible to missions whose capability
 # matches, and a human-in-the-loop confirmation step is still required
 # before a write tool may run unsupervised (not built yet).
-registry.register(list_executions, capability="system_admin",
+registry.register(get_executions, capability="system_admin",
                   permission="admin", timeout_seconds=30, read_only=True)
-registry.register(get_execution, capability="system_admin",
-                  permission="admin", timeout_seconds=30, read_only=True)
-registry.register(list_missions, capability="system_admin",
-                  permission="admin", timeout_seconds=30, read_only=True)
-registry.register(get_mission, capability="system_admin",
+registry.register(get_missions, capability="system_admin",
                   permission="admin", timeout_seconds=30, read_only=True)
 registry.register(list_agents, capability="system_admin",
                   permission="admin", timeout_seconds=30, read_only=True)
 registry.register(system_health, capability="system_admin",
                   permission="admin", timeout_seconds=30, read_only=True)
-registry.register(create_mission, capability="system_admin",
-                  permission="admin", timeout_seconds=30, read_only=False)
-registry.register(update_mission, capability="system_admin",
+registry.register(save_mission, capability="system_admin",
                   permission="admin", timeout_seconds=30, read_only=False)
 registry.register(delete_mission, capability="system_admin",
                   permission="admin", timeout_seconds=30, read_only=False)

@@ -77,12 +77,12 @@ def test_tools_db_read_only_mirrors_registry(client, db_session):
 
     demo_data.seed_tools_demo(db_session)
     rows = {row["name"]: row for row in client.get("/tools/db").json()}
-    assert len(rows) == 17
+    assert len(rows) == 14
     assert rows["search_fault_history"]["read_only"] is True
     assert rows["delete_mission"]["read_only"] is False
     assert rows["dispatch_execution"]["read_only"] is False
     assert rows["cancel_execution"]["read_only"] is False
-    assert rows["create_mission"]["read_only"] is False
+    assert rows["save_mission"]["read_only"] is False
 
 
 # --- P0-7: ingest keeps rows merged before a failing row ------------------

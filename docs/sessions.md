@@ -64,6 +64,7 @@ never bloats the context of an agent whose turns are big.
 | --- | --- | --- | --- |
 | `admin_bot` (conversational admin) | 10 | 4,096 | Same as the globals — it needs the context. |
 | `fault_investigator` (analysis) | 3 | 2,048 | Each prior analysis is big; 3 turns is enough for continuity. |
+| `hotel_receptionist` (guest chat) | 10 | 4,096 | Guest chats are multi-turn like the admin bot's. |
 | Any agent without a config | 10 | 4,096 | Global fallback. |
 
 | Cap | Global default | Why |

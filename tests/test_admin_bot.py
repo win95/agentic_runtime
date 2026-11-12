@@ -18,14 +18,11 @@ from runtime.tools.registry import registry
 from seeds import load_missions
 
 ADMIN_TOOL_NAMES = {
-    "list_executions",
-    "get_execution",
-    "list_missions",
-    "get_mission",
+    "get_executions",
+    "get_missions",
     "list_agents",
     "system_health",
-    "create_mission",
-    "update_mission",
+    "save_mission",
     "delete_mission",
     "dispatch_execution",
     "cancel_execution",
@@ -98,25 +95,25 @@ def test_permission_gate_active_when_permissions_listed():
     """check() semantics: the permission gate only applies when the context
     lists permissions at all; an empty list means 'no restriction'."""
     admin_with_perm = dict(ADMIN_CONTEXT, permissions=["admin"])
-    assert registry.check("list_missions", admin_with_perm) is True
+    assert registry.check("get_missions", admin_with_perm) is True
     admin_wrong_perm = dict(ADMIN_CONTEXT, permissions=["other"])
-    assert registry.check("list_missions", admin_wrong_perm) is False
+    assert registry.check("get_missions", admin_wrong_perm) is False
     # Fault tools need their own permission when one is listed.
     assert registry.check("search_fault_history", admin_with_perm) is False
 
 
 # --- Read tools ---
-def test_list_and_get_mission_tools(db_session):
+def test_get_missions_tool(db_session):
     _make_mission(db_session, "m1")
-    listed = _invoke("list_missions")
+    listed = _invoke("get_missions")
     assert listed["count"] == 1
     assert listed["missions"][0]["mission_id"] == "m1"
-    got = _invoke("get_mission", {"mission_id": "m1"})
+    got = _invoke("get_missions", {"mission_id": "m1"})
     assert got["name"] == "m1"
-    assert _invoke("get_mission", {"mission_id": "nope"})["error"] == "Mission not found"
+    assert _invoke("get_missions", {"mission_id": "nope"})["error"] == "Mission not found"
 
 
-def test_list_executions_filters(db_session):
+def test_get_executions_tool(db_session):
     _make_mission(db_session, "m1")
     _make_mission(db_session, "m2")
     for i, (mid, status) in enumerate([("m1", "SUCCEEDED"), ("m1", "FAILED"), ("m2", "QUEUED")]):
@@ -125,14 +122,19 @@ def test_list_executions_filters(db_session):
             input={}, status=status,
         ))
     db_session.commit()
-    assert _invoke("list_executions")["count"] == 3
-    assert _invoke("list_executions", {"status": "FAILED"})["count"] == 1
-    assert _invoke("list_executions", {"mission_id": "m2"})["count"] == 1
-    assert _invoke("list_executions", {"limit": 2})["count"] == 2
-    got = _invoke("get_execution", {"execution_id": "exec_f0"})
+    assert _invoke("get_executions")["count"] == 3
+    assert _invoke("get_executions", {"status": "FAILED"})["count"] == 1
+    assert _invoke("get_executions", {"mission_id": "m2"})["count"] == 1
+    assert _invoke("get_executions", {"limit": 2})["count"] == 2
+    got = _invoke("get_executions", {"execution_id": "exec_f0"})
     assert got["status"] == "SUCCEEDED"
     assert got["result"] is None
-    assert _invoke("get_execution", {"execution_id": "nope"})["error"] == "Execution not found"
+    assert _invoke("get_executions", {"execution_id": "nope"})["error"] == "Execution not found"
+    # include_result attaches result/evidence to list items; off by default.
+    with_result = _invoke("get_executions", {"include_result": True})
+    assert with_result["count"] == 3
+    assert all("result" in item for item in with_result["executions"])
+    assert "result" not in _invoke("get_executions")["executions"][0]
 
 
 def test_list_agents_tool(db_session):
@@ -141,6 +143,9 @@ def test_list_agents_tool(db_session):
     listed = _invoke("list_agents")
     assert listed["count"] == 1
     assert listed["agents"][0]["agent_id"] == "a1"
+    got = _invoke("list_agents", {"agent_id": "a1"})
+    assert got["name"] == "A1"
+    assert _invoke("list_agents", {"agent_id": "nope"})["error"] == "Agent not found"
 
 
 def test_system_health_never_raises():
@@ -156,22 +161,30 @@ def test_system_health_never_raises():
 
 
 # --- Write tools ---
-def test_create_update_delete_mission_tools(db_session):
-    created = _invoke("create_mission", {
+def test_save_delete_mission_tools(db_session):
+    created = _invoke("save_mission", {
         "mission_id": "m1", "name": "M One", "objective": "test",
         "capabilities": ["system_admin"],
     })
     assert created["created"] is True
     assert created["mission_id"] == "m1"
-    duplicate = _invoke("create_mission", {"mission_id": "m1", "name": "M One"})
+    # Default on_exists="error": saving over an existing id is refused.
+    duplicate = _invoke("save_mission", {"mission_id": "m1", "name": "M One"})
     assert "already exists" in duplicate["error"]
-
-    updated = _invoke("update_mission", {"mission_id": "m1", "name": "M Uno"})
+    # on_exists="overwrite" updates in place; untouched fields are kept.
+    updated = _invoke("save_mission", {
+        "mission_id": "m1", "name": "M Uno", "on_exists": "overwrite",
+    })
     assert updated["updated"] is True
     assert updated["name"] == "M Uno"
     assert updated["objective"] == "test"  # unchanged fields are kept
-    # Upsert: updating a missing mission creates it.
-    assert _invoke("update_mission", {"mission_id": "m2", "name": "M Two"})["updated"] is True
+    # Overwrite mode creates a missing mission, defaulting name to the id.
+    created2 = _invoke("save_mission", {"mission_id": "m2", "on_exists": "overwrite"})
+    assert created2["created"] is True
+    assert mission_service.get_mission(db_session, "m2").name == "m2"
+    # Error mode requires a name when creating.
+    assert "name is required" in _invoke("save_mission", {"mission_id": "m3"})["error"]
+    assert mission_service.get_mission(db_session, "m3") is None
 
     deleted = _invoke("delete_mission", {"mission_id": "m2"})
     assert deleted == {"deleted": True, "mission_id": "m2"}
@@ -318,7 +331,7 @@ def test_autonomous_system_admin_run_succeeds(db_session, monkeypatch):
                 "source": "deep_agent", "kind": "summary",
                 "summary": "Có 1 execution lỗi hôm nay.", "stub": False,
             }],
-            "actions_taken": ["list_executions", "get_execution"],
+            "actions_taken": ["get_executions"],
             "errors": [],
         }
 
@@ -328,7 +341,7 @@ def test_autonomous_system_admin_run_succeeds(db_session, monkeypatch):
     final = run_mission(mission_dict, {"request": "execution nào lỗi hôm nay?"}, "exec_admin_run")
     assert final["status"] == "SUCCEEDED", f"errors: {final.get('errors')}"
     assert final["result"]["answer"] == "Có 1 execution lỗi hôm nay."
-    assert final["result"]["actions_taken"] == ["list_executions", "get_execution"]
+    assert final["result"]["actions_taken"] == ["get_executions"]
     assert len(final["result"]["evidence"]) >= 1
     # The admin system prompt (not the fault_investigator one) was used.
     assert seen_prompts and seen_prompts[0] is not None

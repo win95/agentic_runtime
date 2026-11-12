@@ -13,6 +13,14 @@ and never handed to an agent, because an MCP server's tool descriptions
 are untrusted prompt content (tool-description poisoning). MCP tools
 are treated as writes (read_only=False) since their side effects are
 unknown to this codebase.
+
+Sync entry point: langchain-mcp-adapters tools are async-only (no sync
+``func``), but this runtime invokes the agent synchronously
+(``run_deep_agent`` -> ``agent.invoke``), so a bare MCP tool raises
+``NotImplementedError: StructuredTool does not support sync
+invocation`` on first use. ``load_mcp_tools()`` therefore wraps each
+tool with a sync ``func`` (fresh event loop per call) while keeping
+the async coroutine for async callers.
 """
 
 from __future__ import annotations
@@ -20,11 +28,54 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import threading
+
+from langchain_core.tools import StructuredTool
 
 from app.config import settings
 from runtime.tools.registry import registry
 
 logger = logging.getLogger(__name__)
+
+
+def _run_sync(coro):
+    """Run a coroutine from sync code: a fresh event loop when none is
+    running, else a worker thread with its own loop."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    outcome: dict = {}
+
+    def _target() -> None:
+        try:
+            outcome["value"] = asyncio.run(coro)
+        except BaseException as exc:  # noqa: BLE001 — re-raised below
+            outcome["error"] = exc
+
+    thread = threading.Thread(target=_target, daemon=True)
+    thread.start()
+    thread.join()
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
+
+
+def _as_sync_tool(mcp_tool):
+    """Wrap an async-only MCP tool so the sync agent can call it."""
+    async def _coro(**kwargs):
+        return await mcp_tool.ainvoke(kwargs)
+
+    def _sync(**kwargs):
+        return _run_sync(_coro(**kwargs))
+
+    return StructuredTool.from_function(
+        func=_sync,
+        coroutine=_coro,
+        name=mcp_tool.name,
+        description=mcp_tool.description or "",
+        args_schema=mcp_tool.args_schema,
+    )
 
 
 def _capability_map() -> dict[str, str]:
@@ -85,9 +136,21 @@ def load_mcp_tools() -> list:
                 tool.name,
             )
             continue
+        sync_tool = _as_sync_tool(tool)
         registry.register(
-            tool, capability=capability, permission="mcp",
+            sync_tool, capability=capability, permission="mcp",
             timeout_seconds=60, read_only=False,
         )
-        registered.append(tool)
+        registered.append(sync_tool)
+    if registered:
+        # The registry gained tools after startup: the skill loader's
+        # cached tool set is stale — drop it so the next load_skills()
+        # re-reads the registry and skill maps keep their MCP tools
+        # (otherwise the reception plan trace stays empty).
+        try:
+            from runtime.skills.loader import reset_known_tools_cache
+
+            reset_known_tools_cache()
+        except Exception:  # noqa: BLE001 — validation is best-effort
+            logger.debug("Could not reset the skill tool cache")
     return registered
