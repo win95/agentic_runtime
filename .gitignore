@@ -26,6 +26,9 @@ training/output/
 .langgraph_api/
 mlruns/
 
+# Generated analysis output
+reports/
+
 # IDE
 .idea/
 .vscode/

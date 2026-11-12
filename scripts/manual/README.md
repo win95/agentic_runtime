@@ -33,6 +33,7 @@ and later runs see the prior turns (`docs/sessions.md`).
 | `session_conversation.py` | Drives a real **conversation across executions** using Option B sessions (`docs/sessions.md`): 3 turns share one `session_id`; the bot must recall a random code it was given in turn 1, then carry it across 2 prior turns; `GET /sessions/{id}` must list the executions oldest first. `--control` asks the same question in a fresh session (must not know the code). `--cleanup` deletes the session's rows. |
 | `agent_config_check.py` | Asserts that runs use the config pinned in the active `AgentVersion`. Static: seed YAML ↔ `agents` row ↔ version snapshot, tool-manifest drift, `allowed_tools` in the registry, mission skills/hooks resolve, session limits parse. Live (2 turns, one fresh session): both runs record the version + no drift, `llm_usage` model matches, and the MLflow trace shows the system prompt **starts with** the pinned text, the pinned model/temperature, all `allowed_tools` at the model call (no registry tool leaks), the selected skills, and turn 2's session-history header with the agent's limits. `--no-trace` skips the MLflow assertions; `--cleanup` deletes the runs. |
 | `hotel_reception.py` | Drives the `hotel_receptionist` agent end to end through the real API → worker → LLM → MCP client → mock PMS server. **Preflight** checks the pinned 14-tool contract, the `MCP_TOOL_CAPABILITIES` map, the server's tool list, and the capability gate. Scenarios: `availability`, `soldout`, `policy`, `task`, `booking` (confirmation gate: best-effort with the 3B model, direct `get_booking` cross-check, booking-code recall turn), `memory` (3-turn recall + `GET /sessions/{id}`). `--scenario` is repeatable; `--session-id`, `--timeout`, `--cleanup` as usual. |
+| `mlflow_report.py` | Read-only analysis of the runs `hotel_reception.py` left in MLflow: discovers the experiment, joins runs↔traces on `mlflow.sourceRun`, classifies each trace (scenario, turn index, status/version/drift, latency, tokens, contract vs built-in tools, hook failures, derailed prose), then writes a Markdown report + one-row-per-trace CSV. No API/worker/MCP needed; re-run after any test run or DB cleanup. Defaults: experiment `agentic-runtime`, session prefix `sess-hotel-`, outputs in `reports/`. |
 
 `_api.py` is the shared helper (`.env` loading, JSON calls, poll-until-terminal).
 
@@ -88,6 +89,18 @@ and later runs see the prior turns (`docs/sessions.md`).
 .venv/bin/python scripts/manual/hotel_reception.py \
     --scenario availability --scenario policy --timeout 600
 .venv/bin/python scripts/manual/hotel_reception.py --session-id sess-hotel-demo
+
+# MLflow report: regenerate from everything the hotel runs left behind
+.venv/bin/python scripts/manual/mlflow_report.py
+make mlflow-report
+
+# MLflow report: one day only, or a different experiment / session prefix
+.venv/bin/python scripts/manual/mlflow_report.py --since 2026-11-12
+.venv/bin/python scripts/manual/mlflow_report.py \
+    --experiment agentic-runtime --session-prefix sess-hotel-
+
+# MLflow report: print to stdout, no files
+.venv/bin/python scripts/manual/mlflow_report.py --out "" --csv ""
 ```
 
 ## Notes from the manual test session (2026-11-10)
@@ -304,3 +317,60 @@ and later runs see the prior turns (`docs/sessions.md`).
   and the mock's SQLite bookings/tasks persist — use `--reseed` on the
   mock for a clean state.
 
+
+## Notes from the MLflow report pipeline (2026-11-12)
+
+`mlflow_report.py` turns the post-run analysis into a repeatable command.
+It only reads MLflow, so it can run long after the API, worker and mock MCP
+server are gone — and after `hotel_reception.py --cleanup` deleted the
+Postgres rows (traces are the source of truth; cleanup never touches them).
+
+Stages, one function each:
+
+1. **discover** — resolve the experiment by name or id, list its runs and
+   every trace (`--max-traces` caps both searches).
+2. **join** — keep runs whose `tags.session_id` starts with
+   `--session-prefix`, link each trace to its run via
+   `mlflow.sourceRun`, and de-duplicate on `(run_id, execution_id)`.
+3. **classify** — per trace: scenario (session suffix after the random
+   id, with `-qN` retry suffixes removed), turn index inside the session,
+   status / `agent_version` / drift, latency, tokens, span names split
+   into contract vs built-in tools, `PostToolUseFailure` hook events,
+   nested tool spans, model tool fan-out, derailed prose, explicit vs
+   natural prompt, and the planted `HOTEL-*` memory code.
+4. **aggregate** — per-scenario table, latency, tokens, tool usage, file
+   tool noise, fan-out distribution, booking quote/confirm gate, memory
+   recall, slowest/biggest outliers.
+5. **render** — `reports/hotel-mlflow-report.md` plus
+   `reports/hotel-mlflow-traces.csv` (one row per trace, all raw columns,
+   including excluded scenarios).
+
+Scope and definitions worth remembering:
+
+- **Stat scope is the suite.** `adhoc` (exploratory probes) and `probe`
+  (one-off wiring checks) are excluded from every statistic via
+  `--exclude-scenarios` (default `adhoc,probe`); they still appear in the
+  CSV and in the "toàn bộ" rows of section 1. Use
+  `--exclude-scenarios ""` to analyse everything.
+- **derail** is prose-only: the answer contains `tool_error_feedback`,
+  `does not exist`, `deviation:`, `subagent`, or `plan nodes visited:`.
+  It is a model-quality signal, not an execution failure.
+- **hook feedback** counts traces with a `PostToolUseFailure` event whose
+  decisions include `feedback`, i.e. the failure was fed back to the model.
+- **nhiễu file** counts traces that called deepagents built-ins
+  (`read_file`/`write_file`/…), which are outside the MCP capability gate.
+- **booking** splits the first turn of each session (quote: clean if it
+  only calls `check_room_availability`/`get_room_rates`, early write if it
+  calls a write tool) from the remaining turns (confirm: did it call
+  `create_booking`). Sessions are retried as `-qN`, so each attempt is its
+  own session and is counted.
+- **memory** plants the code in the first turn of a session and checks
+  recall in the later turns' prose, in the rendered
+  `<data source="session_history">` block, and per session.
+- **nested tool spans** are instrumentation (`ToolNode` span → registered
+  wrapper → inner tool): one MCP call yields two nested spans with the same
+  `tool_call_id` and therefore two `audit_logs` rows. Section 12 reports
+  them as a reading note, not as double execution.
+- Numbers are data-derived, so a re-run after new tests changes them;
+  the report prints the generation time, tracking URI, experiment and
+  filters at the top so two reports can be compared honestly.

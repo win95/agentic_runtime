@@ -1,4 +1,4 @@
-.PHONY: install install-requirements run-api run-worker run-beat migrate test lint docker-up docker-down seed seed-dry-run seed-edge ingest ingest-dry-run demo eval eval-real eval-genai eval-genai-real langgraph-dev gen-synthetic-data eval-tool-use eval-retrieval train-embedding train-llm
+.PHONY: install install-requirements run-api run-worker run-beat migrate test lint docker-up docker-down seed seed-dry-run seed-edge ingest ingest-dry-run demo eval eval-real eval-genai eval-genai-real langgraph-dev gen-synthetic-data eval-tool-use eval-retrieval train-embedding train-llm mlflow-report
 
 # Prefer the project venv when it exists (this checkout), else system python.
 PYTHON := $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python)
@@ -93,6 +93,11 @@ eval-genai:
 # GenAI eval with real predictions (needs the 4 LiteLLM vars).
 eval-genai-real:
 	$(PYTHON) scripts/eval_mission.py --real --genai
+
+# Rebuild the MLflow report for the manual hotel runs (read-only; needs
+# the MLflow server only). Outputs under reports/ (git-ignored).
+mlflow-report:
+	$(PYTHON) scripts/manual/mlflow_report.py
 
 # LangGraph dev server (Studio + traces) — http://localhost:8123
 langgraph-dev:
