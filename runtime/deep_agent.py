@@ -19,6 +19,25 @@ from runtime.skills.map_plan import SkillMap, compute_plan_trace
 
 logger = logging.getLogger(__name__)
 
+# Missions whose Deep Agent must never be offered a deepagents built-in
+# tool (Part 1, option b). The built-ins are hidden from the model
+# request AND rejected at the call boundary by deepagents'
+# _ToolExclusionMiddleware (see build_deep_agent). fault_analysis
+# deliberately opts out: its sandbox sessions need `execute` by design.
+# Keep in sync with runtime/hooks/builtin.py::_BUILTIN_DENY_MISSIONS —
+# the hook is the backstop for the same missions (it can only fire if a
+# built-in somehow reaches the model anyway).
+NO_BUILTIN_TOOL_MISSIONS = frozenset({"hotel_reception"})
+
+# The 9 built-in names deepagents adds: 7 filesystem tools + `execute`
+# (sandbox backends only — dropped at assembly for the default
+# StateBackend) + `task` (the general-purpose subagent). Same set the
+# hook denies (runtime/hooks/builtin.py::_BUILTIN_FILE_TOOLS).
+BUILTIN_TOOL_NAMES = frozenset({
+    "ls", "read_file", "write_file", "edit_file", "delete",
+    "glob", "grep", "task", "execute",
+})
+
 DEFAULT_SYSTEM_PROMPT = (
     "You are an autonomous investigation agent. Plan the investigation, "
     "use the provided tools to gather evidence, and only conclude when the "
@@ -76,6 +95,31 @@ def get_chat_model():
     clear RuntimeError when the agent is built, never at import time.
     """
     return build_chat_model()
+
+
+def builtin_tools_exclusion(mission_id: str | None):
+    """_ToolExclusionMiddleware hiding the deepagents built-ins, or None
+    when the mission keeps them.
+
+    For missions in ``NO_BUILTIN_TOOL_MISSIONS`` (hotel only —
+    fault_analysis needs ``execute`` in its sandbox by design), the
+    9 built-ins are hidden from the model request AND rejected at the
+    call boundary (Part 1, option b). The public alternatives cannot
+    do this per mission: ``HarnessProfile.excluded_tools`` is keyed by
+    model (all our missions share one model), and a custom
+    ``FilesystemMiddleware`` with ``tools=[...]`` must include
+    ``read_file`` (it raises otherwise) and never covers the ``task``
+    tool, which comes from the subagent middleware. So we use the same
+    private middleware class the profile mechanism itself appends —
+    pinned by ``deepagents==0.7.34`` and covered by
+    ``test_hotel_agent_model_sees_no_builtin_tools``. The Mission
+    Graph calls this when assembling the per-run middleware list.
+    """
+    if mission_id not in NO_BUILTIN_TOOL_MISSIONS:
+        return None
+    from deepagents.middleware._tool_exclusion import _ToolExclusionMiddleware
+
+    return _ToolExclusionMiddleware(excluded=BUILTIN_TOOL_NAMES)
 
 
 def build_deep_agent(tools: list, system_prompt: str | None = None, skills: list | None = None,

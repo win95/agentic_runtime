@@ -52,12 +52,18 @@ xác nhận trong chat; chỉ gọi tool sau khi khách xác nhận. Quy tắc n
 nằm trong system prompt (YAML là nguồn duy nhất) và trong node
 `confirm-booking` của skill map (`stop_when: khách chưa xác nhận`).
 Hook `guard_destructive_target` cũng áp dụng: id của booking/task bị
-hủy phải xuất hiện nguyên văn trong input. Hook `deny_builtin_tools`
-(PreToolUse) chặn 8 tool built-in của deepagents (`ls`, `read_file`,
-`write_file`, `edit_file`, `delete`, `glob`, `grep`, `task`) + `execute`
-cho mission hotel — agent chỉ dùng 14 tool MCP; tool vẫn hiện trong
-danh sách nên model có thể thử gọi, hook trả lỗi kèm hướng dùng MCP
-thay thế.
+hủy phải xuất hiện nguyên văn trong input. Ba lớp chặn tool built-in
+cho mission hotel (Part 1): (b) Mission Graph gắn
+`_ToolExclusionMiddleware` của deepagents cho `hotel_reception`
+(xem `runtime/deep_agent.py::builtin_tools_exclusion`) — 9 tool
+built-in (`ls`, `read_file`, `write_file`, `edit_file`, `delete`,
+`glob`, `grep`, `task`, `execute`) bị ẩn khỏi danh sách tool model
+nhìn thấy và bị từ chối nếu gọi; fault giữ nguyên vì sandbox cần
+`execute`. Hook `deny_builtin_tools`
+(PreToolUse) là lớp chặn dự phòng nếu built-in bằng cách nào đó vẫn
+tới được model. Skill `reception` cũng cấm nêu tên 9 tool đó (Rules
++ What NOT to Do): lễ tân không có quyền truy cập file hệ thống, mọi
+việc chỉ qua 14 tool MCP.
 
 ## Skill map — `skills/reception/SKILL.md`
 

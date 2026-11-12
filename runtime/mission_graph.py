@@ -231,7 +231,11 @@ def deep_agent_node(state: MissionState) -> dict:
         "execution_config": mission.get("execution") or {},
     }
     try:
-        from runtime.deep_agent import build_deep_agent, run_deep_agent
+        from runtime.deep_agent import (
+            build_deep_agent,
+            builtin_tools_exclusion,
+            run_deep_agent,
+        )
         from runtime.hooks import (
             HookContext,
             HookEvent,
@@ -418,6 +422,17 @@ def deep_agent_node(state: MissionState) -> dict:
                 (mission.get("execution") or {}).get("stop_max_continues", 3)
             ),
         )
+        # Part 1 (b): the per-run middleware list. For missions that
+        # must not see any built-in tool (hotel only), append the
+        # exclusion middleware — it hides the 9 deepagents built-ins
+        # from the model request and rejects them at the call boundary.
+        # Other missions keep the default list (fault_analysis needs
+        # `execute` in its sandbox). See
+        # runtime/deep_agent.py::builtin_tools_exclusion.
+        middleware = [hook_middleware]
+        exclusion = builtin_tools_exclusion(state.get("mission_id"))
+        if exclusion is not None:
+            middleware.append(exclusion)
         # Sandbox backend (docs/sandbox.md): when the mission opts in
         # (execution.sandbox: true) and this run has a session, the
         # agent's file tools + `execute` run inside that session's
@@ -476,7 +491,7 @@ def deep_agent_node(state: MissionState) -> dict:
                 system_prompt=system_prompt_text,
                 skills=skill_sources,
                 model_config=version_cfg,
-                middleware=[hook_middleware],
+                middleware=middleware,
                 backend=sandbox_backend,
             )
         elif (mission.get("agent_id") or "") == "admin_bot":
@@ -495,7 +510,7 @@ def deep_agent_node(state: MissionState) -> dict:
                 tools,
                 system_prompt=system_prompt_text,
                 skills=skill_sources,
-                middleware=[hook_middleware],
+                middleware=middleware,
                 backend=sandbox_backend,
             )
         else:
@@ -514,7 +529,7 @@ def deep_agent_node(state: MissionState) -> dict:
                 tools,
                 system_prompt=system_prompt_text,
                 skills=skill_sources,
-                middleware=[hook_middleware],
+                middleware=middleware,
                 backend=sandbox_backend,
             )
         # Context budget (Phương án A): measure the fixed prefix —
