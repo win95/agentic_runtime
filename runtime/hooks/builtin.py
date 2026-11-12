@@ -240,6 +240,47 @@ def request_permission(context: HookContext) -> HookDecision | None:
     )
 
 
+# deepagents built-in file/subagent tools. The Deep Agent sees them even
+# when the mission's allowed_tools list does not include them (Part 1):
+# create_deep_agent only adds tools, never removes the built-ins.
+_BUILTIN_FILE_TOOLS = frozenset({
+    "ls", "read_file", "write_file", "edit_file", "delete",
+    "glob", "grep", "task", "execute",
+})
+
+# Missions where the built-ins are denied. fault_analysis deliberately
+# opts out: its sandbox sessions need `execute` by design. The gate
+# lives here, not only in the mission YAML — a mission that declares no
+# hooks runs every built-in (see select_hooks), so a YAML-only scope
+# would leak this deny into fault_analysis.
+_BUILTIN_DENY_MISSIONS = frozenset({"hotel_reception"})
+
+
+def deny_builtin_tools(context: HookContext) -> HookDecision | None:
+    """PreToolUse: deny deepagents built-in file/subagent tools (Part 1).
+
+    Scoped to ``_BUILTIN_DENY_MISSIONS`` (hotel only): the
+    receptionist's whole contract is the 14 MCP tools, so a file
+    read/write or a subagent spawn is never a legitimate step for it —
+    the manual runs showed the 3B model falling into read_file loops
+    (55% of traces touched a file tool) and inventing subagents. The
+    deny message tells the model to use the MCP tools instead: the
+    tools stay visible in its tool list, so it may retry them, and the
+    message is what steers it away.
+    """
+    if context.mission_id not in _BUILTIN_DENY_MISSIONS:
+        return None
+    if context.tool_name not in _BUILTIN_FILE_TOOLS:
+        return None
+    return HookDecision.deny(
+        f"Tool '{context.tool_name}' denied by hook 'deny_builtin_tools': "
+        "the hotel receptionist has no file or subagent tools — all room, "
+        "guest, booking, staff and policy actions go through the MCP tools "
+        "(check_room_availability, get_booking, create_booking, ...). Do not "
+        "retry this tool; use the MCP tool for the task instead."
+    )
+
+
 def injection_feedback(context: HookContext) -> HookDecision | None:
     """PostToolUse: flag instruction-like text in a tool result."""
     signals = detect_injection_signals(context.tool_response)
@@ -503,6 +544,7 @@ BUILTIN_HOOKS: dict[str, list[tuple[HookEvent, HookHandler]]] = {
     "block_dangerous_tool_call": [(HookEvent.PRE_TOOL_USE, block_dangerous_tool_call)],
     "guard_destructive_target": [(HookEvent.PRE_TOOL_USE, guard_destructive_target)],
     "request_permission": [(HookEvent.PRE_TOOL_USE, request_permission)],
+    "deny_builtin_tools": [(HookEvent.PRE_TOOL_USE, deny_builtin_tools)],
     "injection_feedback": [(HookEvent.POST_TOOL_USE, injection_feedback)],
     "tool_error_feedback": [(HookEvent.POST_TOOL_USE_FAILURE, tool_error_feedback)],
     "stop_completion": [(HookEvent.STOP, stop_completion)],

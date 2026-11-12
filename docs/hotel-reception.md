@@ -52,7 +52,12 @@ xác nhận trong chat; chỉ gọi tool sau khi khách xác nhận. Quy tắc n
 nằm trong system prompt (YAML là nguồn duy nhất) và trong node
 `confirm-booking` của skill map (`stop_when: khách chưa xác nhận`).
 Hook `guard_destructive_target` cũng áp dụng: id của booking/task bị
-hủy phải xuất hiện nguyên văn trong input.
+hủy phải xuất hiện nguyên văn trong input. Hook `deny_builtin_tools`
+(PreToolUse) chặn 8 tool built-in của deepagents (`ls`, `read_file`,
+`write_file`, `edit_file`, `delete`, `glob`, `grep`, `task`) + `execute`
+cho mission hotel — agent chỉ dùng 14 tool MCP; tool vẫn hiện trong
+danh sách nên model có thể thử gọi, hook trả lỗi kèm hướng dùng MCP
+thay thế.
 
 ## Skill map — `skills/reception/SKILL.md`
 

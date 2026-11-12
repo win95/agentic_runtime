@@ -809,12 +809,14 @@ bao phủ cả run không chạy agent).
 Khai báo trong `execution:` của YAML mission (`hooks: [...]`, giống
 `skills:`); không khai báo thì mọi built-in đều chạy. `system_admin`
 khai báo tường minh đủ 8 hook (thêm `request_permission` — duyệt bởi
-người trước tool phá hoại). Mỗi lần dispatch ghi một record vào
+người trước tool phá hoại). `hotel_reception` khai báo tường minh đủ 8
+hook (thêm `deny_builtin_tools` — chặn tool file/subagent built-in của
+deepagents, chỉ dùng 14 tool MCP). Mỗi lần dispatch ghi một record vào
 `MissionState.hook_events`; can thiệp được tóm tắt một dòng trong
 `notes`. Chưa nối dây: `PreCompact` (không có compaction),
 `SubagentStart/Stop` (chưa có subagent).
 
-Pre-retrieval: hook built-in thứ 7, `retrieval_context` (SessionStart),
+Pre-retrieval: hook built-in `retrieval_context` (SessionStart),
 chỉ chạy khi mission khai báo `execution.retrieval:` — `fault_analysis`
 khai báo `sources: [faults, documents, relations]`, `max_chars: 3000`.
 Nó kéo dữ liệu thật của asset thành một block có provenance rồi inject

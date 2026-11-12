@@ -76,6 +76,59 @@ def test_select_hooks_from_seed_yamls():
     ]
     fault = yaml.safe_load((REPO / "seeds/missions/fault_analysis.yaml").read_text())
     assert select_hooks(fault) == list(builtin.BUILTIN_HOOKS)
+    hotel = yaml.safe_load((REPO / "seeds/missions/hotel_reception.yaml").read_text())
+    assert select_hooks(hotel) == [
+        "audit",
+        "block_dangerous_tool_call",
+        "guard_destructive_target",
+        "deny_builtin_tools",
+        "injection_feedback",
+        "tool_error_feedback",
+        "stop_completion",
+        "validate_input",
+    ]
+
+
+def test_deny_builtin_tools_hotel_only():
+    """Part 1 (2026-11-12): deepagents built-in file/subagent tools are
+    denied for the hotel mission only — the receptionist's whole
+    contract is the 14 MCP tools."""
+    for tool in ("ls", "read_file", "write_file", "edit_file", "delete",
+                 "glob", "grep", "task", "execute"):
+        decision = builtin.deny_builtin_tools(
+            _ctx(mission_id="hotel_reception", tool_name=tool)
+        )
+        assert decision is not None and decision.action == "deny"
+        assert "MCP" in decision.message
+    # MCP tools still pass for hotel.
+    assert builtin.deny_builtin_tools(
+        _ctx(mission_id="hotel_reception", tool_name="create_booking")
+    ) is None
+    assert builtin.deny_builtin_tools(
+        _ctx(mission_id="hotel_reception", tool_name="check_room_availability")
+    ) is None
+    # Other missions keep the built-ins: fault_analysis runs its sandbox
+    # `execute` by design, and a mission that declares no hooks runs
+    # every built-in — the mission gate lives in the hook, not the YAML.
+    for mission in ("fault_analysis", "system_admin", ""):
+        assert builtin.deny_builtin_tools(
+            _ctx(mission_id=mission, tool_name="read_file")
+        ) is None
+
+
+def test_deny_builtin_tools_via_registry():
+    """The default registry denies a hotel read_file but not a fault one."""
+    registry = default_registry()
+    hotel = HookContext(execution_id="exec-test", mission_id="hotel_reception",
+                        tool_name="read_file")
+    decisions = registry.dispatch(HookEvent.PRE_TOOL_USE, hotel)
+    assert any(d.action == "deny" and "deny_builtin_tools" in d.message
+               for d in decisions)
+    fault = HookContext(execution_id="exec-test", mission_id="fault_analysis",
+                        tool_name="read_file")
+    decisions = registry.dispatch(HookEvent.PRE_TOOL_USE, fault)
+    assert not any(d.action == "deny" and "deny_builtin_tools" in d.message
+                   for d in decisions)
 
 
 # --- Built-ins ---------------------------------------------------------

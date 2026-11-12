@@ -39,6 +39,7 @@ execution:
     - audit
     - block_dangerous_tool_call
     - guard_destructive_target
+    - deny_builtin_tools
     - injection_feedback
     - tool_error_feedback
     - stop_completion
