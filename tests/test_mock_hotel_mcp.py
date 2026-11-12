@@ -264,6 +264,23 @@ def test_load_mcp_tools_registers_hotel_tools(
     assert "available_rooms" in json.dumps(result)
 
 
+def test_mcp_tools_are_not_in_the_builtin_manifest(
+    mock_server_url, monkeypatch, _clean_registry,
+):
+    """MCP tools are environment-dependent: they must not change the
+    pinned built-in manifest, otherwise every run after the first MCP
+    registration reports false agent-version drift."""
+    from app.services import agent_version_service
+
+    before = agent_version_service.compute_tool_manifest()[1]
+    _patch_mcp_settings(monkeypatch, mock_server_url)
+    from runtime.tools.mcp_adapter import load_mcp_tools
+
+    assert len(load_mcp_tools()) == len(HOTEL_TOOLS)
+    after = agent_version_service.compute_tool_manifest()[1]
+    assert after == before
+
+
 # --- End-to-end: real Deep Agent + fake model + mock over HTTP ---
 class _ScriptedModel(GenericFakeChatModel):
     def bind_tools(self, tools, **kwargs):

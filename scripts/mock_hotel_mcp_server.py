@@ -134,6 +134,13 @@ def reset_store() -> None:
     _STORE = _seed_store()
 
 
+def _room_key(room_type: str | None) -> str | None:
+    """Room-type names are case-insensitive ('Standard' -> 'standard')."""
+    if room_type is None:
+        return None
+    return str(room_type).strip().lower()
+
+
 def _parse_date(value: str) -> datetime.date | None:
     try:
         return datetime.date.fromisoformat(str(value))
@@ -182,6 +189,7 @@ def check_room_availability(check_in: str, check_out: str,
     if isinstance(parsed, dict):
         return parsed
     start, end = parsed
+    room_type = _room_key(room_type)
     wanted = [room_type] if room_type else sorted(ROOM_TYPES)
     if room_type and room_type not in ROOM_TYPES:
         return {"error": f"Unknown room type: {room_type}",
@@ -210,6 +218,7 @@ def get_room_rates(check_in: str, check_out: str,
         return parsed
     start, end = parsed
     nights = _nights(start, end)
+    room_type = _room_key(room_type)
     wanted = [room_type] if room_type else sorted(ROOM_TYPES)
     if room_type and room_type not in ROOM_TYPES:
         return {"error": f"Unknown room type: {room_type}",
@@ -254,6 +263,7 @@ def create_booking(guest_id: str, room_type: str, check_in: str,
     """Tạo booking cho khách. Chỉ gọi sau khi khách đã xác nhận trong chat."""
     if not any(g["guest_id"] == guest_id for g in _STORE["guests"]):
         return {"error": f"Guest not found: {guest_id}"}
+    room_type = _room_key(room_type)
     if room_type not in ROOM_TYPES:
         return {"error": f"Unknown room type: {room_type}",
                 "room_types": sorted(ROOM_TYPES)}
@@ -335,6 +345,7 @@ def change_booking_dates(booking_id: str, check_in: str,
 def list_staff(team: str | None = None) -> dict:
     """Lấy danh sách nhân viên; team là 'housekeeping' (buồng phòng)
     hoặc 'technicians' (kỹ thuật), để trống thì trả tất cả."""
+    team = str(team).strip().lower() if team is not None else None
     if team is not None and team not in ("housekeeping", "technicians"):
         return {"error": f"Unknown team: {team}",
                 "teams": ["housekeeping", "technicians"]}
@@ -347,6 +358,8 @@ def create_task(title: str, description: str, room: str | None = None,
     """Tạo task dịch vụ (hỏng hóc, dọn phòng, ...) cho một phòng."""
     if not (title or "").strip() or not (description or "").strip():
         return {"error": "title and description are required"}
+    room = str(room).strip() if room is not None else None
+    team = str(team).strip().lower() if team is not None else None
     task_id = f"TK-{_STORE['counters']['task']}"
     _STORE["counters"]["task"] += 1
     task = {"task_id": task_id, "title": title.strip(),

@@ -75,6 +75,13 @@ def compute_tool_manifest() -> tuple[list[dict], str]:
 
     manifest = []
     for entry in registry.list():
+        # MCP tools are environment-dependent and are NOT part of the
+        # pinned built-in manifest (see module docstring). They are
+        # registered into the same global registry by load_mcp_tools()
+        # on the first run in a long-lived worker; including them here
+        # would make every later run report false tool-manifest drift.
+        if entry.permission == "mcp":
+            continue
         manifest.append({
             "name": entry.name,
             "description": entry.description,

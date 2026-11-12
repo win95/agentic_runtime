@@ -32,6 +32,7 @@ and later runs see the prior turns (`docs/sessions.md`).
 | `agent_turns.py` | Proves the agent loop runs **multiple model/tool turns inside one execution** (`system_admin`). Reads `llm_usage` + `audit_logs` from Postgres to print a timeline (model turn → its tools → next model turn) and checks: SUCCEEDED, `--min-turns` model calls (default 2), `--min-tools` tool calls (default 2), every audit row terminal. `--strict` also requires tools in ≥ 2 different model turns. `--request` overrides the admin request; `--cleanup` deletes the run's execution/result/usage/audit rows. |
 | `session_conversation.py` | Drives a real **conversation across executions** using Option B sessions (`docs/sessions.md`): 3 turns share one `session_id`; the bot must recall a random code it was given in turn 1, then carry it across 2 prior turns; `GET /sessions/{id}` must list the executions oldest first. `--control` asks the same question in a fresh session (must not know the code). `--cleanup` deletes the session's rows. |
 | `agent_config_check.py` | Asserts that runs use the config pinned in the active `AgentVersion`. Static: seed YAML ↔ `agents` row ↔ version snapshot, tool-manifest drift, `allowed_tools` in the registry, mission skills/hooks resolve, session limits parse. Live (2 turns, one fresh session): both runs record the version + no drift, `llm_usage` model matches, and the MLflow trace shows the system prompt **starts with** the pinned text, the pinned model/temperature, all `allowed_tools` at the model call (no registry tool leaks), the selected skills, and turn 2's session-history header with the agent's limits. `--no-trace` skips the MLflow assertions; `--cleanup` deletes the runs. |
+| `hotel_reception.py` | Drives the `hotel_receptionist` agent end to end through the real API → worker → LLM → MCP client → mock PMS server. **Preflight** checks the pinned 14-tool contract, the `MCP_TOOL_CAPABILITIES` map, the server's tool list, and the capability gate. Scenarios: `availability`, `soldout`, `policy`, `task`, `booking` (2-turn confirmation gate with a direct `get_booking` cross-check), `memory` (3-turn recall + `GET /sessions/{id}`). `--scenario` is repeatable; `--session-id`, `--timeout`, `--cleanup` as usual. |
 
 `_api.py` is the shared helper (`.env` loading, JSON calls, poll-until-terminal).
 
@@ -76,6 +77,17 @@ and later runs see the prior turns (`docs/sessions.md`).
 .venv/bin/python scripts/manual/agent_config_check.py
 .venv/bin/python scripts/manual/agent_config_check.py --cleanup
 .venv/bin/python scripts/manual/agent_config_check.py --no-trace   # no MLflow
+
+# Hotel receptionist: full preflight + all 6 scenarios (needs the mock MCP server)
+.venv/bin/python scripts/manual/hotel_reception.py
+
+# Hotel receptionist: one scenario, then clean its rows
+.venv/bin/python scripts/manual/hotel_reception.py --scenario booking --cleanup
+
+# Hotel receptionist: pick scenarios (repeatable), custom session base, longer timeout
+.venv/bin/python scripts/manual/hotel_reception.py \
+    --scenario availability --scenario policy --timeout 600
+.venv/bin/python scripts/manual/hotel_reception.py --session-id sess-hotel-demo
 ```
 
 ## Notes from the manual test session (2026-11-10)
@@ -215,4 +227,67 @@ and later runs see the prior turns (`docs/sessions.md`).
 - `--no-trace` runs the static + DB checks without MLflow (useful on a
   stack without tracing); the prompt/model/tools checks are then
   reported as skipped, not passed.
+
+## Notes from the hotel reception check (2026-11-12)
+
+- The agent is config-only; every action goes through the 14 MCP tools in
+  `seeds/agents/hotel_receptionist.yaml` (`docs/hotel-reception.md`).
+  `hotel_reception.py` needs the mock server too:
+
+  ```bash
+  export NO_PROXY=127.0.0.1,localhost
+  export no_proxy=127.0.0.1,localhost
+  .venv/bin/python -m scripts.mock_hotel_mcp_server   # 127.0.0.1:8081/mcp
+  ```
+
+  The API and worker read `.env` at startup, and pydantic does not export
+  `NO_PROXY`, so export it in the shell that launches them and restart
+  after changing any `MCP_*` value.
+- `MCP_SERVER_URL`, `MCP_TRANSPORT=streamable_http`, and
+  `MCP_TOOL_CAPABILITIES` (all 14 tool names → `hotel_reception`) live in
+  the repo-root `.env`. A tool with no mapping is denied by default; the
+  preflight asserts the mapping, the server's tool list, and that a
+  non-hotel mission gets none of the tools.
+- MCP tools are environment-dependent, so they are **not** part of the
+  pinned built-in tool manifest (`compute_tool_manifest` skips
+  `permission == "mcp"`). If they leaked in, every long-lived worker
+  would report false `agent_version_drift` after the server connected.
+- The mock keeps bookings/tasks in memory until it restarts, so the
+  booking scenario uses a random 2027–2029 window per run instead of a
+  fixed pair of dates. Booking ids grow from `BK-1004`; the cross-check
+  scans contiguously until the first missing id.
+- With the local `qwen2.5-3b` the final prose is unreliable: it sometimes
+  reads a hallucinated `/large_tool_results/*.json`, calls the
+  deepagents `task` tool with an unknown subagent, or echoes plan-node
+  noise. Tool **arguments**, `audit_logs`, the direct MCP calls, and the
+  rendered session history are the source of truth. Prose checks become
+  WARN only when the answer is such noise; a normal answer that is wrong
+  still fails. So a run can legitimately end
+  `PASS — N passed, 0 failed, few warnings`.
+- The booking gate is intentionally two turns: turn 1 asks only for a
+  price and must not call `create_booking`/`cancel_booking`/
+  `change_booking_dates`; turn 2 confirms and must call `create_booking`
+  with the exact guest, room, dates, and guest count. A direct
+  `get_booking` MCP call then proves the booking really exists and is
+  `CONFIRMED` — a hallucinated `BK-*` code fails the check. It uses
+  Deluxe (2,000,000 VND/night) because the 3B model reliably misroutes
+  Standard price questions to policy/staff tools.
+- The small model sometimes books during the quote turn anyway, or ends
+  it in hook feedback. The quote is therefore retried up to 4 times in
+  fresh `<session>-qN` conversations with a new date window; the gate
+  needs one attempt that neither writes nor derails. Confirmation also
+  allows two natural follow-ups in the same session before the tool/
+  audit/MCP checks are evaluated.
+- Restart the mock before a clean full run: preflight asserts exactly
+  5 Deluxe rooms on 2026-12-20, and earlier ad-hoc bookings can reduce
+  that count.
+- `memory` proves recall across executions, not inside one: turn 2 must
+  repeat the random `HOTEL-*` code from turn 1, and the script also
+  renders the exact prior-turn block the runtime gave turn 2 and turn 3.
+  That platform-side check keeps the proof even when the model's final
+  answer is hook feedback.
+- `--cleanup` deletes the run's `ExecutionResult`, `LLMUsage`,
+  `AuditLog`, then `Execution` rows per session; MLflow traces are kept,
+  and the mock's in-memory bookings/tasks are only reset by restarting
+  the mock server.
 
