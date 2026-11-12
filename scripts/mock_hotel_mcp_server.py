@@ -36,10 +36,12 @@ from __future__ import annotations
 import argparse
 import datetime
 import json
+import logging
 import os
 import sqlite3
 import threading
 
+import anyio
 from mcp.server.fastmcp import FastMCP
 
 # The tool functions below are plain functions (tests call them
@@ -676,6 +678,46 @@ def create_server(name: str = "hotel-mock") -> FastMCP:
 # Module-level instance for `python -m scripts.mock_hotel_mcp_server`
 # and for `await mcp.list_tools()` in tests.
 mcp = create_server()
+
+
+class _SuppressClosedSseWriter(logging.Filter):
+    """Drop the benign session-teardown ERROR from mcp==1.30.0.
+
+    When a client terminates its session, the SDK closes the standalone
+    SSE stream while the writer task is blocked in ``receive()``, so the
+    writer raises ``anyio.ClosedResourceError`` and the SDK logs it as
+    "Error in standalone SSE writer" — on EVERY clean disconnect, even
+    though the server survives and keeps serving (verified: a second
+    client connects fine right after). Upstream fixed exactly this in
+    mcp 2.3.0 by ignoring ``ClosedResourceError`` in the writer; until
+    the SDK is upgraded (a major version, 1.30.0 -> 2.3.0, needs its own
+    evaluation), drop only that one record and keep every other error
+    from the writer visible.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if (
+            record.getMessage() == "Error in standalone SSE writer"
+            and record.exc_info
+            and issubclass(record.exc_info[0], anyio.ClosedResourceError)
+        ):
+            return False
+        return True
+
+
+def _install_sse_teardown_filter() -> None:
+    """Attach the teardown filter to the SDK's streamable-HTTP logger.
+
+    Installed at import time (not in ``main()``) so it is active both
+    for the CLI server and for servers embedded by tests.
+    """
+    logger = logging.getLogger("mcp.server.streamable_http")
+    if not any(isinstance(f, _SuppressClosedSseWriter)
+               for f in logger.filters):
+        logger.addFilter(_SuppressClosedSseWriter())
+
+
+_install_sse_teardown_filter()
 
 
 def main() -> None:

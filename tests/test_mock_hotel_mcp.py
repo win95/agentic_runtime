@@ -9,11 +9,14 @@ allowed_tools gates) -> Deep Agent -> tool execution over HTTP.
 
 import asyncio
 import json
+import logging
 import pathlib
 import socket
+import sys
 import threading
 import time
 
+import anyio
 import pytest
 import uvicorn
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
@@ -398,3 +401,61 @@ def test_hotel_run_end_to_end(db_session, mock_server_url, monkeypatch,
     assert "check-availability" in (
         final["result"]["plan_trace"]["reception"]["visited"])
     assert final["result"]["evidence"]
+
+
+def _record_with_exc(exc_type, message="Error in standalone SSE writer"):
+    try:
+        raise exc_type("boom")
+    except exc_type:
+        return logging.LogRecord(
+            "mcp.server.streamable_http", logging.ERROR,
+            __file__, 1, message, (), sys.exc_info(),
+        )
+
+
+def test_sse_teardown_filter_drops_closed_resource_error():
+    record = _record_with_exc(anyio.ClosedResourceError)
+    assert mock_server._SuppressClosedSseWriter().filter(record) is False
+
+
+def test_sse_teardown_filter_keeps_other_errors():
+    filt = mock_server._SuppressClosedSseWriter()
+    assert filt.filter(_record_with_exc(ValueError)) is True
+    assert filt.filter(_record_with_exc(
+        anyio.ClosedResourceError,
+        message="Error in standalone SSE response")) is True
+    assert filt.filter(logging.LogRecord(
+        "mcp.server.streamable_http", logging.ERROR, __file__, 1,
+        "Error in standalone SSE writer", (), None)) is True
+
+
+def test_sse_teardown_filter_installed_once():
+    logger = logging.getLogger("mcp.server.streamable_http")
+    assert any(isinstance(f, mock_server._SuppressClosedSseWriter)
+               for f in logger.filters)
+    mock_server._install_sse_teardown_filter()
+    assert sum(isinstance(f, mock_server._SuppressClosedSseWriter)
+               for f in logger.filters) == 1
+
+
+def test_no_sse_writer_error_on_clean_disconnect(mock_server_url, caplog):
+    """A clean client disconnect must not log 'Error in standalone SSE
+    writer' (the mcp==1.30.0 teardown race the filter drops)."""
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamablehttp_client
+
+    caplog.set_level(logging.DEBUG)
+
+    async def _list_and_close():
+        async with streamablehttp_client(mock_server_url) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                tools = await session.list_tools()
+                assert len(tools.tools) == 14
+
+    asyncio.run(_list_and_close())
+    # The writer task logs (if it were going to) within ~100ms of the
+    # session terminating; give it a full second, then assert absence.
+    time.sleep(1.0)
+    assert not [r for r in caplog.records
+                if r.getMessage() == "Error in standalone SSE writer"]
