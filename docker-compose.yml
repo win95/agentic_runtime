@@ -99,6 +99,9 @@ services:
       dockerfile: docker/mlflow/Dockerfile
     environment:
       MLFLOW_TRACKING_URI: http://mlflow:5000
+      # The containers call the server as http://mlflow:5000, which the
+      # 3.x DNS-rebinding guard rejects unless it is an allowed Host.
+      MLFLOW_SERVER_ALLOWED_HOSTS: ${MLFLOW_SERVER_ALLOWED_HOSTS:-localhost,localhost:*,127.0.0.1,127.0.0.1:*,mlflow:5000}
       # The artifact root is S3/MinIO: the server needs the MinIO
       # credentials to upload artifacts, otherwise uploads fail
       # (previously missing entirely — artifacts silently never landed).
@@ -137,6 +140,15 @@ services:
       MINIO_BUCKET: ${MINIO_BUCKET:-agentic-runtime}
       MINIO_REPORTS_BUCKET: ${MINIO_REPORTS_BUCKET:-reports}
       MLFLOW_TRACKING_URI: http://mlflow:5000
+      # The hotel mock MCP server runs on the host (127.0.0.1:8081) during
+      # manual testing; from inside the container that address is the
+      # container itself, so reach it through host-gateway instead. Set
+      # MCP_SERVER_URL_IN_CONTAINER to point at a real server.
+      MCP_SERVER_URL: ${MCP_SERVER_URL_IN_CONTAINER:-http://host.docker.internal:8081/mcp}
+      NO_PROXY: 127.0.0.1,localhost,host.docker.internal
+      no_proxy: 127.0.0.1,localhost,host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
       - path: .env
         required: false  # optional: create from .env.example to inject secrets
@@ -172,6 +184,12 @@ services:
       MINIO_BUCKET: ${MINIO_BUCKET:-agentic-runtime}
       MINIO_REPORTS_BUCKET: ${MINIO_REPORTS_BUCKET:-reports}
       MLFLOW_TRACKING_URI: http://mlflow:5000
+      # See the api service: the mock MCP server lives on the host.
+      MCP_SERVER_URL: ${MCP_SERVER_URL_IN_CONTAINER:-http://host.docker.internal:8081/mcp}
+      NO_PROXY: 127.0.0.1,localhost,host.docker.internal
+      no_proxy: 127.0.0.1,localhost,host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
       - path: .env
         required: false  # optional: create from .env.example to inject secrets
@@ -210,6 +228,12 @@ services:
       MINIO_BUCKET: ${MINIO_BUCKET:-agentic-runtime}
       MINIO_REPORTS_BUCKET: ${MINIO_REPORTS_BUCKET:-reports}
       MLFLOW_TRACKING_URI: http://mlflow:5000
+      # See the api service: the mock MCP server lives on the host.
+      MCP_SERVER_URL: ${MCP_SERVER_URL_IN_CONTAINER:-http://host.docker.internal:8081/mcp}
+      NO_PROXY: 127.0.0.1,localhost,host.docker.internal
+      no_proxy: 127.0.0.1,localhost,host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     env_file:
       - path: .env
         required: false  # optional: create from .env.example to inject secrets

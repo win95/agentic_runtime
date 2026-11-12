@@ -725,6 +725,10 @@ def main() -> None:
     parser.add_argument("--port", type=int,
                         default=int(os.environ.get("MOCK_HOTEL_MCP_PORT", DEFAULT_PORT)))
     parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--allow-host", action="append", default=[],
+                        help="Extra Host header value allowed by the MCP transport"
+                        " security (repeatable, e.g. host.docker.internal:*) when the"
+                        " server is reached from a container instead of localhost")
     parser.add_argument("--db", default=None,
                         help="SQLite file (default: MOCK_HOTEL_MCP_DB"
                         " or mock_hotel.db in the working directory)")
@@ -741,6 +745,20 @@ def main() -> None:
         print(json.dumps(dump_store(), ensure_ascii=False, indent=2))
         return
     import uvicorn
+
+    if args.allow_host:
+        # FastMCP enables DNS-rebinding protection for loopback servers and
+        # only allows 127.0.0.1/localhost/[::1] Host headers. A container
+        # reaches the host mock as host.docker.internal, so widen the list
+        # explicitly instead of disabling the check entirely.
+        from mcp.server.transport_security import TransportSecuritySettings
+
+        security = mcp.settings.transport_security or TransportSecuritySettings()
+        mcp.settings.transport_security = TransportSecuritySettings(
+            enable_dns_rebinding_protection=security.enable_dns_rebinding_protection,
+            allowed_hosts=[*security.allowed_hosts, *args.allow_host],
+            allowed_origins=list(security.allowed_origins),
+        )
 
     print(f"Mock hotel MCP server on http://{args.host}:{args.port}/mcp"
           f" (db: {store_path()})",

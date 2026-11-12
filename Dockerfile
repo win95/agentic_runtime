@@ -15,7 +15,12 @@ COPY pyproject.toml README.md ./
 COPY app ./app
 COPY runtime ./runtime
 COPY infra ./infra
+COPY ingest ./ingest
+COPY ontology ./ontology
 COPY seeds ./seeds
+COPY skills ./skills
+COPY alembic ./alembic
+COPY alembic.ini ./alembic.ini
 
 RUN pip install --upgrade pip && pip install .
 
