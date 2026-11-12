@@ -18,7 +18,7 @@ chính thức nằm trong trang nghiên cứu Hooks v2 đã gửi tran.
 | `SessionStart` | `HookMiddleware.before_agent` | `runtime/deep_agent.py` (prompt): context thêm từ hook được inject thành system message khi agent bắt đầu. Mặc định built-in không thêm gì → không đổi hành vi. |
 | `UserPromptSubmit` | Dispatch trong `deep_agent_node`, trước khi build agent | `runtime/mission_graph.py` + `runtime/security.py` (Layer 1): input vi phạm (thiếu field bắt buộc, quá 8KB, asset_id sai...) bị chặn, run FAILED với lỗi "Input blocked by hook" — không chạm tới agent, tool, hay version lookup. Đây là lưới cho execution đi qua schedule/admin dispatch (bỏ qua API router). |
 | `SessionEnd` | `HookMiddleware.after_agent` + dispatch trong `app/worker/tasks.py` sau `run_mission` | `app/worker/tasks.py` (execution lifecycle): chỉ ghi log chẩn đoán (audit hook). Worker dispatch bao phủ cả run deterministic không chạy agent. |
-| `PermissionRequest` | Đã định nghĩa event, **chưa nối dây** | Chưa tác dụng lên thành phần nào — cần quyết định kênh phê duyệt của tran (giống human-in-the-loop còn thiếu ở Layer 4). |
+| `PermissionRequest` | `request_permission` (PreToolUse) + API `app/routers/permissions.py` | Tool phá hoại (`delete_mission`, `cancel_execution`) bị deny cho tới khi người duyệt qua `POST /permissions/{id}/approve` — duyệt xong tự chạy lại execution gốc, lượt chạy mới claim approval dùng một lần (hết hạn 60 phút). Pending hết hạn sau 24h. Slack chỉ báo (best-effort). |
 | `Notification` | Dispatch qua registry (audit hook ghi log) | Chỉ chẩn đoán. Hiện chưa có nơi nào phát Notification ngoài log audit. |
 | `PreToolUse` | `HookMiddleware.wrap_tool_call` (trước khi gọi tool) | `runtime/tools/registry.py` + mọi tool (đặc biệt MCP tool, vốn `read_only=False`): `deny` trả `ToolMessage(status="error")` và tool **không chạy**. Built-in `block_dangerous_tool_call` chặn `rm -rf`, `DROP TABLE`, `DELETE FROM`, `curl ... \| sh`... trong args. |
 | `PostToolUse` | `HookMiddleware.wrap_tool_call` (sau khi tool trả về) | `runtime/deep_agent.py` (context agent thấy): `feedback` được nối vào nội dung tool result. Built-in `injection_feedback` quét tín hiệu Layer 6 và nhắc agent coi output là DATA. |
@@ -27,13 +27,14 @@ chính thức nằm trong trang nghiên cứu Hooks v2 đã gửi tran.
 | `Stop` | `HookMiddleware.after_model` + `@hook_config(can_jump_to=["model"])` | `runtime/mission_graph.py` (deep_agent_node) + agent loop: agent muốn dừng mà chưa gọi tool nào thì bị buộc chạy thêm 1 turn (nudge HumanMessage + `jump_to="model"`), tối đa `stop_max_continues` (mặc định 3, cấu hình theo mission). Đã kiểm chứng qua graph thật với fake model (33 test). |
 | `SubagentStart` / `SubagentStop` | Đã định nghĩa event, **chưa nối dây** | Không tác dụng — chưa có subagent nào (chỉ 1 deep agent). Khi thêm subagent thì nối vào đây. |
 
-## 6 hook built-in (`runtime/hooks/builtin.py`)
+## 9 hook built-in (`runtime/hooks/builtin.py`)
 
 | Tên | Event | Tác dụng |
 |---|---|---|
 | `audit` | SessionStart, SessionEnd, Notification, SubagentStart, SubagentStop | Chỉ ghi log. Không đổi hành vi. |
 | `block_dangerous_tool_call` | PreToolUse | Chặn tool call có pattern phá hoại trong args. |
 | `guard_destructive_target` | PreToolUse | Chặn `delete_mission` / `cancel_execution` khi id đích không xuất hiện nguyên văn trong execution input. |
+| `request_permission` | PreToolUse | Human approval (Option C): chặn `delete_mission` / `cancel_execution` cho tới khi người duyệt qua API `/permissions` (approve → chạy lại execution gốc; deny → không chạy lại). Fail-closed: lỗi đọc approval store cũng deny. |
 | `injection_feedback` | PostToolUse | Báo agent khi tool output chứa text giống chỉ thị. |
 | `tool_error_feedback` | PostToolUseFailure | Nhắc agent báo lỗi thay vì bịa dữ liệu. |
 | `stop_completion` | Stop | Buộc chạy tiếp khi agent dừng mà chưa gọi tool nào (cap 3). |
@@ -134,8 +135,11 @@ Regex sai không bao giờ match (fail closed).
   trong repo, không có `hooks.json`, không có timeout/process riêng.
   Muốn chạy lệnh ngoài thì tự viết handler gọi subprocess (chưa có
   built-in nào làm vậy).
-- **PermissionRequest, PreCompact, SubagentStart/Stop** đã định nghĩa
-  event nhưng chưa có dispatch site (xem bảng trên).
+- **PreCompact, SubagentStart/Stop** đã định nghĩa
+  event nhưng chưa có dispatch site (xem bảng trên). `request_permission`
+  là ngoại lệ duy nhất của quy tắc "handler raise thì bị bỏ qua":
+  nó tự bắt mọi exception và deny (fail-closed), vì bị bỏ qua ở đây
+  sẽ thành fail-open.
 - **Stop hook chỉ chạy trong agent**: mission deterministic không chạy
   agent nên không có Stop hook — đó là đúng thiết kế (không có gì để
   "dừng sớm" ở đó).

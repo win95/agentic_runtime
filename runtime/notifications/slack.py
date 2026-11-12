@@ -176,3 +176,62 @@ def notify_execution(
     except Exception as exc:  # noqa: BLE001 — notification never fails a run
         logger.warning("Slack notification failed: %s", exc)
         return False
+
+
+def build_permission_message(
+    *,
+    request_id: str,
+    tool_name: str,
+    target: str,
+    execution_id: str | None = None,
+    mission_id: str | None = None,
+) -> dict:
+    """Build the ``{"text": ...}`` payload for a pending approval request.
+
+    One short message: what destructive action waits, the request id,
+    and the API calls that approve / deny it. Never raises.
+    """
+    try:
+        lines = [
+            "Cần duyệt hành động admin — tool phá hoại bị chặn chờ người duyệt",
+            f"Tool: {tool_name}({target})",
+            f"Request: {request_id}",
+            f"Execution: {execution_id or '—'}",
+            f"Mission: {mission_id or '—'}",
+            f"Duyệt: POST /permissions/{request_id}/approve",
+            f"Từ chối: POST /permissions/{request_id}/deny",
+        ]
+        return {"text": "\n".join(lines)}
+    except Exception:  # noqa: BLE001 — message building must never raise
+        return {"text": f"Cần duyệt hành động admin — request {request_id}"}
+
+
+def notify_permission_request(
+    *,
+    request_id: str,
+    tool_name: str,
+    target: str,
+    execution_id: str | None = None,
+    mission_id: str | None = None,
+    enabled: bool = True,
+    webhook_url: str = "",
+    timeout: int = 5,
+    _post: Sender | None = None,
+) -> bool:
+    """Post one pending-approval ping. True only when posted; never raises."""
+    try:
+        if not enabled:
+            return False
+        if not webhook_url or not str(webhook_url).strip():
+            return False
+        payload = build_permission_message(
+            request_id=request_id,
+            tool_name=tool_name,
+            target=target,
+            execution_id=execution_id,
+            mission_id=mission_id,
+        )
+        return post_notification(webhook_url, payload, timeout=timeout, _post=_post)
+    except Exception as exc:  # noqa: BLE001 — notification never fails a run
+        logger.warning("Slack notification failed: %s", exc)
+        return False

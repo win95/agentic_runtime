@@ -201,6 +201,36 @@ class Execution(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+class PermissionRequest(Base):
+    """One human-approval request for a destructive tool call (Option C).
+
+    Created by the ``request_permission`` hook (PRE_TOOL_USE) when the
+    admin agent calls ``delete_mission`` / ``cancel_execution``: the
+    call is denied until a human approves it via the permissions API.
+    Approving re-dispatches the original execution; the re-run finds
+    the approved record and the hook lets the call through (single
+    use, short expiry). Statuses: pending / approved / denied /
+    expired / used. ``target`` is the id argument the tool was called
+    with (mission_id / execution_id) — the approval is scoped to one
+    (tool, target) action, not to one execution.
+    """
+
+    __tablename__ = "permission_requests"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    execution_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    mission_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    agent_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    tool_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    target: Mapped[str] = mapped_column(String(256), nullable=False)
+    tool_input: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    decision_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    decided_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
+
+
 class SessionSandbox(Base):
     """One OpenSandbox sandbox per session (docs/sandbox.md).
 

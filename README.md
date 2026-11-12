@@ -808,11 +808,11 @@ bao phủ cả run không chạy agent).
 
 Khai báo trong `execution:` của YAML mission (`hooks: [...]`, giống
 `skills:`); không khai báo thì mọi built-in đều chạy. `system_admin`
-khai báo tường minh đủ 7 hook. Mỗi lần dispatch ghi một record vào
+khai báo tường minh đủ 8 hook (thêm `request_permission` — duyệt bởi
+người trước tool phá hoại). Mỗi lần dispatch ghi một record vào
 `MissionState.hook_events`; can thiệp được tóm tắt một dòng trong
-`notes`. Chưa nối dây: `PermissionRequest` (cần quyết định kênh phê
-duyệt), `PreCompact` (không có compaction), `SubagentStart/Stop`
-(chưa có subagent).
+`notes`. Chưa nối dây: `PreCompact` (không có compaction),
+`SubagentStart/Stop` (chưa có subagent).
 
 Pre-retrieval: hook built-in thứ 7, `retrieval_context` (SessionStart),
 chỉ chạy khi mission khai báo `execution.retrieval:` — `fault_analysis`

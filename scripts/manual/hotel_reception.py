@@ -329,7 +329,7 @@ def mcp_settings_checks(report: Report, mcp: Mcp) -> None:
 
     report.check(
         set(mcp.tools) == set(CONTRACT_TOOLS),
-        f"MCP server exposes exactly the 14 contract tools",
+        "MCP server exposes exactly the 14 contract tools",
         f"{len(mcp.tools)} tool(s)",
     )
     report.check(

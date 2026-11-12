@@ -252,10 +252,14 @@ and later runs see the prior turns (`docs/sessions.md`).
   pinned built-in tool manifest (`compute_tool_manifest` skips
   `permission == "mcp"`). If they leaked in, every long-lived worker
   would report false `agent_version_drift` after the server connected.
-- The mock keeps bookings/tasks in memory until it restarts, so the
-  booking scenario uses a random 2027–2029 window per run instead of a
-  fixed pair of dates. Booking ids grow from `BK-1004`; the cross-check
-  scans contiguously until the first missing id.
+- The mock keeps bookings/tasks in SQLite (`mock_hotel.db`, gitignored),
+  so data survives a restart — a clean state needs
+  `python -m scripts.mock_hotel_mcp_server --reseed`, restart alone no
+  longer resets it. The booking scenario uses a random 2027–2029 window
+  per run instead of a fixed pair of dates. Booking ids grow from
+  `BK-1004`; the cross-check scans contiguously until the first missing
+  id. Verify the store any time with
+  `python -m scripts.mock_hotel_mcp_server --dump`.
 - With the local `qwen2.5-3b` the final prose is unreliable: it sometimes
   reads a hallucinated `/large_tool_results/*.json`, calls the
   deepagents `task` tool with an unknown subagent, or echoes plan-node

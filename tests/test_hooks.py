@@ -68,6 +68,7 @@ def test_select_hooks_from_seed_yamls():
         "audit",
         "block_dangerous_tool_call",
         "guard_destructive_target",
+        "request_permission",
         "injection_feedback",
         "tool_error_feedback",
         "stop_completion",

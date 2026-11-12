@@ -21,6 +21,7 @@ from app.routers import (
     missions,
     models,
     ontology,
+    permissions,
     policies,
     results,
     schedules,
@@ -72,6 +73,7 @@ def create_app() -> FastAPI:
     app.include_router(results.router)
     app.include_router(schedules.router)
     app.include_router(ontology.router)
+    app.include_router(permissions.router)
     return app
 
 

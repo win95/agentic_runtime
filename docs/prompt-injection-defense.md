@@ -1,12 +1,15 @@
 # Phân tích phòng thủ prompt injection — Agentic Runtime
 
 Ngày phân tích: 2026-11-08, trên code ở `main` (sau khi xóa seed data).
-Trạng thái triển khai (cập nhật 2026-11-10): **Lớp 1–6 đã triển khai**
+Trạng thái triển khai (cập nhật 2026-11-12): **Lớp 1–6 đã triển khai**
 (commit xem `README.md` §16) — còn **Lớp 7** (trần token, tách tenant)
 thuộc Bước lớn 2 và 3 của roadmap, chờ 3 quyết định (phương thức đăng
-nhập, hosting, trần chi phí LLM mỗi user). **Chưa làm:** node xác nhận
-của người (human-in-the-loop) trước tool ghi — cần quyết định kênh phê
-duyệt. Phân tích gốc bên dưới giữ nguyên để đối chiếu.
+nhập, hosting, trần chi phí LLM mỗi user). **Human-in-the-loop đã làm
+xong (Option C, API-first, 2026-11-12):** hook `request_permission`
+chặn `delete_mission` / `cancel_execution` cho tới khi người duyệt qua
+`POST /permissions/{id}/approve` (duyệt xong tự chạy lại execution
+gốc); xem `docs/hooks.md`. Phân tích gốc bên dưới giữ nguyên để đối
+chiếu.
 
 ## 1. Mô hình đe dọa (threat model)
 
@@ -191,7 +194,12 @@ Vị trí: `runtime/tools/registry.py`, `runtime/tools/mcp_adapter.py`,
   tool lạ.
 - Gắn nhãn tool đọc/ghi trong registry (`read_only: bool`). Tool ghi chỉ
   được chạy khi mission khai báo rõ quyền đó **và** có bước xác nhận của
-  người (human-in-the-loop node) trước khi thực thi.
+  người (human-in-the-loop node) trước khi thực thi — **đã làm (Option C,
+  API-first, 2026-11-12)**: hook `request_permission` (PreToolUse) chặn
+  `delete_mission` / `cancel_execution` cho tới khi người duyệt qua
+  `POST /permissions/{id}/approve`; duyệt xong tự chạy lại execution gốc,
+  approval dùng một lần, hết hạn 60 phút; pending hết hạn sau 24h. Slack
+  chỉ báo (best-effort). Xem `docs/hooks.md`.
 - Chặn tool theo phạm vi execution: tool chỉ được gọi với `asset_id` của
   execution hiện tại, trừ khi mission cho phép rộng hơn.
 

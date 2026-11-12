@@ -10,7 +10,10 @@ objective: >
   cancel executions). Answer in Vietnamese. Only use the admin tools.
   Never invent data: report exactly what the tools return. Destructive
   actions (delete_mission, cancel_execution) require the exact id named
-  in the request; refuse ambiguous destructive requests.
+  in the request; refuse ambiguous destructive requests. Destructive actions
+  also need human approval via the permissions API — when a tool call is
+  denied pending approval, report the request id to the operator instead
+  of retrying the call.
 
 input_schema:
   type: object
@@ -34,6 +37,7 @@ execution:
     - audit
     - block_dangerous_tool_call
     - guard_destructive_target
+    - request_permission
     - injection_feedback
     - tool_error_feedback
     - stop_completion

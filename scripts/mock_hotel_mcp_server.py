@@ -1,9 +1,14 @@
 """Mock hotel MCP server — fake PMS + staff/tasks + policy docs.
 
 Implements exactly the 14 tools the ``hotel_receptionist`` agent
-expects (see ``docs/hotel-reception.md``). In-memory fake data with a
-deterministic seed; state resets on restart (and via ``reset_store()``
-for tests). Run it, then point the runtime at it::
+expects (see ``docs/hotel-reception.md``). The mutable data (guests,
+bookings, tasks, id counters) lives in SQLite, so a create / update /
+delete survives a server restart and can be checked afterwards — e.g.::
+
+    sqlite3 mock_hotel.db "SELECT booking_id, status FROM bookings;"
+    python -m scripts.mock_hotel_mcp_server --dump
+
+Run it, then point the runtime at it::
 
     python -m scripts.mock_hotel_mcp_server   # http://127.0.0.1:8081/mcp
 
@@ -15,6 +20,13 @@ Swap in the real server by changing those env vars — the agent,
 mission, skill and prompts do not change. The server is standalone:
 it imports only the MCP SDK + stdlib, never the app.
 
+Database: ``mock_hotel.db`` in the working directory by default
+(``MOCK_HOTEL_MCP_DB`` or ``--db`` overrides it; ``*.db`` is
+gitignored). The first open seeds the deterministic data below; later
+opens keep what is there. ``--reseed`` wipes and re-seeds (the clean
+state for a manual run), ``--dump`` prints the whole store as JSON
+and exits. Tests point the store at a temp file instead.
+
 Port: 8081 by default (8080 is the OpenSandbox server),
 ``MOCK_HOTEL_MCP_PORT`` or ``--port`` overrides it.
 """
@@ -23,7 +35,10 @@ from __future__ import annotations
 
 import argparse
 import datetime
+import json
 import os
+import sqlite3
+import threading
 
 from mcp.server.fastmcp import FastMCP
 
@@ -97,41 +112,186 @@ POLICIES = [
 ]
 
 
-def _seed_store() -> dict:
-    return {
-        "guests": [
-            {"guest_id": "guest-001", "name": "Nguyễn Văn An",
-             "phone": "0901234567", "email": "an@example.com"},
-            {"guest_id": "guest-002", "name": "Trần Thị Bình",
-             "phone": "0907654321", "email": "binh@example.com"},
-        ],
-        "bookings": [
-            {"booking_id": "BK-1001", "guest_id": "guest-001",
-             "room_type": "deluxe", "check_in": "2026-12-20",
-             "check_out": "2026-12-22", "guests": 2,
-             "total_price": 4_000_000, "currency": CURRENCY, "status": "CONFIRMED"},
-            # Both suites are taken 2026-12-24 -> 2026-12-26 (sold out).
-            {"booking_id": "BK-1002", "guest_id": "guest-001",
-             "room_type": "suite", "check_in": "2026-12-24",
-             "check_out": "2026-12-26", "guests": 2,
-             "total_price": 7_000_000, "currency": CURRENCY, "status": "CONFIRMED"},
-            {"booking_id": "BK-1003", "guest_id": "guest-002",
-             "room_type": "suite", "check_in": "2026-12-24",
-             "check_out": "2026-12-26", "guests": 2,
-             "total_price": 7_000_000, "currency": CURRENCY, "status": "CONFIRMED"},
-        ],
-        "tasks": [],
-        "counters": {"guest": 3, "booking": 1004, "task": 2001},
-    }
+# --- SQLite store --------------------------------------------------------
+# One connection + one lock: FastMCP may call the (sync) tools from
+# different threads, so every statement runs serialized and every
+# write commits before the tool returns. The store opens lazily on
+# first use so importing this module never touches the filesystem
+# (tests point it at a temp file first).
+
+_SCHEMA = """
+CREATE TABLE IF NOT EXISTS guests (
+    guest_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    phone TEXT NOT NULL,
+    email TEXT
+);
+CREATE TABLE IF NOT EXISTS bookings (
+    booking_id TEXT PRIMARY KEY,
+    guest_id TEXT NOT NULL,
+    room_type TEXT NOT NULL,
+    check_in TEXT NOT NULL,
+    check_out TEXT NOT NULL,
+    guests INTEGER NOT NULL,
+    total_price INTEGER NOT NULL,
+    currency TEXT NOT NULL,
+    status TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS tasks (
+    task_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    description TEXT NOT NULL,
+    room TEXT,
+    team TEXT,
+    status TEXT NOT NULL,
+    assignee TEXT
+);
+CREATE TABLE IF NOT EXISTS meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+"""
+
+_SEED_GUESTS = [
+    {"guest_id": "guest-001", "name": "Nguyễn Văn An",
+     "phone": "0901234567", "email": "an@example.com"},
+    {"guest_id": "guest-002", "name": "Trần Thị Bình",
+     "phone": "0907654321", "email": "binh@example.com"},
+]
+
+_SEED_BOOKINGS = [
+    {"booking_id": "BK-1001", "guest_id": "guest-001",
+     "room_type": "deluxe", "check_in": "2026-12-20",
+     "check_out": "2026-12-22", "guests": 2,
+     "total_price": 4_000_000, "currency": CURRENCY, "status": "CONFIRMED"},
+    # Both suites are taken 2026-12-24 -> 2026-12-26 (sold out).
+    {"booking_id": "BK-1002", "guest_id": "guest-001",
+     "room_type": "suite", "check_in": "2026-12-24",
+     "check_out": "2026-12-26", "guests": 2,
+     "total_price": 7_000_000, "currency": CURRENCY, "status": "CONFIRMED"},
+    {"booking_id": "BK-1003", "guest_id": "guest-002",
+     "room_type": "suite", "check_in": "2026-12-24",
+     "check_out": "2026-12-26", "guests": 2,
+     "total_price": 7_000_000, "currency": CURRENCY, "status": "CONFIRMED"},
+]
+
+_SEED_COUNTERS = {"guest": 3, "booking": 1004, "task": 2001}
+
+_LOCK = threading.Lock()
+_CONN: sqlite3.Connection | None = None
+_DB_PATH: str | None = None
 
 
-_STORE = _seed_store()
+def default_db_path() -> str:
+    """DB file: ``MOCK_HOTEL_MCP_DB`` or ``mock_hotel.db`` in the CWD."""
+    return os.environ.get("MOCK_HOTEL_MCP_DB", "mock_hotel.db")
+
+
+def open_store(db_path: str | None = None) -> None:
+    """(Re)open the store at ``db_path`` (default: :func:`default_db_path`).
+
+    Creates the schema and seeds the deterministic data when the
+    database is empty; an existing database keeps its rows. Tests
+    point this at a temp file for isolation.
+    """
+    global _CONN, _DB_PATH
+    path = db_path or default_db_path()
+    with _LOCK:
+        if _CONN is not None:
+            _CONN.close()
+        conn = sqlite3.connect(path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        conn.executescript(_SCHEMA)
+        empty = conn.execute("SELECT COUNT(*) FROM guests").fetchone()[0] == 0
+        if empty:
+            _seed_locked(conn)
+        conn.commit()
+        _CONN = conn
+        _DB_PATH = path
+
+
+def close_store() -> None:
+    """Close the store connection (tests call this after each case)."""
+    global _CONN, _DB_PATH
+    with _LOCK:
+        if _CONN is not None:
+            _CONN.close()
+            _CONN = None
+            _DB_PATH = None
+
+
+def store_path() -> str:
+    """Path of the currently open database (opens the default first)."""
+    _db()
+    return _DB_PATH or default_db_path()
+
+
+def _db() -> sqlite3.Connection:
+    if _CONN is None:
+        open_store()
+    assert _CONN is not None
+    return _CONN
+
+
+def _seed_locked(conn: sqlite3.Connection) -> None:
+    for guest in _SEED_GUESTS:
+        conn.execute(
+            "INSERT INTO guests (guest_id, name, phone, email) VALUES (?, ?, ?, ?)",
+            (guest["guest_id"], guest["name"], guest["phone"], guest["email"]),
+        )
+    for booking in _SEED_BOOKINGS:
+        conn.execute(
+            "INSERT INTO bookings (booking_id, guest_id, room_type, check_in,"
+            " check_out, guests, total_price, currency, status)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (booking["booking_id"], booking["guest_id"], booking["room_type"],
+             booking["check_in"], booking["check_out"], booking["guests"],
+             booking["total_price"], booking["currency"], booking["status"]),
+        )
+    for key, value in _SEED_COUNTERS.items():
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            (key, str(value)),
+        )
 
 
 def reset_store() -> None:
     """Restore the deterministic seed (tests call this between cases)."""
-    global _STORE
-    _STORE = _seed_store()
+    conn = _db()
+    with _LOCK:
+        conn.execute("DELETE FROM tasks")
+        conn.execute("DELETE FROM bookings")
+        conn.execute("DELETE FROM guests")
+        conn.execute("DELETE FROM meta")
+        _seed_locked(conn)
+        conn.commit()
+
+
+def dump_store() -> dict:
+    """The whole store as plain dicts (guests/bookings/tasks/counters)."""
+    conn = _db()
+    with _LOCK:
+        guests = [dict(r) for r in conn.execute(
+            "SELECT * FROM guests ORDER BY guest_id")]
+        bookings = [dict(r) for r in conn.execute(
+            "SELECT * FROM bookings ORDER BY booking_id")]
+        tasks = [dict(r) for r in conn.execute(
+            "SELECT * FROM tasks ORDER BY task_id")]
+        counters = {r["key"]: int(r["value"]) for r in conn.execute(
+            "SELECT * FROM meta")}
+    return {"guests": guests, "bookings": bookings, "tasks": tasks,
+            "counters": counters}
+
+
+def _next_counter_locked(conn: sqlite3.Connection, key: str) -> int:
+    row = conn.execute(
+        "SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    value = int(row["value"]) if row else 1
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+        (key, str(value + 1)),
+    )
+    return value
 
 
 def _room_key(room_type: str | None) -> str | None:
@@ -152,19 +312,27 @@ def _nights(check_in: datetime.date, check_out: datetime.date) -> int:
     return (check_out - check_in).days
 
 
+def _overlapping_locked(conn: sqlite3.Connection, room_type: str,
+                        check_in: datetime.date, check_out: datetime.date,
+                        exclude_id: str | None = None) -> int:
+    # ISO dates compare lexicographically; overlap is start < new_end
+    # and new_start < end. Only CONFIRMED bookings occupy a room.
+    # Caller must hold _LOCK.
+    sql = ("SELECT COUNT(*) FROM bookings WHERE room_type = ?"
+           " AND status = 'CONFIRMED' AND check_in < ? AND ? < check_out")
+    params: list = [room_type, check_out.isoformat(), check_in.isoformat()]
+    if exclude_id is not None:
+        sql += " AND booking_id != ?"
+        params.append(exclude_id)
+    return conn.execute(sql, params).fetchone()[0]
+
+
 def _overlapping(room_type: str, check_in: datetime.date,
                  check_out: datetime.date, exclude_id: str | None = None) -> int:
-    count = 0
-    for booking in _STORE["bookings"]:
-        if booking["room_type"] != room_type or booking["status"] != "CONFIRMED":
-            continue
-        if exclude_id is not None and booking["booking_id"] == exclude_id:
-            continue
-        start = datetime.date.fromisoformat(booking["check_in"])
-        end = datetime.date.fromisoformat(booking["check_out"])
-        if start < check_out and check_in < end:
-            count += 1
-    return count
+    conn = _db()
+    with _LOCK:
+        return _overlapping_locked(conn, room_type, check_in, check_out,
+                                   exclude_id)
 
 
 def _valid_range(check_in: str, check_out: str) -> tuple | dict:
@@ -240,9 +408,12 @@ def get_room_rates(check_in: str, check_out: str,
 def find_guest(query: str) -> dict:
     """Tìm khách theo tên hoặc số điện thoại (khớp một phần)."""
     needle = (query or "").strip().casefold()
-    found = [g for g in _STORE["guests"]
-             if needle and (needle in g["name"].casefold()
-                            or needle in g["phone"])]
+    conn = _db()
+    with _LOCK:
+        rows = conn.execute("SELECT * FROM guests").fetchall()
+    found = [dict(r) for r in rows
+             if needle and (needle in r["name"].casefold()
+                            or needle in r["phone"])]
     return {"guests": found, "count": len(found)}
 
 
@@ -250,19 +421,23 @@ def register_guest(name: str, phone: str, email: str | None = None) -> dict:
     """Đăng ký khách mới."""
     if not (name or "").strip() or not (phone or "").strip():
         return {"error": "name and phone are required"}
-    guest_id = f"guest-{_STORE['counters']['guest']:03d}"
-    _STORE["counters"]["guest"] += 1
-    guest = {"guest_id": guest_id, "name": name.strip(),
-             "phone": phone.strip(), "email": email}
-    _STORE["guests"].append(guest)
-    return guest
+    conn = _db()
+    with _LOCK:
+        number = _next_counter_locked(conn, "guest")
+        guest_id = f"guest-{number:03d}"
+        conn.execute(
+            "INSERT INTO guests (guest_id, name, phone, email)"
+            " VALUES (?, ?, ?, ?)",
+            (guest_id, name.strip(), phone.strip(), email),
+        )
+        conn.commit()
+    return {"guest_id": guest_id, "name": name.strip(),
+            "phone": phone.strip(), "email": email}
 
 
 def create_booking(guest_id: str, room_type: str, check_in: str,
                    check_out: str, guests: int = 1) -> dict:
     """Tạo booking cho khách. Chỉ gọi sau khi khách đã xác nhận trong chat."""
-    if not any(g["guest_id"] == guest_id for g in _STORE["guests"]):
-        return {"error": f"Guest not found: {guest_id}"}
     room_type = _room_key(room_type)
     if room_type not in ROOM_TYPES:
         return {"error": f"Unknown room type: {room_type}",
@@ -272,48 +447,76 @@ def create_booking(guest_id: str, room_type: str, check_in: str,
         return parsed
     start, end = parsed
     info = ROOM_TYPES[room_type]
-    if _overlapping(room_type, start, end) >= info["total_rooms"]:
-        return {"error": f"No {room_type} room available for these dates",
-                "room_type": room_type, "check_in": check_in,
-                "check_out": check_out}
-    booking_id = f"BK-{_STORE['counters']['booking']}"
-    _STORE["counters"]["booking"] += 1
-    booking = {
-        "booking_id": booking_id, "guest_id": guest_id, "room_type": room_type,
-        "check_in": check_in, "check_out": check_out, "guests": guests,
-        "total_price": info["price_per_night"] * _nights(start, end),
-        "currency": CURRENCY, "status": "CONFIRMED",
-    }
-    _STORE["bookings"].append(booking)
+    conn = _db()
+    # One locked section for check + insert: two concurrent creates
+    # cannot both see the last free room and overbook it.
+    with _LOCK:
+        exists = conn.execute(
+            "SELECT 1 FROM guests WHERE guest_id = ?", (guest_id,)).fetchone()
+        if not exists:
+            return {"error": f"Guest not found: {guest_id}"}
+        if _overlapping_locked(conn, room_type, start, end) >= info["total_rooms"]:
+            return {"error": f"No {room_type} room available for these dates",
+                    "room_type": room_type, "check_in": check_in,
+                    "check_out": check_out}
+        number = _next_counter_locked(conn, "booking")
+        booking_id = f"BK-{number}"
+        booking = {
+            "booking_id": booking_id, "guest_id": guest_id, "room_type": room_type,
+            "check_in": check_in, "check_out": check_out, "guests": guests,
+            "total_price": info["price_per_night"] * _nights(start, end),
+            "currency": CURRENCY, "status": "CONFIRMED",
+        }
+        conn.execute(
+            "INSERT INTO bookings (booking_id, guest_id, room_type, check_in,"
+            " check_out, guests, total_price, currency, status)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (booking["booking_id"], booking["guest_id"], booking["room_type"],
+             booking["check_in"], booking["check_out"], booking["guests"],
+             booking["total_price"], booking["currency"], booking["status"]),
+        )
+        conn.commit()
     return booking
 
 
 def get_booking(booking_id: str) -> dict:
     """Tra cứu một booking theo mã."""
-    for booking in _STORE["bookings"]:
-        if booking["booking_id"] == booking_id:
-            return booking
-    return {"error": f"Booking not found: {booking_id}"}
+    conn = _db()
+    with _LOCK:
+        row = conn.execute(
+            "SELECT * FROM bookings WHERE booking_id = ?",
+            (booking_id,)).fetchone()
+    if row is None:
+        return {"error": f"Booking not found: {booking_id}"}
+    return dict(row)
 
 
 def cancel_booking(booking_id: str, reason: str | None = None) -> dict:
     """Hủy booking. Chỉ gọi sau khi khách đã xác nhận trong chat.
     Phí hủy: miễn phí khi hủy trước check-in ít nhất 3 ngày, còn lại
     bằng giá 1 đêm đầu tiên."""
-    for booking in _STORE["bookings"]:
-        if booking["booking_id"] != booking_id:
-            continue
+    conn = _db()
+    with _LOCK:
+        row = conn.execute(
+            "SELECT * FROM bookings WHERE booking_id = ?",
+            (booking_id,)).fetchone()
+        if row is None:
+            return {"error": f"Booking not found: {booking_id}"}
+        booking = dict(row)
         if booking["status"] == "CANCELLED":
             return {"error": f"Booking {booking_id} is already cancelled"}
         check_in = datetime.date.fromisoformat(booking["check_in"])
         days_left = (check_in - datetime.date.today()).days
         fee = 0 if days_left >= FREE_CANCEL_DAYS else ROOM_TYPES[
             booking["room_type"]]["price_per_night"]
-        booking["status"] = "CANCELLED"
-        return {"booking_id": booking_id, "status": "CANCELLED",
-                "fee_vnd": fee, "currency": CURRENCY,
-                "reason": reason}
-    return {"error": f"Booking not found: {booking_id}"}
+        conn.execute(
+            "UPDATE bookings SET status = 'CANCELLED' WHERE booking_id = ?",
+            (booking_id,),
+        )
+        conn.commit()
+    return {"booking_id": booking_id, "status": "CANCELLED",
+            "fee_vnd": fee, "currency": CURRENCY,
+            "reason": reason}
 
 
 def change_booking_dates(booking_id: str, check_in: str,
@@ -323,22 +526,33 @@ def change_booking_dates(booking_id: str, check_in: str,
     if isinstance(parsed, dict):
         return parsed
     start, end = parsed
-    for booking in _STORE["bookings"]:
-        if booking["booking_id"] != booking_id:
-            continue
+    conn = _db()
+    with _LOCK:
+        row = conn.execute(
+            "SELECT * FROM bookings WHERE booking_id = ?",
+            (booking_id,)).fetchone()
+        if row is None:
+            return {"error": f"Booking not found: {booking_id}"}
+        booking = dict(row)
         if booking["status"] == "CANCELLED":
             return {"error": f"Booking {booking_id} is cancelled"}
         info = ROOM_TYPES[booking["room_type"]]
-        if _overlapping(booking["room_type"], start, end,
-                        exclude_id=booking_id) >= info["total_rooms"]:
+        if _overlapping_locked(conn, booking["room_type"], start, end,
+                               exclude_id=booking_id) >= info["total_rooms"]:
             return {"error": "No room available for the new dates",
                     "room_type": booking["room_type"],
                     "check_in": check_in, "check_out": check_out}
+        total = info["price_per_night"] * _nights(start, end)
+        conn.execute(
+            "UPDATE bookings SET check_in = ?, check_out = ?,"
+            " total_price = ? WHERE booking_id = ?",
+            (check_in, check_out, total, booking_id),
+        )
+        conn.commit()
         booking["check_in"] = check_in
         booking["check_out"] = check_out
-        booking["total_price"] = info["price_per_night"] * _nights(start, end)
-        return booking
-    return {"error": f"Booking not found: {booking_id}"}
+        booking["total_price"] = total
+    return booking
 
 
 # --- Staff / tasks ---
@@ -360,34 +574,55 @@ def create_task(title: str, description: str, room: str | None = None,
         return {"error": "title and description are required"}
     room = str(room).strip() if room is not None else None
     team = str(team).strip().lower() if team is not None else None
-    task_id = f"TK-{_STORE['counters']['task']}"
-    _STORE["counters"]["task"] += 1
-    task = {"task_id": task_id, "title": title.strip(),
-            "description": description.strip(), "room": room,
-            "team": team, "status": "OPEN", "assignee": None}
-    _STORE["tasks"].append(task)
+    conn = _db()
+    with _LOCK:
+        number = _next_counter_locked(conn, "task")
+        task_id = f"TK-{number}"
+        task = {"task_id": task_id, "title": title.strip(),
+                "description": description.strip(), "room": room,
+                "team": team, "status": "OPEN", "assignee": None}
+        conn.execute(
+            "INSERT INTO tasks (task_id, title, description, room, team,"
+            " status, assignee) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (task["task_id"], task["title"], task["description"],
+             task["room"], task["team"], task["status"], task["assignee"]),
+        )
+        conn.commit()
     return task
 
 
 def assign_task(task_id: str, staff_id: str) -> dict:
     """Giao task cho một nhân viên."""
-    task = next((t for t in _STORE["tasks"] if t["task_id"] == task_id), None)
-    if task is None:
-        return {"error": f"Task not found: {task_id}"}
     staff = next((s for s in STAFF if s["staff_id"] == staff_id), None)
     if staff is None:
         return {"error": f"Staff not found: {staff_id}"}
-    task["assignee"] = staff_id
-    task["status"] = "ASSIGNED"
+    conn = _db()
+    with _LOCK:
+        row = conn.execute(
+            "SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+        if row is None:
+            return {"error": f"Task not found: {task_id}"}
+        task = dict(row)
+        conn.execute(
+            "UPDATE tasks SET assignee = ?, status = 'ASSIGNED'"
+            " WHERE task_id = ?",
+            (staff_id, task_id),
+        )
+        conn.commit()
+        task["assignee"] = staff_id
+        task["status"] = "ASSIGNED"
     return task
 
 
 def get_task(task_id: str) -> dict:
     """Xem trạng thái một task theo mã."""
-    for task in _STORE["tasks"]:
-        if task["task_id"] == task_id:
-            return task
-    return {"error": f"Task not found: {task_id}"}
+    conn = _db()
+    with _LOCK:
+        row = conn.execute(
+            "SELECT * FROM tasks WHERE task_id = ?", (task_id,)).fetchone()
+    if row is None:
+        return {"error": f"Task not found: {task_id}"}
+    return dict(row)
 
 
 # --- Policy documents ---
@@ -448,10 +683,25 @@ def main() -> None:
     parser.add_argument("--port", type=int,
                         default=int(os.environ.get("MOCK_HOTEL_MCP_PORT", DEFAULT_PORT)))
     parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--db", default=None,
+                        help="SQLite file (default: MOCK_HOTEL_MCP_DB"
+                        " or mock_hotel.db in the working directory)")
+    parser.add_argument("--reseed", action="store_true",
+                        help="wipe the database and re-seed it, then start")
+    parser.add_argument("--dump", action="store_true",
+                        help="print the whole store as JSON and exit")
     args = parser.parse_args()
+
+    open_store(args.db)
+    if args.reseed:
+        reset_store()
+    if args.dump:
+        print(json.dumps(dump_store(), ensure_ascii=False, indent=2))
+        return
     import uvicorn
 
-    print(f"Mock hotel MCP server on http://{args.host}:{args.port}/mcp",
+    print(f"Mock hotel MCP server on http://{args.host}:{args.port}/mcp"
+          f" (db: {store_path()})",
           flush=True)
     uvicorn.run(mcp.streamable_http_app(), host=args.host, port=args.port,
                 log_level="warning")

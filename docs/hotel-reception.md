@@ -73,7 +73,13 @@ map (tool chưa biết) nhưng giữ nguyên cấu trúc node — plan vẫn ren
 
 `scripts/mock_hotel_mcp_server.py` (FastMCP, chỉ dùng MCP SDK +
 stdlib, không import app) triển khai đúng 14 tool của hợp đồng trên,
-với dữ liệu giả trong bộ nhớ, seed xác định, reset khi restart:
+với dữ liệu giả trong SQLite (`mock_hotel.db` ở thư mục làm việc,
+`*.db` đã gitignore): seed xác định lần mở đầu tiên, create / update /
+delete ghi thẳng xuống DB nên còn lại sau khi restart và kiểm chứng
+được — `sqlite3 mock_hotel.db "SELECT * FROM bookings;"` hoặc
+`python -m scripts.mock_hotel_mcp_server --dump`. Muốn trạng thái
+sạch cho một lần chạy manual: `--reseed` (restart không còn reset
+nữa). `--db` đổi file DB; test dùng file tạm riêng.
 
     python -m scripts.mock_hotel_mcp_server   # http://127.0.0.1:8081/mcp
 

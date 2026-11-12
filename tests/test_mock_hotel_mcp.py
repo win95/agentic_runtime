@@ -53,10 +53,13 @@ FAULT_CONTEXT = {
 
 
 @pytest.fixture(autouse=True)
-def _reset_store():
-    mock_server.reset_store()
+def _reset_store(tmp_path):
+    """Point the mock store at a temp SQLite file per test, so test
+    runs never touch the real mock_hotel.db (and vice versa). Opening
+    a fresh file seeds the deterministic data."""
+    mock_server.open_store(str(tmp_path / "mock_test.db"))
     yield
-    mock_server.reset_store()
+    mock_server.close_store()
 
 
 @pytest.fixture(autouse=True)
@@ -234,6 +237,73 @@ def test_policy_search_and_read():
     doc = mock_server.read_policy_document("POL-SURCHARGE")
     assert "300.000" in doc["content"]
     assert "error" in mock_server.read_policy_document("POL-NOPE")
+
+
+# --- SQLite persistence: create/update/delete survive a restart ---
+def test_sqlite_persistence_across_reopen(tmp_path):
+    db_path = str(tmp_path / "persist.db")
+    mock_server.open_store(db_path)
+    created = mock_server.create_booking(
+        "guest-001", "deluxe", "2026-12-20", "2026-12-22")
+    assert created["booking_id"] == "BK-1004"
+    task = mock_server.create_task("Test", "desc", room="101")
+    assert task["task_id"] == "TK-2001"
+    mock_server.close_store()
+
+    # Reopen the same file: rows + counters survive the restart.
+    mock_server.open_store(db_path)
+    assert mock_server.get_booking("BK-1004")["status"] == "CONFIRMED"
+    assert mock_server.get_task("TK-2001")["status"] == "OPEN"
+    nxt = mock_server.create_booking(
+        "guest-001", "deluxe", "2026-12-20", "2026-12-22")
+    assert nxt["booking_id"] == "BK-1005"
+    free = mock_server.check_room_availability(
+        "2026-12-20", "2026-12-22", room_type="deluxe")
+    # 6 Deluxe rooms minus BK-1001 (seed) minus BK-1004 minus BK-1005.
+    assert free["room_types"][0]["available_rooms"] == 3
+
+
+def test_sqlite_reseed_restores_seed(tmp_path):
+    mock_server.open_store(str(tmp_path / "reseed.db"))
+    mock_server.create_booking(
+        "guest-001", "standard", "2026-12-20", "2026-12-22")
+    mock_server.reset_store()
+    assert "error" in mock_server.get_booking("BK-1004")
+    assert mock_server.dump_store()["counters"] == {
+        "guest": 3, "booking": 1004, "task": 2001,
+    }
+    free = mock_server.check_room_availability(
+        "2026-12-20", "2026-12-22", room_type="deluxe")
+    assert free["room_types"][0]["available_rooms"] == 5
+
+
+def test_dump_store_roundtrip(tmp_path):
+    mock_server.open_store(str(tmp_path / "dump.db"))
+    dump = mock_server.dump_store()
+    assert [b["booking_id"] for b in dump["bookings"]] == [
+        "BK-1001", "BK-1002", "BK-1003",
+    ]
+    assert dump["counters"] == {"guest": 3, "booking": 1004, "task": 2001}
+    mock_server.create_booking(
+        "guest-001", "standard", "2026-12-20", "2026-12-22")
+    assert len(mock_server.dump_store()["bookings"]) == 4
+
+
+def test_dump_cli_prints_json(tmp_path):
+    import subprocess
+    import sys
+
+    db_path = str(tmp_path / "cli.db")
+    result = subprocess.run(
+        [sys.executable, "-m", "scripts.mock_hotel_mcp_server",
+         "--db", db_path, "--dump"],
+        capture_output=True, text=True, cwd=BASE.parents[0], timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    data = json.loads(result.stdout)
+    assert [b["booking_id"] for b in data["bookings"]] == [
+        "BK-1001", "BK-1002", "BK-1003",
+    ]
 
 
 # --- Registry wiring over real HTTP ---

@@ -1,6 +1,6 @@
 """Built-in hook handlers.
 
-Eight handlers ship with the runtime (name -> [(event, handler)]):
+Nine handlers ship with the runtime (name -> [(event, handler)]):
 
 - ``audit`` — diagnostic logging for SessionStart, SessionEnd,
   Notification, SubagentStart, SubagentStop. Never changes a run.
@@ -15,6 +15,12 @@ Eight handlers ship with the runtime (name -> [(event, handler)]):
   target the user never named is denied before the tool runs. This is
   the deterministic net the pattern matcher cannot be: it checks the
   tool name + target id, not shell/SQL text.
+- ``request_permission`` (PreToolUse) — human approval (Option C) for
+  the same two destructive tools: the first call creates a pending
+  ``permission_requests`` row and is denied; a human approves it via
+  POST /permissions/{id}/approve, which re-dispatches the original
+  execution, and the re-run claims the single-use approval. Fail-closed:
+  any error talking to the approval store denies the call.
 - ``injection_feedback`` (PostToolUse) — scans a tool result for
   instruction-like text (Layer 6 signals) and tells the agent, in the
   result itself, to treat it as data. Complements the Layer 5 flags,
@@ -170,6 +176,68 @@ def guard_destructive_target(context: HookContext) -> HookDecision | None:
                 "action and ask for it."
             )
     return None
+
+
+def request_permission(context: HookContext) -> HookDecision | None:
+    """PreToolUse: a destructive call needs a human approval (Option C).
+
+    Fail-closed: any error talking to the approval store denies the
+    call — a handler that raised would be skipped by the registry and
+    the tool would run unchecked, so this handler never raises.
+    A missing/empty target id is not denied here — the tool itself
+    reports the missing argument (same convention as
+    ``guard_destructive_target``).
+    """
+    if context.tool_name not in _DESTRUCTIVE_TARGET_ARGS:
+        return None
+    target = None
+    for key in _DESTRUCTIVE_TARGET_ARGS[context.tool_name]:
+        value = (context.tool_input or {}).get(key)
+        if isinstance(value, str) and value:
+            target = value
+            break
+    if not target:
+        return None
+    try:
+        from app.core.db import SessionLocal
+        from app.services import permission_service
+
+        db = SessionLocal()
+        try:
+            outcome, record = permission_service.check_permission(
+                db,
+                execution_id=context.execution_id or None,
+                mission_id=context.mission_id or None,
+                agent_id=context.agent_id or None,
+                tool_name=context.tool_name,
+                target=target,
+                tool_input=dict(context.tool_input or {}),
+            )
+        finally:
+            db.close()
+    except Exception as exc:  # noqa: BLE001 — fail closed, never raise
+        logger.warning(
+            "request_permission check failed, denying %s: %s",
+            context.tool_name,
+            exc,
+        )
+        return HookDecision.deny(
+            f"Tool '{context.tool_name}' denied by hook "
+            "'request_permission': could not verify human approval — "
+            "refuse the action and report it."
+        )
+    if outcome == "allowed":
+        return None
+    assert record is not None  # "pending" / "requested" always carry a row
+    state = "already pending approval" if outcome == "pending" else "approval requested"
+    return HookDecision.deny(
+        f"Tool '{context.tool_name}' denied by hook 'request_permission': "
+        f"destructive action {context.tool_name}({target!r}) — {state}, "
+        f"request {record.id}. The operator approves via "
+        f"POST /permissions/{record.id}/approve (or denies via "
+        f".../deny), then the execution is re-dispatched. Report this "
+        "request id to the operator instead of calling the tool again."
+    )
 
 
 def injection_feedback(context: HookContext) -> HookDecision | None:
@@ -434,6 +502,7 @@ BUILTIN_HOOKS: dict[str, list[tuple[HookEvent, HookHandler]]] = {
     ],
     "block_dangerous_tool_call": [(HookEvent.PRE_TOOL_USE, block_dangerous_tool_call)],
     "guard_destructive_target": [(HookEvent.PRE_TOOL_USE, guard_destructive_target)],
+    "request_permission": [(HookEvent.PRE_TOOL_USE, request_permission)],
     "injection_feedback": [(HookEvent.POST_TOOL_USE, injection_feedback)],
     "tool_error_feedback": [(HookEvent.POST_TOOL_USE_FAILURE, tool_error_feedback)],
     "stop_completion": [(HookEvent.STOP, stop_completion)],

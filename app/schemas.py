@@ -127,6 +127,28 @@ class ExecutionRead(BaseModel):
     finished_at: datetime | None = None
 
 
+# --- Permission requests (Option C) ---
+class PermissionRequestRead(BaseModel):
+    request_id: str
+    execution_id: str | None = None
+    mission_id: str | None = None
+    agent_id: str | None = None
+    tool_name: str
+    target: str
+    tool_input: dict[str, Any] = Field(default_factory=dict)
+    status: str
+    decision_note: str | None = None
+    created_at: datetime | None = None
+    decided_at: datetime | None = None
+    expires_at: datetime | None = None
+    # Set on approve when the original execution was re-dispatched.
+    redispatched_execution_id: str | None = None
+
+
+class PermissionDecision(BaseModel):
+    note: str | None = None
+
+
 # --- Session (Option B) ---
 class SessionRead(BaseModel):
     session_id: str
