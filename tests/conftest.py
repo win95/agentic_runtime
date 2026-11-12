@@ -29,6 +29,40 @@ def _create_tables():
     Base.metadata.drop_all(bind=engine)
 
 
+@pytest.fixture(autouse=True)
+def _isolate_tool_registry():
+    """Restore the global tool registry after every test.
+
+    ``load_mcp_tools()`` registers MCP tools into ``registry._tools``;
+    a test that runs a mission while ``MCP_SERVER_URL`` is configured
+    (e.g. a dev ``.env`` plus a running mock server) would otherwise
+    leak those tools into every later test and break the "exactly the
+    built-in set" assertions in alphabetical order.
+    """
+    from runtime.tools import registry as tool_registry
+
+    snapshot = dict(tool_registry._tools)
+    yield
+    tool_registry._tools.clear()
+    tool_registry._tools.update(snapshot)
+
+
+@pytest.fixture(autouse=True)
+def _disable_mcp(monkeypatch):
+    """Keep tests off the MCP server a dev ``.env`` may point at.
+
+    Without this, a mission test that happens to run while the mock (or
+    a real) MCP server is up loads its tools, and the skill-map cache is
+    then built with MCP tool names that the reception test expects to be
+    dropped. Tests that exercise MCP opt in by monkeypatching these two
+    settings themselves (``tests/test_mock_hotel_mcp.py``).
+    """
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "mcp_server_url", "")
+    monkeypatch.setattr(settings, "mcp_tool_capabilities", "")
+
+
 @pytest.fixture()
 def db_session():
     session = SessionLocal()

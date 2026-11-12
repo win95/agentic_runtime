@@ -89,7 +89,7 @@ def test_seed_files_parse():
     agent = load_missions.load_agent_file(BASE / "agents" / "hotel_receptionist.yaml")
     assert agent["id"] == "hotel_receptionist"
     assert agent["model"] == settings.llm_model
-    assert agent["temperature"] == 0.0
+    assert agent["temperature"] == 0.5
     assert agent["session_history"] == {"max_turns": 10, "max_tokens": 4096}
     assert set(agent["allowed_tools"]) == HOTEL_TOOLS
     # The confirmation rule is the load-bearing sentence of the prompt.
