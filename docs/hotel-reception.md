@@ -79,13 +79,48 @@ việc chỉ qua 14 tool MCP.
 `confirm-booking` → `create-booking` → `report-booking`. Luồng giao
 việc: `task-details` → `find-staff` → `create-task` → `assign-task` →
 `report-task`. Tra cứu: `policy-lookup`, `booking-lookup` →
-`booking-change`, `task-status`. Map là kế hoạch (Phương án C): agent
-được lệch khi có lý do và phải báo các node đã đi qua.
+`booking-change`, `task-status`. Map từng là kế hoạch (Phương án C):
+agent được lệch khi có lý do và phải báo các node đã đi qua. Từ Phase
+3a, map của hotel được **ép buộc ở runtime bằng plan gate** (mục dưới)
+— văn bản skill và plan render đã đổi theo: thứ tự node bị từ chối
+khi gọi tool ngoài lượt, không còn là lời khuyên.
 
 Cho tới khi MCP server connect, `load_skills()` sẽ drop các tool của
 map (tool chưa biết) nhưng giữ nguyên cấu trúc node — plan vẫn render
 được. Khi server đã connect và process restart, tool được giữ lại và
 `plan_trace` tính đúng.
+
+## Plan gate — ép thứ tự map ở runtime (Phase 3a)
+
+`runtime/plan_gate.py`: một `AgentMiddleware` xây từ `SkillMap` đã parse
+của run, gắn vào danh sách middleware của `deep_agent_node` ngay sau
+hook middleware và built-in exclusion. Chỉ áp dụng cho
+`PLAN_GATE_MISSIONS = {"hotel_reception"}` (thí điểm); `fault_analysis`
+giữ map tư vấn cho tới khi map data-access được kiểm chứng với gate.
+
+- **Luật cho phép:** gọi tool của node hiện tại, node tool tiếp theo
+  theo thứ tự, đích rẽ nhánh của node hiện tại, đích rẽ nhánh của node
+  `route` (phân loại lại luôn được phép — một execution có thể phục vụ
+  yêu cầu thứ hai), hoặc node đã đi qua (quay lại). Node không có tool
+  được bỏ qua khi tính đích đến: rẽ về `booking-dates` thực chất là
+  tới `check-availability`.
+- **Từ chối:** gọi tool ngoài tập trên trả về một `ToolMessage` lỗi
+  ghi rõ tool được phép gọi tiếp — agent tự sửa ở turn sau, tool
+  không chạy. Quá 5 lần từ chối trong một execution, gate raise
+  `PlanGateExceededError` để run fail với chẩn đoán rõ thay vì xoay
+  tới hết step limit. Số lần từ chối xuất hiện trong execution notes
+  (`Plan gate: N out-of-plan tool call(s) denied`).
+- **Tool ngoài map** được cho qua kèm warning (fail-open): map thiếu
+  tool là lỗi config, không phải lý do phá run live. Bao phủ 14 tool
+  hợp đồng được test ép (`test_reception_map_covers_all_14_contract_tools`).
+- **Plan render theo gate:** `render_plan(..., enforced=True)` đổi header
+  khi gate gắn vào — văn bản "được lệch" + gate cứng là mâu thuẫn nên
+  không giữ cả hai. `confirm-booking` vẫn là điểm dừng ở mức prompt
+  (node không có tool nên gate không quan sát được việc xác nhận).
+- **Chưa có:** điều kiện tiên quyết giữa các tool (ví dụ `create_task`
+  bắt buộc đã `list_staff`) — allowlist đã ép đúng thứ tự đó cho luồng
+  task; quyết định từng rule (dependency dữ liệu / gate / bỏ) thuộc
+  Phase 3b. Subgraph biên dịch từ map cũng thuộc Phase 3b.
 
 ## Mock MCP server — chạy thử end-to-end
 

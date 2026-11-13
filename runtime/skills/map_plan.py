@@ -211,18 +211,33 @@ def parse_skill_map(
     return SkillMap(skill_name=skill_name, start=start, nodes=nodes)
 
 
-def render_plan(skill_map: SkillMap) -> str:
+def render_plan(skill_map: SkillMap, enforced: bool = False) -> str:
     """Render a map as a compact plan block for the agent's instructions.
 
     One line per node: id, goal, tools, branches as ``if <when> -> <goto>``,
     and stop conditions. The header states the Option C contract: follow
     the plan, deviate only with a stated reason, report visited nodes and
-    deviations at the end.
+    deviations at the end. With ``enforced=True`` (Phase 3a, the plan gate
+    is active for this mission) the header says so instead: tool order is
+    refused at the call boundary, so advisory-deviation text would be
+    incoherent next to a hard gate.
     """
+    if enforced:
+        header = (
+            f"Plan — skill '{skill_map.skill_name}'. This plan is ENFORCED by "
+            "the plan gate: a tool call outside the current step is refused, "
+            "and the refusal names the tools you may call next. Follow the "
+            "nodes in order; re-route only through the start node's branches. "
+            "At the end, report the plan nodes you visited."
+        )
+    else:
+        header = (
+            f"Plan — skill '{skill_map.skill_name}'. Follow this plan; you may deviate "
+            "when the evidence justifies it, but state why in your summary. At the end, "
+            "report the plan nodes you visited and any deviations."
+        )
     lines = [
-        f"Plan — skill '{skill_map.skill_name}'. Follow this plan; you may deviate "
-        "when the evidence justifies it, but state why in your summary. At the end, "
-        "report the plan nodes you visited and any deviations.",
+        header,
         f"Start at '{skill_map.start}'. Default flow is the next node in order.",
     ]
     for node in skill_map.nodes:

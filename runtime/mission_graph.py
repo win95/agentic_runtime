@@ -353,8 +353,24 @@ def deep_agent_node(state: MissionState) -> dict:
         mapped_skills = [
             s for s in (selected_skills or []) if getattr(s, "map", None) is not None
         ]
+        # Phase 3a — the plan gate: for missions in PLAN_GATE_MISSIONS
+        # (hotel only, pilot) the skill map becomes the tool allowlist
+        # enforced at the call boundary (runtime/plan_gate.py). The gate
+        # is built here, before the plan is rendered, so the plan text
+        # can say whether it is enforced — advisory text + a hard gate
+        # is incoherent (the task-scenario diagnosis, 2026-11-12).
+        from runtime.plan_gate import plan_gate
+
+        plan_gate_mw = plan_gate(
+            [s.map for s in mapped_skills],
+            state.get("mission_id"),
+            execution_id=state.get("execution_id") or "",
+        )
         plan_block = (
-            "\n\n".join(render_plan(s.map) for s in mapped_skills)
+            "\n\n".join(
+                render_plan(s.map, enforced=plan_gate_mw is not None)
+                for s in mapped_skills
+            )
             if mapped_skills
             else ""
         )
@@ -433,6 +449,12 @@ def deep_agent_node(state: MissionState) -> dict:
         exclusion = builtin_tools_exclusion(state.get("mission_id"))
         if exclusion is not None:
             middleware.append(exclusion)
+        # Phase 3a: the plan gate enforces the skill map's tool order
+        # for the pilot mission (hotel only). It is appended after the
+        # exclusion so the exclusion hides the built-ins first; the gate
+        # then sees only the tools the model may actually call.
+        if plan_gate_mw is not None:
+            middleware.append(plan_gate_mw)
         # Sandbox backend (docs/sandbox.md): when the mission opts in
         # (execution.sandbox: true) and this run has a session, the
         # agent's file tools + `execute` run inside that session's
@@ -592,6 +614,14 @@ def deep_agent_node(state: MissionState) -> dict:
                 else:
                     raise
         notes = [f"Deep agent: {outcome.get('summary', '')}"] if outcome.get("summary") else []
+        # Phase 3a: surface plan-gate denials in the execution notes, so
+        # a run that had to be corrected is explainable from the result
+        # alone (the denial messages themselves are in the trace).
+        if plan_gate_mw is not None and plan_gate_mw.denied_count:
+            notes.append(
+                f"Plan gate: {plan_gate_mw.denied_count} out-of-plan tool "
+                "call(s) denied"
+            )
         # Sandbox backend (docs/sandbox.md): one line saying which
         # backend ran — the sandbox id, or that the run fell back to
         # the in-memory backend because no sandbox was available.
