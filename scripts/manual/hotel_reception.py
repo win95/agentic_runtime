@@ -17,13 +17,21 @@ server — and checks the agent's behaviour, not just "the run succeeded":
    mock's truth (5 rooms, 2,000,000 VND/night).
 3. **soldout** — Suite 2026-12-24 -> 26 is sold out (2 seeded bookings
    take both rooms): the agent must report it, not invent availability.
+   Graded by the state+semantic verdict (no booking created for the
+   window AND the answer conveys unavailability), not by keywords —
+   see ``verifiers.soldout_verdict``.
 4. **policy** — cancellation question: ``search_policy_documents`` then
    ``read_policy_document("POL-CANCEL")``, answer from the document
-   (free >= 3 days, otherwise one night).
+   (free >= 3 days, otherwise one night). The read requirement becomes
+   genuine in Phase 2, when the fixture makes the search snippet
+   insufficient; the answer facts are graded semantically
+   (``verifiers.check_policy_facts``), not by keyword.
 5. **task** — broken A/C in room 201: ``list_staff("technicians")`` ->
    ``create_task`` -> ``assign_task``; the task is then cross-checked
    with a direct ``get_task`` MCP call. Also proves the agent loop runs
-   several model/tool turns inside one execution.
+   several model/tool turns inside one execution. The gate is the task
+   row in the store; ``list_staff`` ordering is trajectory-diagnostic
+   only until Phase 3 decides data-dependency vs runtime gate vs delete.
 6. **booking** — a real conversation in one session, on a random
    future date window so repeated runs do not collide. Turn 1 asks
    only for a quote (explicitly "chưa đặt phòng") and must **not**
@@ -92,6 +100,12 @@ from _api import (  # noqa: E402
     wait_for,
 )
 from agent_config_check import Report, check_static, load_config  # noqa: E402
+from verifiers import (  # noqa: E402
+    check_policy_facts,
+    find_bookings_by_window,
+    soldout_verdict,
+    trajectory_findings,
+)
 
 MISSION_ID = "hotel_reception"
 AGENT_ID = "hotel_receptionist"
@@ -521,10 +535,17 @@ def scenario_soldout(report: Report, mcp: Mcp, session_id: str,
         "soldout: correct dates + room type reached the tool",
         json.dumps(args, ensure_ascii=False),
     )
+    # Phase 1: state AND semantic, not keywords (a correct answer in
+    # different words failed the old tuple; a wrong answer could pass it).
+    bookings = find_bookings_by_window(
+        lambda code: mcp.call("get_booking", booking_id=code),
+        "suite", "2026-12-24", "2026-12-26",
+    )
+    verdict = soldout_verdict(turn["answer"], bookings)
     report.check(
-        any(token in answer for token in ("hết", "không còn", "het", "0 phòng")),
-        "soldout: answer says the Suite is sold out",
-        turn["answer"][:200],
+        verdict.passed,
+        "soldout: no booking created + answer says the Suite is sold out",
+        verdict.detail,
     )
     report.check(
         "suite" in answer,
@@ -546,8 +567,10 @@ def scenario_policy(report: Report, mcp: Mcp, session_id: str,
     check_execution(report, "policy", turn, version, timeout)
 
     doc = mcp.call("read_policy_document", doc_id="POL-CANCEL")
-    answer = turn["answer"].lower()
 
+    # The read stays a required step in the scenario; it becomes a
+    # genuine requirement in Phase 2 (fixture: snippet insufficient) and
+    # Phase 3 (data dependency or runtime gate).
     report.check(
         {"search_policy_documents", "read_policy_document"} <= success_names(turn),
         "policy: agent searched and read the policy document",
@@ -566,15 +589,12 @@ def scenario_policy(report: Report, mcp: Mcp, session_id: str,
         "policy: read the POL-CANCEL document",
         json.dumps(read_args, ensure_ascii=False),
     )
+    # Phase 1: the two facts, graded semantically (paraphrase-tolerant).
+    facts = check_policy_facts(turn["answer"])
     report.check(
-        "3 ngày" in answer,
-        "policy: answer keeps the 3-day free-cancellation window",
-        turn["answer"][:250],
-    )
-    report.check(
-        any(token in answer for token in ("1 đêm", "một đêm", "1 dem")),
-        "policy: answer keeps the one-night late-cancellation fee",
-        turn["answer"][:250],
+        facts.passed,
+        "policy: answer keeps the 3-day window + one-night fee",
+        facts.detail,
     )
     report.check(
         bool(doc.get("content")),
@@ -615,17 +635,20 @@ def scenario_task(report: Report, mcp: Mcp, session_id: str,
     check_execution(report, "task turn 1", turn1, version, timeout)
 
     success1 = success_names(turn1)
-    report.check(
-        {"list_staff", "create_task"} <= success1,
-        "task turn 1: agent listed staff and created a task",
-        ", ".join(sorted(success1)),
-    )
+    # Phase 1: trajectory is diagnostic only. list_staff ordering becomes
+    # a real requirement in Phase 3 (data dependency or runtime gate) or
+    # the requirement is deleted; the gate is the task row in the store.
+    for finding in trajectory_findings(turn1["calls"], required=("list_staff",)):
+        report.warn(
+            f"task turn 1 (trajectory): {finding}",
+            ", ".join(sorted(success1)),
+        )
     list_args = call_args(turn1, "list_staff")
-    report.check(
-        lower(list_args.get("team")) == "technicians",
-        "task turn 1: list_staff filtered to technicians",
-        json.dumps(list_args, ensure_ascii=False),
-    )
+    if list_args and lower(list_args.get("team")) != "technicians":
+        report.warn(
+            "task turn 1 (trajectory): list_staff filtered to technicians",
+            json.dumps(list_args, ensure_ascii=False),
+        )
     create_args = call_args(turn1, "create_task")
     report.check(
         str(create_args.get("room")) == "201"
