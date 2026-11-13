@@ -35,7 +35,8 @@ def _map(nodes, start="route"):
         MapNode(id=n["id"], goal=n.get("goal", n["id"]),
                 tools=n.get("tools", []),
                 branches=[MapBranch(when=b["when"], goto=b["goto"])
-                          for b in n.get("branches", [])])
+                          for b in n.get("branches", [])],
+                terminal=bool(n.get("terminal", False)))
         for n in nodes
     ])
 
@@ -45,11 +46,11 @@ FLOW_MAP = _map([
         {"when": "book", "goto": "check"},
         {"when": "task", "goto": "find"},
     ]},
-    {"id": "check", "tools": ["t_check"]},
-    {"id": "quote", "tools": ["t_quote"]},
+    {"id": "check", "tools": ["t_check"], "terminal": True},
+    {"id": "quote", "tools": ["t_quote"], "terminal": True},
     {"id": "find", "tools": ["t_find"]},
-    {"id": "create", "tools": ["t_create"]},
-    {"id": "report"},
+    {"id": "create", "tools": ["t_create"], "terminal": True},
+    {"id": "report", "terminal": True},
 ])
 
 
@@ -158,8 +159,8 @@ def test_router_never_books_before_confirmation():
     confirm_map = _map([
         {"id": "route", "branches": [{"when": "book", "goto": "confirm"}]},
         {"id": "confirm"},
-        {"id": "create", "tools": ["t_create"]},
-        {"id": "report"},
+        {"id": "create", "tools": ["t_create"], "terminal": True},
+        {"id": "report", "terminal": True},
     ])
     script = {
         "route": ([AIMessage(content="routing")], "confirm"),
@@ -184,6 +185,77 @@ def test_router_never_books_before_confirmation():
         skill_maps=[confirm_map],
     )
     assert result["visited_nodes"] == ["route", "confirm", "create"]
+
+
+def test_router_end_at_non_terminal_falls_back():
+    """The task-details failure (2026-11-13): END declared mid-flow is
+    ignored — the run continues to the next node instead of ending
+    with no task created."""
+    flow = _map([
+        {"id": "route", "branches": [{"when": "task", "goto": "details"}]},
+        {"id": "details"},
+        {"id": "staff", "tools": ["t_find"]},
+        {"id": "report", "terminal": True},
+    ])
+    result = _run(flow, {
+        "route": ([AIMessage(content="routing")], "details"),
+        "details": ([AIMessage(content="got the details")], "END"),
+        "staff": ([AIMessage(content="listed staff")], "report"),
+        "report": ([AIMessage(content="done")], "END"),
+    })
+    assert result["visited_nodes"] == ["route", "details", "staff", "report"]
+
+
+def test_router_end_at_terminal_ends_run():
+    flow = _map([
+        {"id": "route"},
+        {"id": "report", "terminal": True},
+    ])
+    result = _run(flow, {
+        "route": ([AIMessage(content="hi")], "report"),
+        "report": ([AIMessage(content="done")], "END"),
+    })
+    assert result["visited_nodes"] == ["route", "report"]
+
+
+def test_router_wait_ends_turn_from_non_terminal():
+    """A node that needs more guest input ends the turn with WAIT —
+    the router never forces it forward into a tool node."""
+    flow = _map([
+        {"id": "route", "branches": [{"when": "book", "goto": "dates"}]},
+        {"id": "dates"},
+        {"id": "check", "tools": ["t_check"]},
+        {"id": "report", "terminal": True},
+    ])
+    result = _run(flow, {
+        "route": ([AIMessage(content="routing")], "dates"),
+        "dates": ([AIMessage(content="which dates?")], "WAIT"),
+    })
+    assert result["visited_nodes"] == ["route", "dates"]
+
+
+def test_node_instruction_lists_branch_conditions():
+    """The booking-lookup misroute (2026-11-13): the route instruction
+    must show each branch's `when` condition, not bare node ids."""
+    seen: dict = {}
+
+    def capture(node, state, messages):
+        seen[node.id] = messages[-1].content
+        return list(messages) + [AIMessage(content="NEXT: END")]
+
+    compiled = build_skill_subgraph(
+        FLOW_MAP, tools=[], system_prompt="base", node_executor=capture,
+    )
+    run_skill_subgraph(
+        compiled, {"mission_id": "test", "objective": "test"},
+        {"message": "hi"}, skill_maps=[FLOW_MAP],
+    )
+    route_instruction = seen["route"]
+    assert "check (book)" in route_instruction
+    assert "find (task)" in route_instruction
+    # route is not terminal: END is not offered, WAIT is.
+    assert "NEXT: WAIT" in route_instruction
+    assert "Do not end the turn with NEXT: END here" in route_instruction
 
 
 def test_step_cap_ends_a_loop():

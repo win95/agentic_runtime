@@ -57,6 +57,25 @@ def _frontmatter(map_value):
 # --- Parsing ---
 
 
+def test_parse_skill_map_reads_terminal_flag():
+    """A node may declare `terminal: true` (the router honors END only
+    there); anything else is not terminal, including a non-boolean."""
+    from runtime.skills.map_plan import parse_skill_map
+
+    parsed = parse_skill_map(_frontmatter({
+        "start": "a",
+        "nodes": [
+            {"id": "a", "goal": "start"},
+            {"id": "b", "goal": "end", "terminal": True},
+            {"id": "c", "goal": "not a bool", "terminal": "yes"},
+        ],
+    }), "x")
+    assert parsed is not None
+    assert parsed.node_by_id("a").terminal is False
+    assert parsed.node_by_id("b").terminal is True
+    assert parsed.node_by_id("c").terminal is False
+
+
 # --- Loader: pilot skill + map-less skills unchanged ---
 def test_loader_parses_data_access_map():
     skills = {s.name: s for s in load_skills()}

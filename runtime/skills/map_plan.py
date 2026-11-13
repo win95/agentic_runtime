@@ -44,13 +44,22 @@ class MapBranch:
 
 @dataclass
 class MapNode:
-    """One step of the plan: what to achieve, with which tools."""
+    """One step of the plan: what to achieve, with which tools.
+
+    ``terminal`` marks a flow-ending node: the router honors a
+    ``NEXT: END`` declaration only there. At any other node END means
+    the model judged the request handled mid-flow (e.g. task-details
+    after merely restating the issue) — the router falls back to the
+    next node in order instead. A node that needs more information
+    from the guest ends the turn with ``NEXT: WAIT`` (always honored).
+    """
 
     id: str
     goal: str = ""
     tools: list[str] = field(default_factory=list)
     branches: list[MapBranch] = field(default_factory=list)
     stop_when: str = ""
+    terminal: bool = False
 
 
 @dataclass
@@ -120,7 +129,7 @@ def parse_skill_map(
             continue
         seen_ids.add(node_id)
         for key in entry:
-            if key not in {"id", "goal", "tools", "branches", "stop_when"}:
+            if key not in {"id", "goal", "tools", "branches", "stop_when", "terminal"}:
                 logger.debug("Skill %s: ignoring unknown map node key %r", skill_name, key)
         goal = entry.get("goal")
         goal = str(goal).strip() if goal is not None else ""
@@ -180,8 +189,10 @@ def parse_skill_map(
             branches.append(MapBranch(when=when.strip(), goto=goto.strip()))
         stop_when = entry.get("stop_when")
         stop_when = str(stop_when).strip() if stop_when is not None else ""
+        terminal = entry.get("terminal") is True
         nodes.append(
-            MapNode(id=node_id, goal=goal, tools=tools, branches=branches, stop_when=stop_when)
+            MapNode(id=node_id, goal=goal, tools=tools, branches=branches,
+                    stop_when=stop_when, terminal=terminal)
         )
     if not nodes:
         logger.warning("Skill %s: map has no usable nodes; ignoring", skill_name)

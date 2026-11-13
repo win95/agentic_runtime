@@ -149,6 +149,13 @@ def test_reception_skill_map_contract():
     assert "chưa xác nhận" in (confirm.stop_when or "")
     assert skill_map.node_by_id("create-booking").tools == ["create_booking"]
     assert skill_map.node_by_id("assign-task").tools == ["assign_task"]
+    # Terminal nodes (2026-11-13): END is honored only here. The
+    # mid-flow nodes (booking-dates, task-details, find-staff, ...) are
+    # not terminal — a premature END there falls back to the next node.
+    assert {n.id for n in skill_map.nodes if n.terminal} == {
+        "route", "report-booking", "report-task", "policy-lookup",
+        "booking-lookup", "booking-change", "task-status",
+    }
     rendered = render_plan(skill_map)
     assert "confirm-booking" in rendered
     assert "create_booking" in rendered

@@ -104,9 +104,16 @@ hiện chỉ có `hotel_reception`).
   không thể xảy ra, vì agent của node đó không có tool đó.
 - **Router là code, không phải model.** Sau mỗi node, router chọn node
   tiếp theo từ bảng chuyển đổi của map: dòng `NEXT: <node-id>` do node
-  khai báo (kèm `NEXT: END` khi xong), kiểm chứng trong tập cho phép
-  (đích rẽ nhánh của node hiện tại + node tiếp theo theo thứ tự); khai
-  báo sai hoặc thiếu thì về node tiếp theo theo thứ tự. Nhánh rẽ của
+  khai báo, kiểm chứng trong tập cho phép (đích rẽ nhánh của node hiện
+  tại + node tiếp theo theo thứ tự); khai báo sai hoặc thiếu thì về node
+  tiếp theo theo thứ tự. Mỗi lựa chọn trong instruction kèm điều kiện
+  `when` của nhánh đó, để model quyết định bằng điều kiện chứ không đoán
+  từ id. `NEXT: END` chỉ được chấp nhận ở node kết thúc flow
+  (`terminal: true` trong map: `route`, `report-booking`, `report-task`,
+  `policy-lookup`, `booking-lookup`, `booking-change`, `task-status`); ở
+  node khác thì END bị bỏ qua và đi tiếp node sau — model tưởng request
+  đã xong giữa flow không được kết thúc run. `NEXT: WAIT` dừng turn ở
+  bất kỳ node nào khi cần thêm thông tin từ khách. Nhánh rẽ của
   node `route` luôn mở (phân loại lại).
 - **Luật resume (turn xác nhận):** từ node `route`, nhảy thẳng tới
   `create-booking` chỉ được phép khi session đã có turn trước — turn

@@ -28,7 +28,14 @@ One run uses exactly one enforcement mechanism, chosen in
   and a **code router** validates it against the map (branch targets
   of the current node + next node in list order + resume nodes); an
   absent or invalid declaration falls back to next-in-order, never an
-  arbitrary jump. Resume nodes (e.g. `create-booking`) are enterable
+  arbitrary jump. The node's instruction lists each branch choice with
+  its `when` condition, so the model decides on the condition, not a
+  bare id. `NEXT: END` is honored only at a flow-terminal node
+  (`terminal: true` in the map); anywhere else it falls back to
+  next-in-order — the model judging a request "handled" mid-flow must
+  not end the run. `NEXT: WAIT` ends the turn from any node: the node
+  needs more information from the guest before the flow can continue.
+  Resume nodes (e.g. `create-booking`) are enterable
   only when the session already has prior turns — so a fresh turn
   stops at the confirmation question and the guest's confirmation
   turn resumes into the booking. Step cap: 12 node executions per run.

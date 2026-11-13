@@ -20,6 +20,13 @@ transition table.
   against the allowed set (branch targets of the current node + the next
   node in order + resume nodes, below). An absent or invalid declaration
   falls back to the next node in order, never to an arbitrary jump.
+  ``NEXT: END`` ends the turn only at a flow-terminal node (``terminal:
+  true`` in the map — e.g. the report nodes); anywhere else it is
+  treated like an invalid declaration and falls back, because the
+  model judging the request "handled" mid-flow is exactly the
+  premature-END failure. ``NEXT: WAIT`` ends the turn from any node:
+  the node needs more information from the guest before the flow can
+  continue (e.g. dates missing at booking-dates).
 - ``resume_nodes`` is the multi-turn rule: from the map's start node, a
   declared jump to a resume node is allowed only when the session has
   prior turns. For hotel that is ``create-booking`` — the guest's
@@ -68,7 +75,9 @@ SUBGRAPH_PILOT_MISSIONS = frozenset({"hotel_reception"})
 MAX_NODE_STEPS = 12
 
 # The model declares its branch choice as a line in its final text:
-#   NEXT: <node-id>     or     NEXT: END
+#   NEXT: <node-id>     or     NEXT: END     or     NEXT: WAIT
+# END ends the turn only at a terminal node (see _route); WAIT ends
+# it from any node (the node needs more guest input to continue).
 NEXT_RE = re.compile(r"^NEXT:\s*([A-Za-z0-9_-]+)\s*$", re.MULTILINE)
 
 
@@ -229,11 +238,31 @@ def build_skill_subgraph(
             )
         else:
             parts.append("Answer in text only — you have no tools in this step.")
-        choices = ", ".join(sorted(allowed)) if allowed else "END"
+        # The branch conditions are part of the choice: the model
+        # decides with the actual `when` text, not a bare node id
+        # (route once sent a quote request to booking-lookup because the
+        # ids alone gave it nothing to decide on).
+        hints = {b.goto: b.when for b in node.branches}
+        choices = ", ".join(
+            f"{nid} ({hints[nid]})" if nid in hints else nid
+            for nid in sorted(allowed)
+        ) or "END"
+        if node.terminal:
+            ending = (
+                "or NEXT: END when the guest's request is fully handled in "
+                "this turn, or NEXT: WAIT when you need more information "
+                "from the guest before continuing."
+            )
+        else:
+            ending = (
+                "or NEXT: WAIT when you need more information from the "
+                "guest before continuing. Do not end the turn with "
+                "NEXT: END here — the request is not fully handled until "
+                "a later step."
+            )
         parts.append(
             "End your reply with exactly one line: NEXT: <node-id> — choose "
-            f"from: {choices} — or NEXT: END when the guest's request is "
-            "fully handled in this turn."
+            f"from: {choices} — {ending}"
         )
         return "\n\n".join(parts)
 
@@ -294,9 +323,21 @@ def build_skill_subgraph(
         if int(state.get("steps") or 0) >= max_steps:
             return "END"
         declared = state.get("declared_next")
-        if declared == "END":
-            return "END"
         current = state.get("current") or skill_map.start
+        if declared == "WAIT":
+            # The node needs more information from the guest before the
+            # flow can continue: end the turn, never force it forward.
+            return "END"
+        if declared == "END":
+            # END is only honored at a flow-terminal node. Anywhere else
+            # it means the model judged the request handled mid-flow
+            # (task-details ending the run after merely restating the
+            # issue, with no task created) — treat it like an invalid
+            # declaration and fall through to the next node in order.
+            node = skill_map.node_by_id(current)
+            if node is not None and node.terminal:
+                return "END"
+            declared = None
         session_turns = len(
             (state.get("session_history") or {}).get("turns") or []
         )

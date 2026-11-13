@@ -8,6 +8,7 @@ map:
     - id: route
       goal: Phân loại tin nhắn của khách thành đặt phòng, yêu cầu dịch vụ, hỏi chính sách, hay tra cứu booking.
       tools: []
+      terminal: true
       branches:
         - when: khách muốn đặt phòng
           goto: booking-dates
@@ -46,6 +47,7 @@ map:
     - id: report-booking
       goal: Báo mã booking và tóm tắt cho khách.
       tools: []
+      terminal: true
     - id: task-details
       goal: Lấy yêu cầu dịch vụ — hỏng hóc hay cần gì, ở phòng nào; hỏi số phòng khi thiếu.
       tools: []
@@ -61,18 +63,23 @@ map:
     - id: report-task
       goal: Báo mã task và người phụ trách cho khách.
       tools: []
+      terminal: true
     - id: policy-lookup
       goal: Trả lời câu hỏi về hủy, đổi ngày và phụ thu chỉ dựa trên tài liệu chính sách.
       tools: [search_policy_documents, read_policy_document]
+      terminal: true
     - id: booking-lookup
       goal: Tra cứu booking của khách hiện tại theo mã, hoặc tìm khách trước rồi mới tra booking của họ; đăng ký khách mới khi chưa có.
       tools: [find_guest, register_guest, get_booking]
+      terminal: true
     - id: booking-change
       goal: Hủy hoặc đổi ngày booking của khách hiện tại — tóm tắt rồi hỏi khách xác nhận trong chat trước khi gọi tool ghi.
       tools: [cancel_booking, change_booking_dates]
+      terminal: true
     - id: task-status
       goal: Kiểm tra trạng thái task khi khách hỏi tiến độ.
       tools: [get_task]
+      terminal: true
 ---
 
 # Reception
@@ -81,7 +88,7 @@ map:
 - Mission là `hotel_reception`: khách đang nói chuyện với khách sạn — đặt phòng, hỏi về booking hay chính sách, hoặc yêu cầu gì đó trong phòng.
 
 ## Map
-Đi theo `map:` trong frontmatter của file này như một kế hoạch. Node `route` phân loại tin nhắn, rồi một trong ba luồng chạy: đặt phòng (`booking-dates` → `check-availability` → `quote-price` → `confirm-booking` → `create-booking` → `report-booking`), giao việc (`task-details` → `find-staff` → `create-task` → `assign-task` → `report-task`), hoặc tra cứu (`policy-lookup` / `booking-lookup` → `booking-change`, `task-status`). Mỗi luồng kết thúc ở node báo cáo của nó. Luồng mặc định là node tiếp theo theo thứ tự; rẽ nhánh khi điều kiện của nhánh đúng. Thứ tự các node được ép buộc ở runtime bằng subgraph: mỗi node chạy như một agent riêng chỉ có tool của node đó, và router (code, không phải model) quyết định node tiếp theo từ bảng chuyển đổi của map. Bạn vẫn được diễn đạt khác đi trong câu trả lời, nhưng không thể gọi tool ngoài thứ tự — cuối mỗi bước, báo node tiếp theo bằng một dòng `NEXT: <node-id>`. Cuối cùng báo lại các node đã đi qua.
+Đi theo `map:` trong frontmatter của file này như một kế hoạch. Node `route` phân loại tin nhắn, rồi một trong ba luồng chạy: đặt phòng (`booking-dates` → `check-availability` → `quote-price` → `confirm-booking` → `create-booking` → `report-booking`), giao việc (`task-details` → `find-staff` → `create-task` → `assign-task` → `report-task`), hoặc tra cứu (`policy-lookup` / `booking-lookup` → `booking-change`, `task-status`). Mỗi luồng kết thúc ở node báo cáo của nó. Luồng mặc định là node tiếp theo theo thứ tự; rẽ nhánh khi điều kiện của nhánh đúng. Thứ tự các node được ép buộc ở runtime bằng subgraph: mỗi node chạy như một agent riêng chỉ có tool của node đó, và router (code, không phải model) quyết định node tiếp theo từ bảng chuyển đổi của map. Bạn vẫn được diễn đạt khác đi trong câu trả lời, nhưng không thể gọi tool ngoài thứ tự — cuối mỗi bước, báo node tiếp theo bằng một dòng `NEXT: <node-id>` (kèm điều kiện rẽ nhánh khi có). Chỉ kết thúc turn bằng `NEXT: END` ở node có `terminal: true`; ở node khác thì `NEXT: END` bị router bỏ qua và đi tiếp node sau. Khi cần thêm thông tin từ khách mới tiếp tục được thì dùng `NEXT: WAIT` — turn dừng lại chờ khách trả lời.
 
 ## Rules
 - **Xác nhận trước mọi thao tác ghi của booking.** Tóm tắt booking (loại phòng, ngày, số khách, tổng giá, chính sách hủy) rồi hỏi khách xác nhận trong chat; chỉ gọi `create_booking`, `cancel_booking` hoặc `change_booking_dates` sau khi khách xác nhận. Node `confirm-booking` là điểm dừng bắt buộc, không phải gợi ý.
