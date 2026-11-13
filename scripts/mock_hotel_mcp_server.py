@@ -85,30 +85,55 @@ POLICIES = [
         "doc_id": "POL-CANCEL",
         "title": "Chính sách hủy phòng",
         "content": (
-            "Hủy phòng miễn phí khi hủy trước ngày check-in ít nhất 3 ngày. "
+            "Chính sách hủy phòng này áp dụng cho mọi đặt phòng trực tiếp "
+            "qua lễ tân và qua kênh đối tác của khách sạn. Khách có thể hủy "
+            "phòng miễn phí khi hủy trước ngày check-in ít nhất 3 ngày. "
             "Hủy trong vòng 3 ngày trước check-in: phí 1 đêm đầu tiên. "
             "Không đến nhận phòng (no-show): phí 1 đêm đầu tiên. "
-            "Tiền đã thanh toán được hoàn lại theo đúng mức phí trên."
+            "Tiền đã thanh toán được hoàn lại theo đúng mức phí trên, trong "
+            "vòng 7 ngày làm việc kể từ ngày xác nhận hủy, qua cùng phương "
+            "thức thanh toán ban đầu. Mọi yêu cầu hủy cần được gửi bằng văn "
+            "bản qua email hoặc tin nhắn cho lễ tân và chỉ có hiệu lực khi "
+            "khách sạn xác nhận đã nhận được. Trong trường hợp bất khả kháng "
+            "(thiên tai, dịch bệnh theo công bố của cơ quan có thẩm quyền), "
+            "khách sạn xem xét miễn phí hủy theo từng trường hợp cụ thể. "
+            "Đặt phòng thuộc gói khuyến mãi không hoàn tiền sẽ không được "
+            "hoàn lại trong mọi trường hợp hủy."
         ),
     },
     {
         "doc_id": "POL-CHANGE",
         "title": "Chính sách đổi ngày",
         "content": (
-            "Đổi ngày miễn phí 1 lần khi đổi trước ngày check-in ít nhất 3 ngày. "
-            "Đổi trong vòng 3 ngày trước check-in: phí 200.000 VND. "
-            "Giá phòng mới tính theo giá tại thời điểm đổi; khách trả thêm phần "
-            "chênh lệch nếu giá mới cao hơn, không hoàn lại nếu giá mới thấp hơn."
+            "Chính sách đổi ngày này áp dụng cho mọi đặt phòng còn hiệu lực "
+            "và chưa đến ngày check-in. Đổi ngày miễn phí 1 lần khi đổi "
+            "trước ngày check-in ít nhất 3 ngày. Đổi trong vòng 3 ngày "
+            "trước check-in: phí 200.000 VND. Giá phòng mới tính theo giá "
+            "tại thời điểm đổi; khách trả thêm phần chênh lệch nếu giá mới "
+            "cao hơn, không hoàn lại nếu giá mới thấp hơn. Mỗi lần đổi ngày "
+            "tiếp theo (lần thứ 2 trở đi) đều tính phí 200.000 VND bất kể "
+            "thời điểm đổi. Việc đổi ngày phụ thuộc vào tình trạng phòng "
+            "trống của ngày mới; nếu ngày mới đã hết phòng, khách sạn sẽ đề "
+            "xuất ngày gần nhất còn phòng hoặc hỗ trợ hủy theo chính sách "
+            "hủy phòng. Yêu cầu đổi ngày cần gửi trước 12:00 trưa của ngày "
+            "check-in ban đầu; yêu cầu gửi sau thời điểm này được tính là "
+            "yêu cầu đổi trong ngày và áp dụng phí đổi trong vòng 3 ngày."
         ),
     },
     {
         "doc_id": "POL-SURCHARGE",
         "title": "Phụ thu",
         "content": (
-            "Khách thêm (từ khách thứ 3 trong phòng Standard/Deluxe): 300.000 VND "
-            "một khách một đêm. Check-in sớm trước 12:00 hoặc check-out muộn sau "
-            "12:00: phụ thu 50% giá 1 đêm. Giờ check-in chuẩn 14:00, check-out "
-            "chuẩn 12:00."
+            "Phụ thu áp dụng cho các dịch vụ ngoài giá phòng niêm yết. "
+            "Khách thêm (từ khách thứ 3 trong phòng Standard/Deluxe): "
+            "300.000 VND một khách một đêm. Check-in sớm trước 12:00 hoặc "
+            "check-out muộn sau 12:00: phụ thu 50% giá 1 đêm. Giờ check-in "
+            "chuẩn 14:00, check-out chuẩn 12:00. Trẻ em dưới 6 tuổi ngủ "
+            "chung giường với bố mẹ được miễn phí; trẻ từ 6 đến 11 tuổi "
+            "tính 150.000 VND một trẻ một đêm. Giường phụ (extra bed) tính "
+            "400.000 VND một giường một đêm, chỉ áp dụng cho phòng Deluxe "
+            "và Suite và cần đặt trước ít nhất 1 ngày. Mọi phụ thu được "
+            "cộng vào hóa đơn lúc check-out và thanh toán cùng tiền phòng."
         ),
     },
 ]
@@ -628,15 +653,28 @@ def get_task(task_id: str) -> dict:
 
 
 # --- Policy documents ---
+# Information hiding (architecture Phase 2): search returns metadata only
+# (doc_id + title + relevance) and NEVER body text. The answer-critical
+# facts live only in read_policy_document, so the read step is a genuine
+# requirement — an agent that only reads search results cannot answer a
+# policy question. Relevance is 1.0 for a title match, 0.5 when the query
+# matches only the (unreturned) body text.
 def search_policy_documents(query: str) -> dict:
-    """Tìm tài liệu chính sách (hủy, đổi ngày, phụ thu) theo từ khóa."""
+    """Tìm tài liệu chính sách (hủy, đổi ngày, phụ thu) theo từ khóa.
+
+    Chỉ trả về mã + tiêu đề + độ liên quan, không trả nội dung: muốn biết
+    nội dung phải gọi read_policy_document.
+    """
     needle = (query or "").strip().casefold()
     found = []
     for doc in POLICIES:
-        if needle and (needle in doc["title"].casefold()
-                       or needle in doc["content"].casefold()):
+        title_hit = bool(needle) and needle in doc["title"].casefold()
+        body_hit = bool(needle) and needle in doc["content"].casefold()
+        if title_hit or body_hit:
             found.append({"doc_id": doc["doc_id"], "title": doc["title"],
-                          "snippet": doc["content"][:200]})
+                          "relevance": 1.0 if title_hit else 0.5})
+    # Ranked: title matches first; ties keep the POLICIES order.
+    found.sort(key=lambda hit: hit["relevance"], reverse=True)
     return {"documents": found, "count": len(found)}
 
 

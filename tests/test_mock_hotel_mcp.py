@@ -234,12 +234,53 @@ def test_task_flow():
 
 def test_policy_search_and_read():
     found = mock_server.search_policy_documents("hủy")
-    assert found["count"] == 1
+    # "hủy" hits POL-CANCEL by title and POL-CHANGE by body text
+    # (its content cross-references the cancellation policy) — ranked.
+    assert found["count"] == 2
     assert found["documents"][0]["doc_id"] == "POL-CANCEL"
+    assert found["documents"][0]["relevance"] == 1.0
+    assert found["documents"][1]["doc_id"] == "POL-CHANGE"
+    assert found["documents"][1]["relevance"] == 0.5
     assert mock_server.search_policy_documents("không có gì")["count"] == 0
     doc = mock_server.read_policy_document("POL-SURCHARGE")
     assert "300.000" in doc["content"]
     assert "error" in mock_server.read_policy_document("POL-NOPE")
+
+
+# --- Information hiding (architecture Phase 2) ---
+# The search result must never carry the answer: a shortcut agent that
+# only reads search results (never calls read_policy_document) must not
+# be able to answer any policy question.
+OPERATIVE_FACTS = ("3 ngày", "1 đêm", "200.000", "300.000", "50%")
+
+
+def test_policy_search_returns_metadata_only():
+    for query in ("hủy", "đổi ngày", "phụ thu", "phí", "3 ngày", "no-show"):
+        found = mock_server.search_policy_documents(query)
+        assert found["count"] >= 1, query
+        for hit in found["documents"]:
+            assert "snippet" not in hit
+            assert "content" not in hit
+            assert set(hit) == {"doc_id", "title", "relevance"}
+            blob = " ".join(str(v) for v in hit.values())
+            assert not any(fact in blob for fact in OPERATIVE_FACTS), (query, hit)
+
+
+def test_policy_search_relevance_ranks_title_above_body():
+    title_hit = mock_server.search_policy_documents("hủy")["documents"][0]
+    assert title_hit["doc_id"] == "POL-CANCEL"
+    assert title_hit["relevance"] == 1.0
+    body_hit = mock_server.search_policy_documents("no-show")["documents"][0]
+    assert body_hit["doc_id"] == "POL-CANCEL"
+    assert body_hit["relevance"] == 0.5
+
+
+def test_policy_documents_are_long_enough_to_need_a_read():
+    for doc in mock_server.POLICIES:
+        assert len(doc["content"]) > 500, doc["doc_id"]
+    cancel = mock_server.read_policy_document("POL-CANCEL")
+    assert "3 ngày" in cancel["content"]
+    assert "1 đêm" in cancel["content"]
 
 
 # --- SQLite persistence: create/update/delete survive a restart ---

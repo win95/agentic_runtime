@@ -36,6 +36,13 @@ từ chối mặc định (xem `runtime/tools/mcp_adapter.py`).
 | Task | `create_task` / `assign_task` / `get_task` | Tạo / giao / xem trạng thái task |
 | Docs | `search_policy_documents` / `read_policy_document` | Tìm + đọc chính sách hủy / đổi ngày / phụ thu |
 
+> **Information hiding (kiến trúc Phase 2):** `search_policy_documents`
+> chỉ trả mã + tiêu đề + độ liên quan, không trả nội dung — mọi fact
+> (3 ngày, 1 đêm, mức phí) chỉ có trong `read_policy_document`. Nhờ đó
+> bước đọc là yêu cầu thật, không phải nghi thức: agent chỉ đọc kết quả
+> tìm kiếm thì không thể trả lời câu hỏi chính sách. Test
+> `test_policy_search_returns_metadata_only` khóa invariant này.
+
 Lưu ý: adapter MCP hiện tại chỉ load **một** server duy nhất
 (`MCP_SERVER_URL`). Nếu PMS, task và tài liệu là 3 server riêng, cần
 mở rộng adapter multi-server, hoặc gom chúng sau một gateway MCP duy

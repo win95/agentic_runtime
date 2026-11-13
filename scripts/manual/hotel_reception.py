@@ -22,9 +22,9 @@ server — and checks the agent's behaviour, not just "the run succeeded":
    see ``verifiers.soldout_verdict``.
 4. **policy** — cancellation question: ``search_policy_documents`` then
    ``read_policy_document("POL-CANCEL")``, answer from the document
-   (free >= 3 days, otherwise one night). The read requirement becomes
-   genuine in Phase 2, when the fixture makes the search snippet
-   insufficient; the answer facts are graded semantically
+   (free >= 3 days, otherwise one night). Phase 2 made the read genuine:
+   search returns titles + ids only, so the facts live only in the full
+   document. The answer facts are graded semantically
    (``verifiers.check_policy_facts``), not by keyword.
 5. **task** — broken A/C in room 201: ``list_staff("technicians")`` ->
    ``create_task`` -> ``assign_task``; the task is then cross-checked
@@ -568,9 +568,9 @@ def scenario_policy(report: Report, mcp: Mcp, session_id: str,
 
     doc = mcp.call("read_policy_document", doc_id="POL-CANCEL")
 
-    # The read stays a required step in the scenario; it becomes a
-    # genuine requirement in Phase 2 (fixture: snippet insufficient) and
-    # Phase 3 (data dependency or runtime gate).
+    # The read is a genuine requirement since Phase 2 (fixture: search
+    # returns metadata only, so the facts live only in the full document).
+    # Phase 3 decides data dependency vs runtime gate.
     report.check(
         {"search_policy_documents", "read_policy_document"} <= success_names(turn),
         "policy: agent searched and read the policy document",
