@@ -482,6 +482,7 @@ Xem đầy đủ trong `.env.example`. Các biến quan trọng:
 | Có cần conversation memory không? | Có, theo session (Option B, 2026-11-11): `session_id` tùy chọn, agent đọc lại các turn trước của cùng agent + mission; không có session thì mỗi execution độc lập như trước |
 | Skill map được thực thi thế nào? | Hai cơ chế, một run chỉ dùng một: **subgraph** — biên dịch map thành LangGraph con, một agent riêng mỗi node (thí điểm: `hotel_reception`); **plan gate** — middleware từ chối tool gọi ngoài thứ tự, cho mission còn chạy agent tự do |
 | Eval chấm thế nào? | State verifier trước (trạng thái cuối + ý nghĩa), trajectory chỉ chẩn đoán, LLM judge chỉ cho phần code không chấm được (judge chưa chọn model) |
+| Chặn truy cập dữ liệu thế nào? | Chặn theo tầng, không chặn theo tool (2026-11-13): đọc mở (tool đọc chỉ cần capability), ghi chặn (hook `enforce_layer` lúc gọi tool + human approval cho ghi phá hoại của admin), dữ liệu chặn theo phạm vi (asset wrapper; guest = session, bảng `session_guest_scopes`), output ngoài phạm vi thì `validate_results` FAIL run |
 
 ## 9. Cấu trúc thư mục
 
@@ -494,7 +495,7 @@ runtime/              LangGraph runtime: state, mission_graph, deep_agent,
                       skill_subgraph (biên dịch map thành đồ thị),
                       capabilities/
                       fault_analysis, tools/registry + fault_tools + admin_tools
-                      + mcp_adapter, middleware/ (token + audit callbacks),
+                      + mcp_adapter, scope (phạm vi execution), middleware/ (token + audit callbacks),
                       skills/ (skill loader: SKILL.md selection)
 skills/               Skill playbooks (SKILL.md): fault-investigation,
                       admin-operations, report-writing + README

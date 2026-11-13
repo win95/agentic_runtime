@@ -66,6 +66,7 @@ def test_select_hooks_from_seed_yamls():
     admin = yaml.safe_load((REPO / "seeds/missions/system_admin.yaml").read_text())
     assert select_hooks(admin) == [
         "audit",
+        "enforce_layer",
         "block_dangerous_tool_call",
         "guard_destructive_target",
         "request_permission",
@@ -79,6 +80,7 @@ def test_select_hooks_from_seed_yamls():
     hotel = yaml.safe_load((REPO / "seeds/missions/hotel_reception.yaml").read_text())
     assert select_hooks(hotel) == [
         "audit",
+        "enforce_layer",
         "block_dangerous_tool_call",
         "guard_destructive_target",
         "deny_builtin_tools",

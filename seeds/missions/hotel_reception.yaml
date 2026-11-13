@@ -37,6 +37,7 @@ execution:
   # matter most here.
   hooks:
     - audit
+    - enforce_layer
     - block_dangerous_tool_call
     - guard_destructive_target
     - deny_builtin_tools

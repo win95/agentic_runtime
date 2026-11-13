@@ -87,10 +87,27 @@ def test_seeded_fault_mission_declares_all_tool_capabilities():
 
 
 def test_permission_check_denies_unlisted_tool():
+    """Layer 1 (read-open, tran 2026-11-13): allowed_tools gates WRITES
+    only. A read tool whose capability matches the mission is listed
+    even when the agent's allowed_tools does not name it — reads build
+    context, and their data is scoped by the wrappers, not the tool
+    name. A write tool outside allowed_tools is still denied."""
     context = dict(FAULT_CONTEXT)
     context["allowed_tools"] = ["search_fault_history"]
     assert registry.check("search_fault_history", context) is True
-    assert registry.check("get_maintenance_records", context) is False
+    # Read tool, capability matches: listed despite allowed_tools.
+    assert registry.check("get_maintenance_records", context) is True
+    admin_context = {
+        "mission_id": "system_admin",
+        "tenant": "default",
+        "execution_id": "exec_test",
+        "capabilities": ["system_admin"],
+        "allowed_tools": ["get_missions"],
+    }
+    assert registry.check("get_missions", admin_context) is True
+    # Write tool outside allowed_tools: denied even with capability.
+    assert registry.check("save_mission", admin_context) is False
+    assert registry.check("delete_mission", admin_context) is False
 
 
 def test_list_for_context_returns_only_allowed():

@@ -1,22 +1,30 @@
 """Built-in hook handlers.
 
-Nine handlers ship with the runtime (name -> [(event, handler)]):
+Ten handlers ship with the runtime (name -> [(event, handler)]):
 
 - ``audit`` — diagnostic logging for SessionStart, SessionEnd,
   Notification, SubagentStart, SubagentStop. Never changes a run.
+- ``enforce_layer`` (PreToolUse) — the L2 call-time layer gate: a
+  tool call is denied when its capability is not in the mission's
+  capabilities, or when it is a write tool (``read_only=False``) not
+  in the agent's pinned allowed_tools. Reads are never denied here —
+  the data scope wrappers own read data, not the tool name. Built-in
+  deepagents tools are skipped (``deny_builtin_tools`` owns them for
+  hotel; fault needs them for its sandbox).
 - ``block_dangerous_tool_call`` (PreToolUse) — denies tool calls whose
   arguments contain destructive shell/SQL patterns. Our built-in fault
   tools are read-only, so this is defense in depth for MCP tools: they
   come from an external server and register ``read_only=False``.
 - ``guard_destructive_target`` (PreToolUse) — deterministic guard for
-  the two destructive admin tools: ``delete_mission`` and
-  ``cancel_execution`` may only target an id that appears verbatim in
-  the execution input. A model (or an injected instruction) naming a
-  target the user never named is denied before the tool runs. This is
-  the deterministic net the pattern matcher cannot be: it checks the
-  tool name + target id, not shell/SQL text.
+  the three destructive admin tools: ``delete_mission``,
+  ``cancel_execution`` and ``save_mission`` (overwrite) may only
+  target an id that appears verbatim in the execution input. A model
+  (or an injected instruction) naming a target the user never named
+  is denied before the tool runs. This is the deterministic net the
+  pattern matcher cannot be: it checks the tool name + target id,
+  not shell/SQL text.
 - ``request_permission`` (PreToolUse) — human approval (Option C) for
-  the same two destructive tools: the first call creates a pending
+  the same three destructive tools: the first call creates a pending
   ``permission_requests`` row and is denied; a human approves it via
   POST /permissions/{id}/approve, which re-dispatches the original
   execution, and the re-run claims the single-use approval. Fail-closed:
@@ -135,11 +143,66 @@ def block_dangerous_tool_call(context: HookContext) -> HookDecision | None:
 
 # Destructive admin tools -> the id argument(s) that name their target.
 # A call is only legitimate when the target id was named in the
-# execution input (see guard_destructive_target).
+# execution input (see guard_destructive_target). save_mission joins
+# the set because on_exists=overwrite replaces a mission in place;
+# dispatch_execution stays out — it creates an execution (audited,
+# allowed_tools-gated) instead of destroying config.
 _DESTRUCTIVE_TARGET_ARGS = {
     "delete_mission": ("mission_id",),
     "cancel_execution": ("execution_id",),
+    "save_mission": ("mission_id",),
 }
+
+
+def enforce_layer(context: HookContext) -> HookDecision | None:
+    """PreToolUse: the L2 call-time layer gate.
+
+    ``registry.check()`` filters the tool list once when the agent is
+    built, but a tool that reaches the agent through another channel
+    (a built-in, a subagent, a stale list) would bypass it. This hook
+    re-checks at the call boundary, with the run's own scope:
+
+    - unknown tool (not in the registry) -> deny;
+    - capability not in the mission's capabilities -> deny;
+    - write tool (``read_only=False``) not in the pinned
+      allowed_tools -> deny (only when a version is active — an empty
+      allowed_tools list means the pre-versioning fallback, where the
+      capability check is the gate);
+    - read tools are never denied here: reads build context, and
+      their data is scoped by the wrappers, not by tool name.
+
+    Built-in deepagents tools are skipped: ``deny_builtin_tools``
+    owns them for hotel, and fault_analysis legitimately needs them
+    inside its sandbox.
+    """
+    if context.tool_name in _BUILTIN_FILE_TOOLS:
+        return None
+    try:
+        import runtime.tools  # noqa: F401 — registers the built-in tools
+        from runtime.tools.registry import registry
+    except Exception:  # noqa: BLE001 — cannot judge; do not break the run
+        logger.debug("enforce_layer: registry unavailable, allowing %s", context.tool_name)
+        return None
+    entry = registry.get(context.tool_name)
+    if entry is None:
+        return HookDecision.deny(
+            f"Tool '{context.tool_name}' denied by hook 'enforce_layer': "
+            "not in the tool registry."
+        )
+    capabilities = context.capabilities or []
+    if capabilities and entry.capability not in capabilities:
+        return HookDecision.deny(
+            f"Tool '{context.tool_name}' denied by hook 'enforce_layer': "
+            f"capability '{entry.capability}' is not in this mission's "
+            "capabilities."
+        )
+    allowed_tools = context.allowed_tools or []
+    if allowed_tools and not entry.read_only and context.tool_name not in allowed_tools:
+        return HookDecision.deny(
+            f"Tool '{context.tool_name}' denied by hook 'enforce_layer': "
+            "write tool not in the agent's pinned allowed_tools."
+        )
+    return None
 
 
 def guard_destructive_target(context: HookContext) -> HookDecision | None:
@@ -541,6 +604,7 @@ BUILTIN_HOOKS: dict[str, list[tuple[HookEvent, HookHandler]]] = {
         (HookEvent.SUBAGENT_START, audit_hook),
         (HookEvent.SUBAGENT_STOP, audit_hook),
     ],
+    "enforce_layer": [(HookEvent.PRE_TOOL_USE, enforce_layer)],
     "block_dangerous_tool_call": [(HookEvent.PRE_TOOL_USE, block_dangerous_tool_call)],
     "guard_destructive_target": [(HookEvent.PRE_TOOL_USE, guard_destructive_target)],
     "request_permission": [(HookEvent.PRE_TOOL_USE, request_permission)],

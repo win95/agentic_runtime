@@ -35,6 +35,7 @@ execution:
   # dangerous-call blocker and the input validator matter most here.
   hooks:
     - audit
+    - enforce_layer
     - block_dangerous_tool_call
     - guard_destructive_target
     - request_permission

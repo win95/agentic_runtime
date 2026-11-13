@@ -217,30 +217,34 @@ def test_node_records_drift_when_tools_change(db_session, monkeypatch):
 
 
 def test_node_enforces_version_allowed_tools(db_session, monkeypatch):
+    """Layer 1 (read-open, tran 2026-11-13): the version's allowed_tools
+    gates WRITES, not reads. Narrowing admin_bot to ["get_missions"]
+    must still pass every admin READ tool (capability match) while
+    dropping the write tools from the agent."""
     _seed_agents(db_session)
     db = SessionLocal()
     try:
-        agent = db.get(models.Agent, "fault_investigator")
-        agent.allowed_tools = ["search_fault_history"]
+        agent = db.get(models.Agent, "admin_bot")
+        agent.allowed_tools = ["get_missions"]
         db.commit()
-        avs.create_version(db, "fault_investigator", source="test")
+        avs.create_version(db, "admin_bot", source="test")
     finally:
         db.close()
-    mission = mission_service.get_mission(db_session, "fault_analysis")
+    mission = mission_service.get_mission(db_session, "system_admin")
     mission_dict = mission_service.mission_to_dict(mission)
     seen: dict = {}
     _fake_agent(monkeypatch, seen)
     state = {
-        "execution_id": "exec-av-3", "mission_id": "fault_analysis",
-        "mission": mission_dict,
-        "input": {"asset_id": "O21", "start_date": "2026-10-01",
-                  "end_date": "2026-10-31"},
+        "execution_id": "exec-av-3", "mission_id": "system_admin",
+        "mission": mission_dict, "input": {"request": "x"},
         "mode": "autonomous", "plan": [], "evidence": [], "result": None,
         "status": "RUNNING", "errors": [], "notes": [],
     }
     out = deep_agent_node(state)
     assert out.get("agent_version") == 2
-    assert seen["tools"] == ["search_fault_history"]
+    assert set(seen["tools"]) == {
+        "get_executions", "get_missions", "list_agents", "system_health",
+    }
 
 
 FAULT_TOOLS = {

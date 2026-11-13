@@ -94,6 +94,14 @@ class HookContext:
     reason: str = ""
     messages: list = field(default_factory=list)
     data: dict = field(default_factory=dict)
+    # Layer enforcement (L2): the run's scope, carried so the
+    # enforce_layer hook can decide a tool call without re-resolving
+    # the version. Empty allowed_tools means "no version gate" (the
+    # pre-versioning fallback) — reads still pass, writes need the
+    # gate only when a version is active.
+    session_id: str = ""
+    allowed_tools: list = field(default_factory=list)
+    capabilities: list = field(default_factory=list)
 
 
 @dataclass

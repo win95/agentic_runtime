@@ -231,6 +231,29 @@ class PermissionRequest(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=_utcnow)
 
 
+class SessionGuestScope(Base):
+    """One guest per hotel session (Layer 1 data scope).
+
+    A session is one guest's conversation: the first guest the session
+    touches binds the session to that ``guest_id`` (see
+    ``app/services/session_scope_service.py``). Later guest/booking
+    calls in the same session must name the same guest — the guest
+    scope wrapper in ``runtime/tools/registry.py`` enforces it, and
+    ``validate_results`` fails runs whose evidence names another guest.
+    """
+
+    __tablename__ = "session_guest_scopes"
+
+    session_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    guest_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    guest_phone: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    mission_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_utcnow, onupdate=_utcnow
+    )
+
+
 class SessionSandbox(Base):
     """One OpenSandbox sandbox per session (docs/sandbox.md).
 

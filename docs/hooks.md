@@ -27,14 +27,15 @@ chính thức nằm trong trang nghiên cứu Hooks v2 đã gửi tran.
 | `Stop` | `HookMiddleware.after_model` + `@hook_config(can_jump_to=["model"])` | `runtime/mission_graph.py` (deep_agent_node) + agent loop: agent muốn dừng mà chưa gọi tool nào thì bị buộc chạy thêm 1 turn (nudge HumanMessage + `jump_to="model"`), tối đa `stop_max_continues` (mặc định 3, cấu hình theo mission). Đã kiểm chứng qua graph thật với fake model (33 test). |
 | `SubagentStart` / `SubagentStop` | Đã định nghĩa event, **chưa nối dây** | Không tác dụng — chưa có subagent nào (chỉ 1 deep agent). Khi thêm subagent thì nối vào đây. |
 
-## 10 hook built-in (`runtime/hooks/builtin.py`)
+## 11 hook built-in (`runtime/hooks/builtin.py`)
 
 | Tên | Event | Tác dụng |
 |---|---|---|
 | `audit` | SessionStart, SessionEnd, Notification, SubagentStart, SubagentStop | Chỉ ghi log. Không đổi hành vi. |
+| `enforce_layer` | PreToolUse | L2 (2026-11-13): cổng chặn theo tầng lúc gọi tool — deny khi tool không có trong registry, capability không thuộc mission, hoặc tool ghi (`read_only=False`) không nằm trong `allowed_tools` đã pin. Tool đọc không bao giờ bị deny ở đây (đọc mở, dữ liệu chặn theo phạm vi). Built-in deepagents được bỏ qua (do `deny_builtin_tools` / sandbox quản). |
 | `block_dangerous_tool_call` | PreToolUse | Chặn tool call có pattern phá hoại trong args. |
-| `guard_destructive_target` | PreToolUse | Chặn `delete_mission` / `cancel_execution` khi id đích không xuất hiện nguyên văn trong execution input. |
-| `request_permission` | PreToolUse | Human approval (Option C): chặn `delete_mission` / `cancel_execution` cho tới khi người duyệt qua API `/permissions` (approve → chạy lại execution gốc; deny → không chạy lại). Fail-closed: lỗi đọc approval store cũng deny. |
+| `guard_destructive_target` | PreToolUse | Chặn `delete_mission` / `cancel_execution` / `save_mission` (overwrite) khi id đích không xuất hiện nguyên văn trong execution input. |
+| `request_permission` | PreToolUse | Human approval (Option C): chặn `delete_mission` / `cancel_execution` / `save_mission` cho tới khi người duyệt qua API `/permissions` (approve → chạy lại execution gốc; deny → không chạy lại). Fail-closed: lỗi đọc approval store cũng deny. `dispatch_execution` không nằm trong diện này (tạo execution, đã audit + `allowed_tools`-gated). |
 | `deny_builtin_tools` | PreToolUse | Part 1: chặn 8 tool built-in của deepagents (`ls`, `read_file`, `write_file`, `edit_file`, `delete`, `glob`, `grep`, `task`) + `execute` — chỉ mission `hotel_reception` (gate theo `mission_id` trong hook, vì mission không khai báo `hooks:` sẽ chạy mọi built-in; `fault_analysis` giữ `execute` trong sandbox theo thiết kế). Thông báo deny hướng model dùng tool MCP thay thế. |
 | `injection_feedback` | PostToolUse | Báo agent khi tool output chứa text giống chỉ thị. |
 | `tool_error_feedback` | PostToolUseFailure | Nhắc agent báo lỗi thay vì bịa dữ liệu. |

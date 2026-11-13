@@ -229,6 +229,7 @@ def deep_agent_node(state: MissionState) -> dict:
         "capabilities": mission.get("capabilities") or [],
         "input": input_data,
         "execution_config": mission.get("execution") or {},
+        "session_id": state.get("session_id") or "",
     }
     try:
         from runtime.deep_agent import (
@@ -443,6 +444,9 @@ def deep_agent_node(state: MissionState) -> dict:
             max_continues=int(
                 (mission.get("execution") or {}).get("stop_max_continues", 3)
             ),
+            session_id=state.get("session_id") or "",
+            allowed_tools=list(context.get("allowed_tools") or []),
+            capabilities=list(context.get("capabilities") or []),
         )
         # Part 1 (b): the per-run middleware list. For missions that
         # must not see any built-in tool (hotel only), append the
@@ -897,6 +901,12 @@ def validate_results(state: MissionState) -> dict:
       mission's capabilities allow.
     - detection: evidence/root-cause text matching instruction-like
       patterns (Layer 6) is flagged with the matched signal.
+
+    Layer 3 (tran 2026-11-13) FAILS the run instead of flagging: when
+    collected evidence names data outside the execution's scope — an
+    asset_id other than the input's, or a guest other than the
+    session's bound guest — the run is FAILED. Reads stay open, but
+    out-of-scope data must not reach the result.
     """
     errors = list(state.get("errors") or [])
     evidence = state.get("evidence") or []
@@ -956,6 +966,32 @@ def validate_results(state: MissionState) -> dict:
             }
             if flag not in flags:
                 flags.append(flag)
+    # Layer 3: out-of-scope evidence FAILS the run (tran 2026-11-13).
+    # Only the evidence *data* is checked, never the prose answer.
+    # A missing scope key means "no check" (hotel has no asset_id;
+    # a session with no bound guest has no guest check).
+    scope_asset = (state.get("input") or {}).get("asset_id")
+    scope_guest = None
+    session_id = state.get("session_id") or ""
+    if session_id:
+        try:
+            from runtime.scope import get_bound_guest_id
+
+            scope_guest = get_bound_guest_id(session_id)
+        except Exception:  # noqa: BLE001 — no binding means no guest check
+            scope_guest = None
+    try:
+        from runtime.scope import scope_violations_in_evidence
+
+        violations = scope_violations_in_evidence(evidence, scope_asset, scope_guest)
+    except Exception:  # noqa: BLE001 — the scope check never breaks validation
+        violations = []
+    for violation in violations:
+        flags.append(violation)
+        errors.append(
+            f"Evidence outside execution scope: {violation['type']} "
+            f"({violation.get('asset_id') or violation.get('guest_id')})"
+        )
     if flags:
         result["validation_flags"] = flags
     if errors:

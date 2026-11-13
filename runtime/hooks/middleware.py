@@ -68,6 +68,9 @@ class HookMiddleware(AgentMiddleware):
         input_data: dict | None = None,
         evidence_count: int = 0,
         max_continues: int = 3,
+        session_id: str = "",
+        allowed_tools: list | None = None,
+        capabilities: list | None = None,
     ):
         self.registry = registry
         self.execution_id = execution_id
@@ -78,6 +81,9 @@ class HookMiddleware(AgentMiddleware):
         self.input_data = input_data or {}
         self.evidence_count = evidence_count
         self.max_continues = max_continues
+        self.session_id = session_id
+        self.allowed_tools = list(allowed_tools or [])
+        self.capabilities = list(capabilities or [])
         self.tool_calls_made = 0
         self.continues = 0
         self.trimmed_messages = 0
@@ -93,6 +99,9 @@ class HookMiddleware(AgentMiddleware):
             agent_id=self.agent_id,
             mission=self.mission,
             input=self.input_data,
+            session_id=self.session_id,
+            allowed_tools=list(self.allowed_tools),
+            capabilities=list(self.capabilities),
         )
 
     def _record(self, event: HookEvent, decisions, **extra) -> None:

@@ -96,6 +96,29 @@ tools.extend(load_mcp_tools())                  # KHÔNG lọc gì cả
   tool (tool-description poisoning).
 - `load_mcp_tools()` cũng không phân biệt tool đọc/ghi.
 
+### Chặn theo tầng (2026-11-13 — thay cho chặn theo tool)
+
+Không chặn theo tên tool, vì agent sẽ thiếu dữ liệu để xây context.
+Chặn theo tầng, đọc mở, ghi chặn, dữ liệu chặn theo phạm vi:
+
+- **L0 Input/scope** — phạm vi execution cố định một lần trong context:
+  `asset_id` (fault), guest = session (hotel, bảng
+  `session_guest_scopes`), tenant (hiện hardcode `"default"`).
+- **L1 Đọc** — tool `read_only=True` chỉ cần capability khớp là được
+  liệt kê (`check()` không còn chặn tool đọc bằng `allowed_tools`).
+  Dữ liệu mới là thứ bị chặn: asset wrapper từ chối `asset_id` ngoài
+  phạm vi; guest wrapper bind session vào khách đầu tiên chạm tới và
+  từ chối / giấu dữ liệu của khách khác (`find_guest` lọc, `get_booking`
+  giấu, `create/cancel/change_booking` từ chối trước khi ghi).
+- **L2 Ghi** — hook `enforce_layer` (PreToolUse) kiểm tra lại lúc gọi
+  tool: capability, và tool ghi phải nằm trong `allowed_tools` đã pin.
+  Admin ghi phá hoại (`delete_mission`, `cancel_execution`,
+  `save_mission` overwrite) còn qua human approval (Option C).
+  Ghi của hotel giữ nguyên (auto-allow trong scope của session).
+- **L3 Xuất** — `validate_results` FAIL run khi evidence chứa dữ liệu
+  ngoài phạm vi (asset khác, khách khác), không chỉ flag như Layer 5.
+  Chỉ kiểm tra evidence data, không quét câu trả lời.
+
 ### 2.5. Không có giới hạn vòng lặp và không kiểm chứng đầu ra
 
 - `build_deep_agent()` không đặt `max_iterations`, `recursion_limit` hay
