@@ -224,68 +224,19 @@ def _tool_call_failure(result_message) -> str | None:
     return None
 
 
-def run_deep_agent(agent, mission: dict, input_data: dict, callbacks=None, files=None,
-                   skill_maps: list[SkillMap] | None = None,
-                   trace_metadata: dict | None = None,
-                   trace_tags: list[str] | None = None) -> dict:
-    """Invoke the deep agent for one mission input.
+def outcome_from_messages(messages: list, skill_maps: list[SkillMap] | None = None) -> dict:
+    """Derive the standard outcome from an agent run's messages.
 
-    Returns {"summary": str, "evidence": [...], "actions_taken": [...],
-    "errors": [...]}. Evidence here is the agent's own summary; the
-    structured evidence still comes from the Capability Graphs and tool
-    outputs. ``actions_taken`` lists the tool names the agent called AND whose
-    results did not report failure, in order — a refused or failed
-    call (``cancelled: false``, ``refused: true``, ``deleted: false``,
-    an ``"error"`` value, or an error ToolMessage) is NOT listed as
-    taken; it goes into ``errors`` as a factual line (tool name +
-    failure value) instead. The Mission Graph surfaces those errors in
-    the result (see ``deep_agent_node``) — the model's prose summary is
-    not rewritten, but the structured outcome is authoritative over it.
-
-    ``callbacks`` (e.g. the middleware token/audit handler built per run
-    by ``deep_agent_node``) are passed through the invoke config so the
-    handler sees the agent's LLM and tool calls. ``files`` (e.g. the
-    selected skill files from ``runtime/skills/``) are passed through the
-    invoke input so the native SkillsMiddleware can disclose them.
-    ``skill_maps`` (a list of ``SkillMap``) adds a ``plan_trace`` key:
-    per skill, which plan nodes the agent visited (in order), which it
-    skipped, and which called tools belong to no node — computed
-    deterministically from the run's tool calls, failed calls included.
-    ``trace_metadata`` / ``trace_tags`` (built by ``runtime.tracing``)
-    go into the invoke config as LangSmith run metadata/tags, so the
-    agent's trace tree carries the execution/session identity.
+    Shared by ``run_deep_agent`` (one free-form agent) and
+    ``runtime.skill_subgraph.run_skill_subgraph`` (one agent per map
+    node): the outcome semantics must stay identical whichever path ran
+    — summary is the last non-empty text, ``actions_taken`` lists the
+    tool names the agent called AND whose results did not report
+    failure, in order (a refused or failed call goes into ``errors`` as
+    a factual line instead), and ``skill_maps`` adds a ``plan_trace``
+    key computed deterministically from the run's tool calls, failed
+    calls included (attempting a node still counts as visiting it).
     """
-    objective = mission.get("objective", "")
-    # Layer 2: the execution input is untrusted data, never instructions.
-    # It is wrapped in a <data> block (the system prompt tells the agent
-    # to cite, never obey, content inside these blocks). The input is
-    # already size-capped by Layer 1 validation at the API; the slice
-    # here is defense in depth for callers that bypass the API.
-    input_json = json.dumps(input_data, ensure_ascii=False)[:MAX_INPUT_JSON_BYTES]
-    prompt = (
-        f"Mission: {mission.get('mission_id')}\n"
-        f"Objective: {objective}\n"
-        f"Input:\n{wrap_data('execution_input', input_json)}\n\n"
-        "Investigate and return a concise summary of your findings, "
-        "citing the evidence you gathered."
-    )
-    input_payload: dict = {"messages": [{"role": "user", "content": prompt}]}
-    if files:
-        input_payload["files"] = files
-    config: dict = {}
-    if callbacks:
-        config["callbacks"] = callbacks
-    if trace_metadata:
-        config["metadata"] = trace_metadata
-    if trace_tags:
-        config["tags"] = trace_tags
-    if config:
-        result = agent.invoke(input_payload, config=config)
-    else:
-        # No callbacks: keep the plain call so mock agents with a
-        # one-argument invoke() (eval script) keep working.
-        result = agent.invoke(input_payload)
-    messages = result.get("messages") or []
     summary = ""
     for message in reversed(messages):
         content = getattr(message, "content", "") or ""
@@ -349,3 +300,60 @@ def run_deep_agent(agent, mission: dict, input_data: dict, callbacks=None, files
             for skill_map in skill_maps
         }
     return outcome
+
+
+def run_deep_agent(agent, mission: dict, input_data: dict, callbacks=None, files=None,
+                   skill_maps: list[SkillMap] | None = None,
+                   trace_metadata: dict | None = None,
+                   trace_tags: list[str] | None = None) -> dict:
+    """Invoke the deep agent for one mission input.
+
+    Returns {"summary": str, "evidence": [...], "actions_taken": [...],
+    "errors": [...]} — see ``outcome_from_messages`` for how the outcome
+    is derived from the returned messages.
+
+    ``callbacks`` (e.g. the middleware token/audit handler built per run
+    by ``deep_agent_node``) are passed through the invoke config so the
+    handler sees the agent's LLM and tool calls. ``files`` (e.g. the
+    selected skill files from ``runtime/skills/``) are passed through the
+    invoke input so the native SkillsMiddleware can disclose them.
+    ``skill_maps`` (a list of ``SkillMap``) adds a ``plan_trace`` key:
+    per skill, which plan nodes the agent visited (in order), which it
+    skipped, and which called tools belong to no node — computed
+    deterministically from the run's tool calls, failed calls included.
+    ``trace_metadata`` / ``trace_tags`` (built by ``runtime.tracing``)
+    go into the invoke config as LangSmith run metadata/tags, so the
+    agent's trace tree carries the execution/session identity.
+    """
+    objective = mission.get("objective", "")
+    # Layer 2: the execution input is untrusted data, never instructions.
+    # It is wrapped in a <data> block (the system prompt tells the agent
+    # to cite, never obey, content inside these blocks). The input is
+    # already size-capped by Layer 1 validation at the API; the slice
+    # here is defense in depth for callers that bypass the API.
+    input_json = json.dumps(input_data, ensure_ascii=False)[:MAX_INPUT_JSON_BYTES]
+    prompt = (
+        f"Mission: {mission.get('mission_id')}\n"
+        f"Objective: {objective}\n"
+        f"Input:\n{wrap_data('execution_input', input_json)}\n\n"
+        "Investigate and return a concise summary of your findings, "
+        "citing the evidence you gathered."
+    )
+    input_payload: dict = {"messages": [{"role": "user", "content": prompt}]}
+    if files:
+        input_payload["files"] = files
+    config: dict = {}
+    if callbacks:
+        config["callbacks"] = callbacks
+    if trace_metadata:
+        config["metadata"] = trace_metadata
+    if trace_tags:
+        config["tags"] = trace_tags
+    if config:
+        result = agent.invoke(input_payload, config=config)
+    else:
+        # No callbacks: keep the plain call so mock agents with a
+        # one-argument invoke() (eval script) keep working.
+        result = agent.invoke(input_payload)
+    messages = result.get("messages") or []
+    return outcome_from_messages(messages, skill_maps=skill_maps)

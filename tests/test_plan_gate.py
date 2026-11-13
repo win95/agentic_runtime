@@ -13,7 +13,7 @@ from langchain.agents.middleware import ToolCallRequest
 from langchain_core.messages import ToolMessage
 
 from app.services import mission_service
-from runtime import deep_agent as deep_agent_module
+from runtime import skill_subgraph as skill_subgraph_module
 from runtime.mission_graph import run_mission
 from runtime.plan_gate import MAX_DENIALS, PlanGate, PlanGateExceededError, plan_gate
 from runtime.skills.map_plan import parse_skill_map, render_plan
@@ -197,22 +197,23 @@ def test_render_plan_enforced_header():
     assert "ENFORCED" not in advisory
 
 
-def test_deep_agent_node_adds_plan_gate_for_hotel(db_session, monkeypatch):
-    """The Mission Graph appends exactly one PlanGate for hotel_reception,
-    after the hook middleware and the built-in exclusion."""
+def test_deep_agent_node_does_not_attach_plan_gate_for_hotel(db_session, monkeypatch):
+    """hotel_reception runs the subgraph, not one free-form agent — so
+    the node does NOT attach a PlanGate for it: the gate and the subgraph
+    are two enforcement mechanisms for the same map, and a run uses one.
+    The gate stays available for missions still on the free-form path."""
     load_missions.main()
     mission = mission_service.get_mission(db_session, "hotel_reception")
     mission_dict = mission_service.mission_to_dict(mission)
 
     seen: dict = {}
 
-    def fake_build_deep_agent(tools, system_prompt=None, skills=None, model_config=None,
-                              middleware=None, backend=None):
-        seen["middleware"] = list(middleware or [])
+    def fake_build_subgraph(skill_map, tools, system_prompt=None, **kwargs):
+        seen["middleware"] = list(kwargs.get("middleware") or [])
         seen["system_prompt"] = system_prompt or ""
         return object()
 
-    def fake_run_deep_agent(agent, mission_arg, input_data, callbacks=None, files=None):
+    def fake_run_subgraph(compiled, mission_arg, input_data, **kwargs):
         return {
             "summary": "ok",
             "evidence": [{
@@ -223,14 +224,14 @@ def test_deep_agent_node_adds_plan_gate_for_hotel(db_session, monkeypatch):
             "errors": [],
         }
 
-    monkeypatch.setattr(deep_agent_module, "build_deep_agent", fake_build_deep_agent)
-    monkeypatch.setattr(deep_agent_module, "run_deep_agent", fake_run_deep_agent)
+    monkeypatch.setattr(
+        skill_subgraph_module, "build_skill_subgraph", fake_build_subgraph)
+    monkeypatch.setattr(
+        skill_subgraph_module, "run_skill_subgraph", fake_run_subgraph)
 
     final = run_mission(mission_dict, {"message": "hi"}, "exec_hotel_gate_wiring")
     assert final["status"] == "SUCCEEDED", f"errors: {final.get('errors')}"
     middleware = seen.get("middleware") or []
-    gates = [m for m in middleware if type(m).__name__ == "PlanGate"]
-    assert len(gates) == 1
-    assert gates[0].mission_id == "hotel_reception"
-    # The rendered plan tells the model the gate is enforced.
-    assert "ENFORCED" in seen["system_prompt"]
+    assert not any(type(m).__name__ == "PlanGate" for m in middleware)
+    # The map is compiled, not rendered as prose.
+    assert "ENFORCED" not in seen["system_prompt"]

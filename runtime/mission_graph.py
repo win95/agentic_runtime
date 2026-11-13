@@ -353,19 +353,25 @@ def deep_agent_node(state: MissionState) -> dict:
         mapped_skills = [
             s for s in (selected_skills or []) if getattr(s, "map", None) is not None
         ]
-        # Phase 3a — the plan gate: for missions in PLAN_GATE_MISSIONS
-        # (hotel only, pilot) the skill map becomes the tool allowlist
-        # enforced at the call boundary (runtime/plan_gate.py). The gate
-        # is built here, before the plan is rendered, so the plan text
-        # can say whether it is enforced — advisory text + a hard gate
-        # is incoherent (the task-scenario diagnosis, 2026-11-12).
-        from runtime.plan_gate import plan_gate
+        # Phase 3 — the skill subgraph is the new architecture's core:
+        # for pilot missions the map is COMPILED into a LangGraph (one
+        # agent per map node, code-owned routing) instead of running one
+        # free-form agent with the map as prose. The plan gate (Phase
+        # 3a) is the enforcement mechanism for missions still on the
+        # free-form path — a run uses ONE of the two, never both, so the
+        # gate is built only when the subgraph does not run.
+        from runtime.skill_subgraph import use_skill_subgraph
 
-        plan_gate_mw = plan_gate(
-            [s.map for s in mapped_skills],
-            state.get("mission_id"),
-            execution_id=state.get("execution_id") or "",
-        )
+        use_subgraph = use_skill_subgraph(state.get("mission_id"), mapped_skills)
+        plan_gate_mw = None
+        if not use_subgraph:
+            from runtime.plan_gate import plan_gate
+
+            plan_gate_mw = plan_gate(
+                [s.map for s in mapped_skills],
+                state.get("mission_id"),
+                execution_id=state.get("execution_id") or "",
+            )
         plan_block = (
             "\n\n".join(
                 render_plan(s.map, enforced=plan_gate_mw is not None)
@@ -491,7 +497,12 @@ def deep_agent_node(state: MissionState) -> dict:
         # The fixed prefix measured against the system-prompt budget —
         # set in each branch below, BEFORE the history block is
         # appended (history is charged to the history bucket, not here).
+        # The base prompt + model config are selected once, shared by
+        # the free-form agent and the subgraph pilot (which takes the
+        # base prompt WITHOUT the plan block — the map is compiled, not
+        # prose — and reads the session history from the graph state).
         prompt_for_budget = ""
+        version_cfg = None
         if agent_version is not None:
             # Option C: the pinned prompt + model/temperature run the agent.
             # The config (not a built model) is passed down so the model
@@ -502,117 +513,164 @@ def deep_agent_node(state: MissionState) -> dict:
                 "llm_model": agent_version.model,
                 "llm_temperature": agent_version.temperature,
             })
-            system_prompt_text = agent_version.prompt_text
-            if plan_block:
-                system_prompt_text = system_prompt_text + "\n\n" + plan_block
-            prompt_for_budget = system_prompt_text
-            if history_block:
-                system_prompt_text = system_prompt_text + "\n\n" + history_block
-            agent = build_deep_agent(
-                tools,
-                system_prompt=system_prompt_text,
-                skills=skill_sources,
-                model_config=version_cfg,
-                middleware=middleware,
-                backend=sandbox_backend,
-            )
+            base_prompt_text = agent_version.prompt_text
         elif (mission.get("agent_id") or "") == "admin_bot":
             from runtime.deep_agent import ADMIN_SYSTEM_PROMPT
 
             # No-version fallback: the code constant (a copy of the YAML
             # seed text) runs — the runtime never looks up MLflow for
             # prompts (docs/agent-versioning.md).
-            system_prompt_text = ADMIN_SYSTEM_PROMPT
-            if plan_block:
-                system_prompt_text = system_prompt_text + "\n\n" + plan_block
-            prompt_for_budget = system_prompt_text
-            if history_block:
-                system_prompt_text = system_prompt_text + "\n\n" + history_block
-            agent = build_deep_agent(
-                tools,
-                system_prompt=system_prompt_text,
-                skills=skill_sources,
-                middleware=middleware,
-                backend=sandbox_backend,
-            )
+            base_prompt_text = ADMIN_SYSTEM_PROMPT
         else:
             from runtime.deep_agent import DEFAULT_SYSTEM_PROMPT
 
             # No-version fallback: the code constant (a copy of the YAML
             # seed text) runs — the runtime never looks up MLflow for
             # prompts (docs/agent-versioning.md).
-            system_prompt_text = DEFAULT_SYSTEM_PROMPT
-            if plan_block:
-                system_prompt_text = system_prompt_text + "\n\n" + plan_block
-            prompt_for_budget = system_prompt_text
-            if history_block:
-                system_prompt_text = system_prompt_text + "\n\n" + history_block
-            agent = build_deep_agent(
-                tools,
-                system_prompt=system_prompt_text,
-                skills=skill_sources,
-                middleware=middleware,
-                backend=sandbox_backend,
-            )
-        # Context budget (Phương án A): measure the fixed prefix —
-        # system prompt, tool definitions, selected skill texts —
-        # against its buckets. Advisory only: an overrun is logged and
-        # noted on the execution; the run still proceeds (these are
-        # pinned config, not run data). The session-history block is
-        # measured against its own budget at render time and is NOT
-        # part of this check (prompt_for_budget excludes it).
-        from runtime.context_budget import check_prefix_budgets
-
-        tools_text = "".join(
-            getattr(t, "name", "")
-            + (getattr(t, "description", "") or "")
-            + json.dumps(getattr(t, "args", {}) or {}, default=str)
-            for t in tools
-        )
-        skills_text = "".join(s.raw for s in (selected_skills or []))
-        prefix_overruns = check_prefix_budgets(
-            prompt_for_budget, tools_text, skills_text
-        )
-        for overrun in prefix_overruns:
-            logger.warning("Context budget overrun: %s", overrun)
-        run_kwargs: dict = {"callbacks": [handler], "files": skill_files}
-        if mapped_skills:
-            run_kwargs["skill_maps"] = [s.map for s in mapped_skills]
+            base_prompt_text = DEFAULT_SYSTEM_PROMPT
         # Tracing (docs/sessions.md): the execution/session identity rides
-        # in the LangSmith config of the agent invoke.
+        # in the LangSmith config of the agent invoke (free-form) or the
+        # subgraph invoke (pilot) — built once, used by either path.
         from runtime.tracing import build_run_metadata, build_run_tags
 
-        run_kwargs["trace_metadata"] = build_run_metadata(
+        trace_metadata = build_run_metadata(
             state.get("execution_id") or "",
             state.get("mission_id") or "",
             mission.get("agent_id") or None,
             state.get("session_id"),
         )
-        run_kwargs["trace_tags"] = build_run_tags(
+        trace_tags = build_run_tags(
             state.get("mission_id") or "",
             mission.get("agent_id") or None,
             state.get("session_id"),
         )
-        # Doubles predating skill_maps / trace kwargs (older tests, eval
-        # mocks) don't accept them — retry without each unknown kwarg;
-        # the run proceeds, just without a plan trace / trace metadata.
-        # Any other TypeError is a real bug and is re-raised. Each retry
-        # strips at least one kwarg, so the loop always terminates.
-        while True:
-            try:
-                outcome = run_deep_agent(agent, mission, input_data, **run_kwargs)
-                break
-            except TypeError as exc:
-                msg = str(exc)
-                if "unexpected keyword argument 'skill_maps'" in msg:
-                    run_kwargs.pop("skill_maps", None)
-                elif "unexpected keyword argument 'trace_metadata'" in msg:
-                    run_kwargs.pop("trace_metadata", None)
-                    run_kwargs.pop("trace_tags", None)
-                elif "unexpected keyword argument 'trace_tags'" in msg:
-                    run_kwargs.pop("trace_tags", None)
-                else:
-                    raise
+        if use_subgraph:
+            # Phase 3: compile the first mapped skill's map into a
+            # subgraph and run it instead of one free-form agent. The
+            # node agents carry the hook middleware + built-in exclusion
+            # (the plan gate is not attached — the subgraph IS the
+            # enforcement). The context-budget prefix check is skipped
+            # here: the per-node prompts are smaller than the free-form
+            # prefix it measures, and the check is advisory.
+            from runtime.skill_subgraph import build_skill_subgraph, run_skill_subgraph
+
+            prompt_for_budget = base_prompt_text
+            prefix_overruns = []
+            subgraph = build_skill_subgraph(
+                mapped_skills[0].map,
+                tools,
+                base_prompt_text,
+                model_config=version_cfg,
+                middleware=middleware,
+                backend=sandbox_backend,
+                skills=skill_sources,
+                files=skill_files,
+                callbacks=[handler],
+                trace_metadata=trace_metadata,
+                trace_tags=trace_tags,
+                # Confirmation-turn rule: from the start node, the
+                # guest's confirmation may resume straight at
+                # create-booking when the session has prior turns
+                # (see runtime/skill_subgraph.py).
+                resume_nodes=frozenset({"create-booking"}),
+            )
+            outcome = run_skill_subgraph(
+                subgraph, mission, input_data,
+                session_history=_history, history_block=history_block,
+                skill_maps=[s.map for s in mapped_skills],
+                trace_metadata=trace_metadata,
+                trace_tags=trace_tags,
+            )
+        else:
+            if agent_version is not None:
+                system_prompt_text = base_prompt_text
+                if plan_block:
+                    system_prompt_text = system_prompt_text + "\n\n" + plan_block
+                prompt_for_budget = system_prompt_text
+                if history_block:
+                    system_prompt_text = system_prompt_text + "\n\n" + history_block
+                agent = build_deep_agent(
+                    tools,
+                    system_prompt=system_prompt_text,
+                    skills=skill_sources,
+                    model_config=version_cfg,
+                    middleware=middleware,
+                    backend=sandbox_backend,
+                )
+            elif (mission.get("agent_id") or "") == "admin_bot":
+                system_prompt_text = base_prompt_text
+                if plan_block:
+                    system_prompt_text = system_prompt_text + "\n\n" + plan_block
+                prompt_for_budget = system_prompt_text
+                if history_block:
+                    system_prompt_text = system_prompt_text + "\n\n" + history_block
+                agent = build_deep_agent(
+                    tools,
+                    system_prompt=system_prompt_text,
+                    skills=skill_sources,
+                    middleware=middleware,
+                    backend=sandbox_backend,
+                )
+            else:
+                system_prompt_text = base_prompt_text
+                if plan_block:
+                    system_prompt_text = system_prompt_text + "\n\n" + plan_block
+                prompt_for_budget = system_prompt_text
+                if history_block:
+                    system_prompt_text = system_prompt_text + "\n\n" + history_block
+                agent = build_deep_agent(
+                    tools,
+                    system_prompt=system_prompt_text,
+                    skills=skill_sources,
+                    middleware=middleware,
+                    backend=sandbox_backend,
+                )
+            # Context budget (Phương án A): measure the fixed prefix —
+            # system prompt, tool definitions, selected skill texts —
+            # against its buckets. Advisory only: an overrun is logged and
+            # noted on the execution; the run still proceeds (these are
+            # pinned config, not run data). The session-history block is
+            # measured against its own budget at render time and is NOT
+            # part of this check (prompt_for_budget excludes it).
+            from runtime.context_budget import check_prefix_budgets
+
+            tools_text = "".join(
+                getattr(t, "name", "")
+                + (getattr(t, "description", "") or "")
+                + json.dumps(getattr(t, "args", {}) or {}, default=str)
+                for t in tools
+            )
+            skills_text = "".join(s.raw for s in (selected_skills or []))
+            prefix_overruns = check_prefix_budgets(
+                prompt_for_budget, tools_text, skills_text
+            )
+            for overrun in prefix_overruns:
+                logger.warning("Context budget overrun: %s", overrun)
+            run_kwargs: dict = {"callbacks": [handler], "files": skill_files}
+            if mapped_skills:
+                run_kwargs["skill_maps"] = [s.map for s in mapped_skills]
+            run_kwargs["trace_metadata"] = trace_metadata
+            run_kwargs["trace_tags"] = trace_tags
+            # Doubles predating skill_maps / trace kwargs (older tests, eval
+            # mocks) don't accept them — retry without each unknown kwarg;
+            # the run proceeds, just without a plan trace / trace metadata.
+            # Any other TypeError is a real bug and is re-raised. Each retry
+            # strips at least one kwarg, so the loop always terminates.
+            while True:
+                try:
+                    outcome = run_deep_agent(agent, mission, input_data, **run_kwargs)
+                    break
+                except TypeError as exc:
+                    msg = str(exc)
+                    if "unexpected keyword argument 'skill_maps'" in msg:
+                        run_kwargs.pop("skill_maps", None)
+                    elif "unexpected keyword argument 'trace_metadata'" in msg:
+                        run_kwargs.pop("trace_metadata", None)
+                        run_kwargs.pop("trace_tags", None)
+                    elif "unexpected keyword argument 'trace_tags'" in msg:
+                        run_kwargs.pop("trace_tags", None)
+                    else:
+                        raise
         notes = [f"Deep agent: {outcome.get('summary', '')}"] if outcome.get("summary") else []
         # Phase 3a: surface plan-gate denials in the execution notes, so
         # a run that had to be corrected is explainable from the result

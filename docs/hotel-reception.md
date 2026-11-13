@@ -90,13 +90,57 @@ map (tool chưa biết) nhưng giữ nguyên cấu trúc node — plan vẫn ren
 được. Khi server đã connect và process restart, tool được giữ lại và
 `plan_trace` tính đúng.
 
+## Skill subgraph — biên dịch map thành đồ thị (Phase 3)
+
+`runtime/skill_subgraph.py` biên dịch map của hotel thành một LangGraph
+con, chạy thay cho một agent tự do duy nhất (`deep_agent_node` chọn
+đường này khi mission thuộc `SUBGRAPH_PILOT_MISSIONS` và có skill map;
+hiện chỉ có `hotel_reception`).
+
+- **Một node map = một agent riêng.** Node có tool chạy một Deep Agent
+  chỉ có tool của node đó; node không có tool (`route`, `booking-dates`,
+  `confirm-booking`, `report-booking`, `task-details`) chạy một model
+  call thuần túy. Gọi tool ngoài thứ tự không phải bị từ chối — mà
+  không thể xảy ra, vì agent của node đó không có tool đó.
+- **Router là code, không phải model.** Sau mỗi node, router chọn node
+  tiếp theo từ bảng chuyển đổi của map: dòng `NEXT: <node-id>` do node
+  khai báo (kèm `NEXT: END` khi xong), kiểm chứng trong tập cho phép
+  (đích rẽ nhánh của node hiện tại + node tiếp theo theo thứ tự); khai
+  báo sai hoặc thiếu thì về node tiếp theo theo thứ tự. Nhánh rẽ của
+  node `route` luôn mở (phân loại lại).
+- **Luật resume (turn xác nhận):** từ node `route`, nhảy thẳng tới
+  `create-booking` chỉ được phép khi session đã có turn trước — turn
+  khách xác nhận tiếp nối turn trước đã dừng ở `confirm-booking`. Map
+  không có nhánh này, nên gate (và mọi run tự do) vẫn từ chối
+  `create_booking` gọi đầu tiên. Chỉ dẫn của node `route` nêu luật;
+  router là chốt chặn.
+- **Chống lặp:** tối đa 12 node mỗi run (`MAX_NODE_STEPS`); quá thì
+  run kết thúc với lỗi chẩn đoán thay vì xoay vòng (map cho phép lặp
+  theo thiết kế: hết phòng → chọn ngày khác → kiểm tra lại).
+- **Kết quả giống hệt agent tự do:** `run_skill_subgraph` trả cùng
+  shape outcome (`summary` / `evidence` / `actions_taken` / `errors` /
+  `plan_trace`, xem `outcome_from_messages` trong
+  `runtime/deep_agent.py`) cộng thêm `visited_nodes` (đường đi đầy đủ
+  của đồ thị — `plan_trace` chỉ thấy node có tool call).
+- **State là TypedDict** (`SubgraphState`): LangGraph chỉ giữ các key
+  schema khai báo — dùng `StateGraph(dict)` trần đã làm mất lặng lẽ
+  `session_history` sau node đầu tiên, khiến luật resume không bao giờ
+  kích hoạt (lỗi đã bắt được bằng test).
+- **Gate và subgraph không chạy cùng nhau:** khi subgraph chạy, plan
+  gate không gắn vào (không còn gì để nó từ chối) và plan block không
+  append vào prompt (map đã biên dịch, không còn là prose). Gate còn
+  lại làm cơ chế ép cho mission chưa lên subgraph.
+- **Chưa có:** trace 7 layer cho pilot (Phase 3 tiếp theo), judge LLM
+  (chưa chọn model), tách eval temp 0 / production 0.5 (Phase 4).
+
 ## Plan gate — ép thứ tự map ở runtime (Phase 3a)
 
 `runtime/plan_gate.py`: một `AgentMiddleware` xây từ `SkillMap` đã parse
 của run, gắn vào danh sách middleware của `deep_agent_node` ngay sau
-hook middleware và built-in exclusion. Chỉ áp dụng cho
-`PLAN_GATE_MISSIONS = {"hotel_reception"}` (thí điểm); `fault_analysis`
-giữ map tư vấn cho tới khi map data-access được kiểm chứng với gate.
+hook middleware và built-in exclusion. Chỉ áp dụng cho các mission chạy
+agent tự do (hiện không có mission nào: hotel đã lên subgraph;
+`fault_analysis` giữ map tư vấn) — cơ chế còn lại để dùng khi một
+mission chưa biên dịch map.
 
 - **Luật cho phép:** gọi tool của node hiện tại, node tool tiếp theo
   theo thứ tự, đích rẽ nhánh của node hiện tại, đích rẽ nhánh của node
@@ -119,8 +163,9 @@ giữ map tư vấn cho tới khi map data-access được kiểm chứng với 
   (node không có tool nên gate không quan sát được việc xác nhận).
 - **Chưa có:** điều kiện tiên quyết giữa các tool (ví dụ `create_task`
   bắt buộc đã `list_staff`) — allowlist đã ép đúng thứ tự đó cho luồng
-  task; quyết định từng rule (dependency dữ liệu / gate / bỏ) thuộc
-  Phase 3b. Subgraph biên dịch từ map cũng thuộc Phase 3b.
+  task; quyết định từng rule (dependency dữ liệu / gate / bỏ) vẫn mở.
+  Subgraph biên dịch từ map đã xong (mục trên) — gate chỉ còn là cơ
+  chế dự phòng cho mission chưa lên subgraph.
 
 ## Mock MCP server — chạy thử end-to-end
 

@@ -26,6 +26,7 @@ import scripts.mock_hotel_mcp_server as mock_server
 from app.config import settings
 from app.services import mission_service
 from runtime import deep_agent as deep_agent_module
+from runtime import skill_subgraph as skill_subgraph_module
 from runtime.mission_graph import run_mission
 from runtime.tools.registry import registry
 from seeds import load_missions
@@ -411,22 +412,35 @@ def test_hotel_run_end_to_end(db_session, mock_server_url, monkeypatch,
     # scripted fake model below is what actually answers, so dummy
     # values are never contacted. Patch build_chat_model (not only
     # get_chat_model): a versioned run builds the model from the pinned
-    # version via build_chat_model(model_config).
+    # version via build_chat_model(model_config) — and the subgraph's
+    # tool-less nodes build their plain model via
+    # runtime.skill_subgraph.build_chat_model, so patch that name too.
+    # The script is ordered for the subgraph flow: route -> booking-dates
+    # -> check-availability (tool call, then text) -> quote-price ->
+    # confirm-booking. The turn ends at confirm-booking: the router
+    # never falls through into create-booking on a fresh turn (the
+    # resume rule), so no booking is created here.
     monkeypatch.setattr(settings, "llm_api_base", "http://127.0.0.1:1")
     monkeypatch.setattr(settings, "llm_api_key", "test-key")
 
     model = _ScriptedModel(messages=iter([
+        AIMessage(content="Khách muốn đặt phòng Deluxe 20–22/12.\nNEXT: booking-dates"),
+        AIMessage(content="Đã đủ thông tin: Deluxe, 20–22/12, 2 người.\nNEXT: check-availability"),
         AIMessage(content="", tool_calls=[{
             "name": "check_room_availability",
             "args": {"check_in": "2026-12-20", "check_out": "2026-12-22",
                      "room_type": "deluxe"},
             "id": "call-1", "type": "tool_call",
         }]),
-        AIMessage(content="Phòng Deluxe còn trống, giá 2.000.000 VND/đêm."),
-        AIMessage(content="Phòng Deluxe còn trống, giá 2.000.000 VND/đêm."),
+        AIMessage(content="Phòng Deluxe còn trống.\nNEXT: quote-price"),
+        AIMessage(content="Giá Deluxe 2.000.000 VND/đêm.\nNEXT: confirm-booking"),
+        AIMessage(content="Tóm tắt: Deluxe 20–22/12, 2 người, 4.000.000 VND. "
+                          "Anh/chị xác nhận đặt phòng này nhé?"),
     ]))
     monkeypatch.setattr(deep_agent_module, "get_chat_model", lambda: model)
     monkeypatch.setattr(deep_agent_module, "build_chat_model",
+                        lambda cfg=None: model)
+    monkeypatch.setattr(skill_subgraph_module, "build_chat_model",
                         lambda cfg=None: model)
 
     final = run_mission(

@@ -20,6 +20,7 @@ from app.config import settings
 from app.services import agent_version_service as avs
 from app.services import mission_service
 from runtime import deep_agent as deep_agent_module
+from runtime import skill_subgraph as skill_subgraph_module
 from runtime.mission_graph import run_mission
 from runtime.skills import load_skills
 from runtime.skills.map_plan import parse_skill_map, render_plan
@@ -211,21 +212,21 @@ def test_hotel_agent_model_sees_no_builtin_tools(monkeypatch):
 
 
 def test_deep_agent_node_adds_builtin_exclusion_for_hotel(db_session, monkeypatch):
-    """The Mission Graph appends the built-in exclusion middleware for
-    hotel_reception (and only there) — the per-run middleware list is
-    where the decision lives, not in build_deep_agent's signature."""
+    """The Mission Graph passes the built-in exclusion middleware to the
+    hotel subgraph's node agents (and only there) — the per-run
+    middleware list is where the decision lives, not in
+    build_deep_agent's signature."""
     load_missions.main()
     mission = mission_service.get_mission(db_session, "hotel_reception")
     mission_dict = mission_service.mission_to_dict(mission)
 
     seen: dict = {}
 
-    def fake_build_deep_agent(tools, system_prompt=None, skills=None, model_config=None,
-                              middleware=None, backend=None):
-        seen["middleware"] = list(middleware or [])
+    def fake_build_subgraph(skill_map, tools, system_prompt=None, **kwargs):
+        seen["middleware"] = list(kwargs.get("middleware") or [])
         return object()
 
-    def fake_run_deep_agent(agent, mission_arg, input_data, callbacks=None, files=None):
+    def fake_run_subgraph(compiled, mission_arg, input_data, **kwargs):
         return {
             "summary": "ok",
             "evidence": [{
@@ -236,8 +237,10 @@ def test_deep_agent_node_adds_builtin_exclusion_for_hotel(db_session, monkeypatc
             "errors": [],
         }
 
-    monkeypatch.setattr(deep_agent_module, "build_deep_agent", fake_build_deep_agent)
-    monkeypatch.setattr(deep_agent_module, "run_deep_agent", fake_run_deep_agent)
+    monkeypatch.setattr(
+        skill_subgraph_module, "build_skill_subgraph", fake_build_subgraph)
+    monkeypatch.setattr(
+        skill_subgraph_module, "run_skill_subgraph", fake_run_subgraph)
 
     final = run_mission(mission_dict, {"message": "hi"}, "exec_hotel_wiring")
     assert final["status"] == "SUCCEEDED", f"errors: {final.get('errors')}"
