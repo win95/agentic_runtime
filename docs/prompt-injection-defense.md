@@ -244,7 +244,7 @@ Vị trí: `runtime/mission_graph.py` (`validate_results`), `runtime/report.py`.
 | --- | --- | --- | --- |
 | 1 | Validate & giới hạn input (Lớp 1) | Nhỏ | ✅ Đã làm (2026-11-10) |
 | 2 | Tách instruction/dữ liệu trong prompt (Lớp 2) | Nhỏ | ✅ Đã làm (2026-11-10) |
-| 3 | MCP qua registry check + nhãn đọc/ghi (Lớp 4) | Vừa | ✅ Đã làm (2026-11-10); HITL chưa làm |
+| 3 | MCP qua registry check + nhãn đọc/ghi (Lớp 4) | Vừa | ✅ Đã làm (2026-11-10); HITL đã làm (Option C, 2026-11-12) |
 | 4 | Vệ sinh output tool (Lớp 3) | Vừa | ✅ Đã làm (2026-11-10) |
 | 5 | Grounding check ở validate (Lớp 5) | Vừa | ✅ Đã làm (2026-11-10) |
 | 6 | Eval adversarial + phát hiện (Lớp 6) | Vừa | ✅ Đã làm (2026-11-10): `make eval-adversarial`, 14 case pass |

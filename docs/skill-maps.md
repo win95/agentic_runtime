@@ -8,6 +8,50 @@ tool calls. The context stays clean: only the plan ("how to do it") +
 tools are injected; data is fetched through tools when a node needs it,
 never stuffed in upfront.
 
+> **2026-11-13 — the map is now enforced by code, not just prose.**
+> For the pilot mission the map is compiled into a LangGraph subgraph;
+> for missions still on the free-form path a plan gate enforces the
+> order at the tool-call boundary. See [Enforcement](#enforcement-subgraph--plan-gate)
+> below. Option C's "deviate with reason" now applies only to missions
+> not yet on the subgraph.
+
+## Enforcement: subgraph + plan gate
+
+One run uses exactly one enforcement mechanism, chosen in
+`deep_agent_node` (`runtime/mission_graph.py`):
+
+- **Skill subgraph** (`runtime/skill_subgraph.py`, pilot:
+  `hotel_reception`). `build_skill_subgraph` compiles a `SkillMap`
+  into a LangGraph: one node per map node, each running its own Deep
+  Agent with **only that node's tools** (tool-less nodes run a plain
+  model call). The model ends each step with a `NEXT: <node-id>` line
+  and a **code router** validates it against the map (branch targets
+  of the current node + next node in list order + resume nodes); an
+  absent or invalid declaration falls back to next-in-order, never an
+  arbitrary jump. Resume nodes (e.g. `create-booking`) are enterable
+  only when the session already has prior turns — so a fresh turn
+  stops at the confirmation question and the guest's confirmation
+  turn resumes into the booking. Step cap: 12 node executions per run.
+  The subgraph path does **not** render the prose plan block and does
+  **not** attach the plan gate — the graph itself is the enforcement.
+  `run_skill_subgraph` returns the same outcome shape as
+  `run_deep_agent`, plus `visited_nodes` (the graph's full path;
+  `plan_trace` only sees nodes with tool calls).
+- **Plan gate** (`runtime/plan_gate.py`, `PLAN_GATE_MISSIONS =
+  {"hotel_reception"}` — currently no production mission attaches it,
+  since hotel moved to the subgraph). An `AgentMiddleware` built from
+  the run's parsed maps: it allows the current node's tools, the next
+  tool node in order, branch targets of the current node and of the
+  start node (re-route), and already-visited tool nodes; anything
+  else is denied with a ToolMessage naming the allowed next tools.
+  After 5 denials the run fails with `PlanGateExceededError`. Tools
+  in no map node are allowed with a warning (fail-open; map coverage
+  is enforced by test instead).
+
+The two mechanisms share the map schema and the `plan_trace`
+diagnostics below; the gate is the enforcement for missions still on
+the free-form path, the subgraph is the enforcement for the pilot.
+
 ## Map schema
 
 A map lives in the skill's frontmatter under `map:` (structured YAML,
@@ -51,12 +95,16 @@ Rules (`runtime/skills/map_plan.py`):
 
 1. `runtime/skills/loader.py` parses the map at skill-load time and
    attaches it as `skill.map`.
-2. `deep_agent_node` (`runtime/mission_graph.py`) renders the maps of
-   the selected skills (`render_plan`) and appends the plan block to
-   whichever system prompt runs (pinned AgentVersion prompt, admin
-   prompt, or default). The plan is skill-derived runtime context —
-   like the skill files themselves — not part of the pinned prompt
-   text. Skills without a map change nothing.
+2. On the **free-form path**, `deep_agent_node`
+   (`runtime/mission_graph.py`) renders the maps of the selected skills
+   (`render_plan`) and appends the plan block to whichever system
+   prompt runs (pinned AgentVersion prompt, admin prompt, or default).
+   The plan is skill-derived runtime context — like the skill files
+   themselves — not part of the pinned prompt text. Skills without a
+   map change nothing. With `enforced=True`, the header states the
+   plan gate refuses out-of-step calls; the default header keeps the
+   Option C "you may deviate" text. On the **subgraph path** no plan
+   block is rendered at all — the compiled graph carries the plan.
 3. The plan block states the contract: follow the plan; deviate only
    when the evidence justifies it and say why; report visited nodes
    and deviations at the end. The data-access pilot renders to ~370

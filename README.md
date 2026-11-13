@@ -16,8 +16,8 @@ tự hành, **Capability Graphs / Tools** cung cấp năng lực nghiệp vụ,
 | --- | ---------- | ------- |
 | 1 | **Platform API — FastAPI** (`app/`) | Quản lý Mission, Agent, Tool, Model, Policy và Execution API. Mission là **cấu hình**, không phải graph. |
 | 2 | **Execution Dispatcher — Celery + Redis** (`app/worker/`) | Nhận yêu cầu chạy Mission, đưa vào queue, worker chạy LangGraph. Tách vòng đời HTTP khỏi vòng đời Agent. |
-| 3 | **Agent Runtime — LangGraph** (`runtime/mission_graph.py`) | Một Mission Graph cho mỗi nhóm workflow: understand → router → capability / deep agent → validate → END. Hỗ trợ checkpoint Postgres (tùy chọn). |
-| 4 | **Autonomous Agent — Deep Agents** (`runtime/deep_agent.py`) | Lập kế hoạch, phân rã công việc, dùng subagents và tools. Nằm **bên trong** Mission Graph (Deep Agents build trên LangGraph, trả về compiled graph). |
+| 3 | **Agent Runtime — LangGraph** (`runtime/mission_graph.py`) | Một Mission Graph cho mỗi nhóm workflow: understand → router → capability / deep agent → validate → END. Hỗ trợ checkpoint Postgres (tùy chọn). Với mission thí điểm có skill map, bước Deep Agent được thay bằng **skill subgraph** biên dịch từ map (xem mục 2): một agent riêng cho mỗi node, router là code. |
+| 4 | **Autonomous Agent — Deep Agents** (`runtime/deep_agent.py`) | Lập kế hoạch, phân rã công việc, dùng subagents và tools. Nằm **bên trong** Mission Graph (Deep Agents build trên LangGraph, trả về compiled graph). Với mission có skill map, agent chạy dưới dạng subgraph (mỗi node một agent chỉ có tool của node đó); với mission chưa lên subgraph, một agent tự do chạy với map làm plan prose + **plan gate** ép thứ tự tool ở runtime (`runtime/plan_gate.py`). |
 | 5 | **Capability & Tool Layer** (`runtime/capabilities/`, `runtime/tools/`) | Capability = LangGraph subgraph tái sử dụng (vd: `fault_analysis`). Tool = hành động nhỏ Agent có thể gọi. Quyền thực tế kiểm tra ở runtime theo mission/tenant/execution. |
 | 6 | **Data & Observability** (`infra/`) | PostgreSQL, Redis, Qdrant, Neo4j, MinIO, MLflow, LangSmith (chỉ quan sát, không phải nơi lưu trạng thái). |
 
@@ -50,9 +50,19 @@ Ví dụ: *“Phân tích nguyên nhân các lỗi của thang máy O21 trong th
    (Postgres), bảo trì (Postgres), tìm tài liệu (RAG/Qdrant), quan hệ thiết bị
    (Neo4j), rồi tổng hợp evidence.
 5. **Deep Agent (nếu evidence chưa đủ)** — lập kế hoạch điều tra thêm, tự quyết
-   định gọi tools cho đến khi đủ evidence.
+   định gọi tools cho đến khi đủ evidence. Với mission có skill map
+   (thí điểm: `hotel_reception`), bước này chạy dưới dạng **skill
+   subgraph**: map được biên dịch thành LangGraph con — một agent riêng
+   cho mỗi node (chỉ có tool của node đó), router code quyết định node
+   tiếp theo từ dòng `NEXT:` do node khai báo; turn xác nhận resume
+   thẳng vào `create-booking` khi session đã có turn trước. Với mission
+   chưa lên subgraph, một agent tự do chạy với map làm plan prose và
+   **plan gate** (`runtime/plan_gate.py`) từ chối tool gọi ngoài thứ tự.
 6. **Validate kết quả** — kiểm tra đủ evidence, đúng output schema
    (`root_causes`, `evidence`, `recommendations`) và success criteria.
+   Suite manual (vd: hotel) chấm bằng **state verifier** trước
+   (`scripts/manual/verifiers.py`): trạng thái cuối + ý nghĩa câu trả
+   lời, không chấm từ khóa trên câu chữ.
 7. **Lưu kết quả** — PostgreSQL lưu kết quả và trạng thái; report Markdown lưu
    vào MinIO bucket `reports` tại `executions/<execution_id>/report.md`
    (nếu MinIO không tới được, report lưu inline trong ExecutionResult và ghi
@@ -63,11 +73,16 @@ Sơ đồ Mission Graph:
 ```
 START → Understand Mission → Router → Capability Graph → (Deep Agent) → Validate → END
                                       ↘ Deep Agent (autonomous) ↗
+                                         ↘ Skill Subgraph (pilot, map biên dịch) ↗
 ```
 
 Router chọn nhánh theo `mission.execution.mode`:
 `deterministic` → chỉ Capability Graph; `autonomous` → chỉ Deep Agent;
 `hybrid` → Capability Graph trước, Deep Agent chỉ khi evidence chưa đủ.
+Với mission thí điểm (`hotel_reception`), nhánh Deep Agent biên dịch
+skill map thành subgraph thay vì chạy một agent tự do — xem
+[`docs/skill-maps.md`](docs/skill-maps.md) và
+[`docs/hotel-reception.md`](docs/hotel-reception.md).
 
 ## 3. Chạy MVP (Docker Compose — khuyên dùng)
 
@@ -464,7 +479,9 @@ Xem đầy đủ trong `.env.example`. Các biến quan trọng:
 | Có cần tự xây Trace không? | Không, dùng MLflow 3.x làm observability chính (trace + eval + prompt); LangSmith giữ lại để debug dev |
 | Execution có cần state riêng không? | Có, mỗi execution có state riêng |
 | Có dùng Celery không? | Có, cho async dispatch |
-| Có cần conversation memory không? | Không, mỗi execution độc lập |
+| Có cần conversation memory không? | Có, theo session (Option B, 2026-11-11): `session_id` tùy chọn, agent đọc lại các turn trước của cùng agent + mission; không có session thì mỗi execution độc lập như trước |
+| Skill map được thực thi thế nào? | Hai cơ chế, một run chỉ dùng một: **subgraph** — biên dịch map thành LangGraph con, một agent riêng mỗi node (thí điểm: `hotel_reception`); **plan gate** — middleware từ chối tool gọi ngoài thứ tự, cho mission còn chạy agent tự do |
+| Eval chấm thế nào? | State verifier trước (trạng thái cuối + ý nghĩa), trajectory chỉ chẩn đoán, LLM judge chỉ cho phần code không chấm được (judge chưa chọn model) |
 
 ## 9. Cấu trúc thư mục
 
@@ -473,7 +490,9 @@ app/                  FastAPI platform (main, config, models, schemas, routers,
                       services, core/db + security, worker/celery_app + tasks)
 runtime/              LangGraph runtime: state, mission_graph, deep_agent,
                       llm_factory (LiteLLM), report (Markdown), prompts
-                      (MLflow Prompt Registry), capabilities/
+                      (MLflow Prompt Registry), plan_gate (ép thứ tự map),
+                      skill_subgraph (biên dịch map thành đồ thị),
+                      capabilities/
                       fault_analysis, tools/registry + fault_tools + admin_tools
                       + mcp_adapter, middleware/ (token + audit callbacks),
                       skills/ (skill loader: SKILL.md selection)
@@ -491,7 +510,9 @@ training/             Vòng đời fine-tune: common/ (schemas, dữ liệu tổ
                       retrieval), llm/ (train SFT + eval tool-use),
                       configs/, requirements-training.txt
 docs/                 security-cost-roadmap.md, prompt-injection-defense.md,
-                      fine-tuning-lifecycle.md
+                      agent-versioning.md, hooks.md, sessions.md,
+                      skill-maps.md, hotel-reception.md, ingest.md,
+                      ontology.md, sandbox.md, slack-notifications.md
 docker/mlflow/        Dockerfile cho MLflow 3.x server (genai extras)
 tests/                Pytest, không cần infra thật hay API key thật
 langgraph.json        Expose mission_graph cho `langgraph dev`
@@ -520,25 +541,13 @@ langgraph.json        Expose mission_graph cho `langgraph dev`
   ở môi trường build này, nên `docker compose up` và một execution LLM thật
   chưa được chạy — cần chạy `make demo` sau khi điền `.env`.
 
-## 11. Fine-tuning lifecycle (chuẩn bị — chưa train thật)
+## 11. Fine-tuning lifecycle — TẠM DỪNG (2026-11-09)
 
-Quy trình đầy đủ: [`docs/fine-tuning-lifecycle.md`](docs/fine-tuning-lifecycle.md).
-Scaffold: [`training/`](training/) (xem `training/README.md`).
-
-Ba track — embedding (retrieval Qdrant), LLM chính (Deep Agent), tool-use —
-chạy qua 6 giai đoạn: thu thập dữ liệu → chuẩn hóa dataset → train →
-eval offline (phải thắng baseline) → registry + deploy qua vLLM →
-giám sát + retrain. Hiện chưa có dữ liệu hoạt động thật nên scaffold
-chạy bằng dữ liệu tổng hợp (`source: "synthetic"`, 20 ví dụ/track) và
-hook thu thập để dữ liệu thật tích lũy dần.
-
-```bash
-make gen-synthetic-data   # sinh dữ liệu tổng hợp vào training/data/
-make eval-tool-use        # eval tool-use bằng mock predictor (chạy được ngay)
-make train-embedding      # cần torch/GPU + base model thật trong config
-make train-llm            # cần torch/GPU + base model thật trong config
-make eval-retrieval MODEL=<model> [BASELINE=<model>]
-```
+Kế hoạch dài hạn đã đổi: từ vòng lặp fine-tune sang
+**security & cost roadmap** ([`docs/security-cost-roadmap.md`](docs/security-cost-roadmap.md)).
+Tài liệu vòng đời fine-tune (`docs/fine-tuning-lifecycle.md`) đã gỡ
+theo quyết định này; scaffold code trong [`training/`](training/) vẫn
+nằm đó, chưa xóa. Muốn quay lại fine-tune thì mở lại từ roadmap.
 
 ## 12. Admin bot (system_admin) — quản trị chính hệ thống
 
@@ -623,6 +632,18 @@ actions_taken + evidence, trích dẫn đúng evidence đã dùng, "unknown"
 trung thực khi evidence toàn lỗi). Thêm skill mới chỉ cần tạo
 `skills/<tên>/SKILL.md` theo format trong `skills/README.md`; gán skill
 cho mission bằng `skills: [...]` dưới `execution:` trong seed YAML.
+
+**Skill map — từ kế hoạch thành kiến trúc thực thi.** Skill có thể
+khai một `map:` trong frontmatter (chi tiết:
+[`docs/skill-maps.md`](docs/skill-maps.md)). Map từng là kế hoạch
+dạng prose (Phương án C: agent được lệch khi có lý do); nay map được
+**thực thi bằng code** theo hai cơ chế, một run chỉ dùng một:
+**subgraph** — biên dịch map thành LangGraph con, một agent riêng cho
+mỗi node, router code quyết định node tiếp theo (thí điểm:
+`hotel_reception`); **plan gate** — middleware từ chối tool gọi ngoài
+thứ tự, cho mission còn chạy agent tự do (`fault_analysis` giữ map tư
+vấn cho tới khi map của nó được kiểm chứng với subgraph). Map càng
+chặt thì eval càng chấm được bằng state verifier thay vì từ khóa.
 
 ## 15. Schedules — mission chạy định kỳ (cron)
 
