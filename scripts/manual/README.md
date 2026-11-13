@@ -32,7 +32,7 @@ and later runs see the prior turns (`docs/sessions.md`).
 | `agent_turns.py` | Proves the agent loop runs **multiple model/tool turns inside one execution** (`system_admin`). Reads `llm_usage` + `audit_logs` from Postgres to print a timeline (model turn → its tools → next model turn) and checks: SUCCEEDED, `--min-turns` model calls (default 2), `--min-tools` tool calls (default 2), every audit row terminal. `--strict` also requires tools in ≥ 2 different model turns. `--request` overrides the admin request; `--cleanup` deletes the run's execution/result/usage/audit rows. |
 | `session_conversation.py` | Drives a real **conversation across executions** using Option B sessions (`docs/sessions.md`): 3 turns share one `session_id`; the bot must recall a random code it was given in turn 1, then carry it across 2 prior turns; `GET /sessions/{id}` must list the executions oldest first. `--control` asks the same question in a fresh session (must not know the code). `--cleanup` deletes the session's rows. |
 | `agent_config_check.py` | Asserts that runs use the config pinned in the active `AgentVersion`. Static: seed YAML ↔ `agents` row ↔ version snapshot, tool-manifest drift, `allowed_tools` in the registry, mission skills/hooks resolve, session limits parse. Live (2 turns, one fresh session): both runs record the version + no drift, `llm_usage` model matches, and the MLflow trace shows the system prompt **starts with** the pinned text, the pinned model/temperature, all `allowed_tools` at the model call (no registry tool leaks), the selected skills, and turn 2's session-history header with the agent's limits. `--no-trace` skips the MLflow assertions; `--cleanup` deletes the runs. |
-| `hotel_reception.py` | Drives the `hotel_receptionist` agent end to end through the real API → worker → LLM → MCP client → mock PMS server. **Preflight** checks the pinned 14-tool contract, the `MCP_TOOL_CAPABILITIES` map, the server's tool list, and the capability gate. Scenarios: `availability`, `soldout`, `policy`, `task`, `booking` (confirmation gate: best-effort with the 3B model, direct `get_booking` cross-check, booking-code recall turn), `memory` (3-turn recall + `GET /sessions/{id}`). Graders are outcome-based (architecture Phase 1): state verifiers + semantic checks in `verifiers.py`; trajectory findings are warnings only. `--scenario` is repeatable; `--session-id`, `--timeout`, `--cleanup` as usual. |
+| `hotel_reception.py` | Drives the `hotel_receptionist` agent end to end through the real API → worker → LLM → MCP client → mock PMS server. **Preflight** checks the pinned 14-tool contract, the `MCP_TOOL_CAPABILITIES` map, the server's tool list, and the capability gate. Scenarios: `availability`, `soldout`, `policy`, `task`, `booking` (confirmation gate: best-effort with the 3B model, direct `get_booking` cross-check, booking-code recall turn), `memory` (3-turn recall + `GET /sessions/{id}`), `journey` (full booking lifecycle incl. change dates + re-check), `task_full` (housekeeping task + status), `cancel` (free + one-night-fee cancellation), `multi_request` (availability → policy → booking in one session), `soldout_switch` (sold-out recovery to Deluxe). Graders are outcome-based (architecture Phase 1): state verifiers + semantic checks in `verifiers.py`; trajectory findings are warnings only. `--scenario` is repeatable; `--session-id`, `--timeout`, `--cleanup` as usual. |
 | `verifiers.py` | Pure outcome graders for the hotel suite (no live stack needed): state verifiers (no booking created for a sold-out window, task row correct), semantic checks (unavailability + policy facts via small paraphrase sets — interim until the LLM judge model is chosen), scenario verdicts (state AND semantic), trajectory diagnostics. Unit tests in `tests/test_manual_verifiers.py`, including the do-nothing (must fail every verdict) and gold (must pass all) negative controls. |
 | `mlflow_report.py` | Read-only analysis of the runs `hotel_reception.py` left in MLflow: discovers the experiment, joins runs↔traces on `mlflow.sourceRun`, classifies each trace (scenario, turn index, status/version/drift, latency, tokens, contract vs built-in tools, hook failures, derailed prose), then writes a Markdown report + one-row-per-trace CSV. No API/worker/MCP needed; re-run after any test run or DB cleanup. Defaults: experiment `agentic-runtime`, session prefix `sess-hotel-`, outputs in `reports/`. |
 
@@ -317,6 +317,38 @@ make mlflow-report
   `AuditLog`, then `Execution` rows per session; MLflow traces are kept,
   and the mock's SQLite bookings/tasks persist — use `--reseed` on the
   mock for a clean state.
+
+## Notes from the long-scenario additions (2026-11-13)
+
+- Five longer scenarios share four helpers (`_confirm_booking`,
+  `_book_confirmed_deluxe`, `_ask_booking_code`, `_cancel_booking_flow`,
+  `_change_dates_flow`) so the old scenarios stay untouched: `journey`
+  (quote → confirm → create → code recall → change dates → re-check),
+  `task_full` (housekeeping, room 305, incl. the `task-status` node),
+  `cancel` (free + one-night-fee, each only after confirmation),
+  `multi_request` (availability → policy → booking in one session,
+  proving the subgraph re-routes and the resume rule), `soldout_switch`
+  (Suite sold out → Deluxe on other dates).
+- Every write gate (create / cancel / change) is two turns: an ask turn
+  that must NOT call the write tool (FAIL if it does — same severity as
+  booking before confirmation), then a confirm turn that must call it
+  (one follow-up, then best-effort WARN when the 3B model never
+  completes it; a tool error still FAILs). The store is the gate in
+  every case (`get_booking` / `get_task` cross-check).
+- `cancel` computes its late window from today at run time (check-in
+  tomorrow → fee = one night, 2,000,000 VND); the free part uses a
+  random future window like the booking scenario. The fee mention in
+  the answer is checked only on coherent prose — the fee lives in the
+  tool result the model may or may not quote.
+- Known map gap the cancel/change ask turns surface: the
+  `booking-change` node only has the write tools, so the agent cannot
+  look the fee up itself before cancelling — it can only ask for
+  confirmation. A turn A that answers the fee anyway did it from the
+  policy doc via a re-route.
+- The `multi_request` and `soldout_switch` quotes are single strict
+  attempts (no `-qN` retries): the booking scenario already covers the
+  flaky-quote retry path, and a retry in a fresh session would lose the
+  conversation the scenario is testing.
 
 
 ## Notes from the MLflow report pipeline (2026-11-12)

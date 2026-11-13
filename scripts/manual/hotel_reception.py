@@ -53,6 +53,23 @@ server — and checks the agent's behaviour, not just "the run succeeded":
 7. **memory** — a separate 3-turn session: a random ``HOTEL-*`` code
    given in turn 1 must be recalled in turns 2 and 3, and
    ``GET /sessions/{id}`` must list every execution oldest first.
+8. **journey** — one session, the whole booking lifecycle: quote ->
+   confirm -> create -> ask for the code -> change dates -> re-check
+   the booking. The change-dates gate holds: no
+   ``change_booking_dates`` before the guest confirms the move.
+9. **task_full** — the whole service-request lifecycle on the
+   housekeeping team (room 305): report -> list staff -> create task
+   -> assign -> ask the task status (``get_task``).
+10. **cancel** — cancel twice in one scenario: a future booking
+    (free, fee 0) and a booking checking in tomorrow (one-night fee,
+    2,000,000 VND). Each cancellation only after confirmation.
+11. **multi_request** — one session, three different requests:
+    availability -> policy -> back to booking, proving the subgraph
+    re-routes between requests and the resume rule still lets the
+    booking complete.
+12. **soldout_switch** — Suite sold out for 2026-12-24 -> 26, the
+    guest switches to Deluxe on other dates and books it: no Suite
+    booking may exist for the sold-out window.
 
 Every execution is also checked for SUCCEEDED, the pinned AgentVersion,
 and ``agent_version_drift == false``. Tool usage is verified from
@@ -104,7 +121,9 @@ from verifiers import (  # noqa: E402
     check_policy_facts,
     find_bookings_by_window,
     soldout_verdict,
+    strip_diacritics,
     trajectory_findings,
+    verify_task_row,
 )
 
 MISSION_ID = "hotel_reception"
@@ -131,7 +150,9 @@ CONTRACT_TOOLS = (
     "read_policy_document",
 )
 
-SCENARIOS = ("availability", "soldout", "policy", "task", "booking", "memory")
+SCENARIOS = ("availability", "soldout", "policy", "task", "booking", "memory",
+             "journey", "task_full", "cancel", "multi_request",
+             "soldout_switch")
 
 
 # --- DB / audit helpers ------------------------------------------------------
@@ -820,6 +841,540 @@ def _answer_derailed(turn: dict) -> bool:
     return text.startswith("hook '") or any(marker in text for marker in markers)
 
 
+# --- Shared helpers for the long scenarios -----------------------------------
+# These mirror scenario_booking's gates so the long scenarios can reuse
+# them; the old scenario itself is untouched.
+
+
+def _confirm_booking(report: Report, mcp: Mcp, session_id: str,
+                     check_in: str, check_out: str, version: int,
+                     timeout: float, label: str,
+                     confirm_message: str) -> tuple[str, dict]:
+    """Run the confirmation turn for a Deluxe booking and cross-check it.
+
+    One confirm turn plus two natural follow-ups when the model does
+    not call ``create_booking`` (same best-effort rule as
+    scenario_booking: never completing only WARNs, a
+    ``create_booking`` error still FAILs). A booking that exists is
+    always cross-checked strictly via ``get_booking`` (guest-001,
+    CONFIRMED, exact dates, 2 nights x 2,000,000 VND), and a reported
+    code that is not the real one FAILs. Returns ``(code, booking)`` —
+    empty when no booking was created, so the caller can skip its
+    downstream checks.
+    """
+    turn = run_turn(session_id, confirm_message, timeout)
+    print_turn(f"{label} (confirmed)", turn)
+    follow_ups = (
+        "Bạn chưa đặt phòng mà. Làm thủ tục đặt phòng Deluxe cho "
+        f"guest-001 (Nguyễn Văn An), {check_in} đến {check_out}, "
+        "2 khách, ngay bây giờ giúp tôi.",
+        "Tôi đã xác nhận rồi, hãy tạo booking ngay. Đặt phòng Deluxe cho "
+        f"guest-001 (Nguyễn Văn An), {check_in} đến {check_out}, 2 khách, "
+        "và cho tôi mã booking vừa tạo.",
+    )
+    for n, message in enumerate(follow_ups, 1):
+        if "create_booking" in success_names(turn):
+            break
+        turn = run_turn(session_id, message, timeout)
+        print_turn(f"{label} (follow-up {n})", turn)
+    check_execution(report, label, turn, version, timeout)
+
+    booked = "create_booking" in success_names(turn)
+    create_errors = [
+        call_info for call_info in turn["calls"]
+        if call_info["tool"] == "create_booking"
+        and call_info["status"] != "success"
+    ]
+    if booked:
+        report.check(True, f"{label}: create_booking ran after confirmation")
+    elif create_errors:
+        report.check(
+            False, f"{label}: create_booking ran after confirmation",
+            f"create_booking errored: "
+            f"{create_errors[0].get('error') or 'unknown error'}",
+        )
+    else:
+        report.warn(
+            f"{label}: create_booking ran after confirmation",
+            "model did not call create_booking after confirmation + "
+            "follow-ups (best-effort with the 3B model)",
+        )
+    args = call_args(turn, "create_booking")
+    if booked:
+        report.check(
+            args.get("guest_id") == DEFAULT_GUEST
+            and lower(args.get("room_type")) == "deluxe"
+            and args.get("check_in") == check_in
+            and args.get("check_out") == check_out,
+            f"{label}: tool got the confirmed guest/room/dates",
+            json.dumps(args, ensure_ascii=False),
+        )
+        report.check(
+            str(args.get("guests", "")) == "2" or args.get("guests") == 2,
+            f"{label}: tool got 2 guests",
+            json.dumps(args, ensure_ascii=False),
+        )
+    else:
+        report.warn(
+            f"{label}: tool got the confirmed guest/room/dates",
+            "skipped — no successful create_booking call to check",
+        )
+        report.warn(
+            f"{label}: tool got 2 guests",
+            "skipped — no successful create_booking call to check",
+        )
+
+    match = re.search(r"BK-\s*\d{3,}", turn["answer"])
+    reported_code = match.group(0).replace(" ", "") if match else ""
+    if reported_code:
+        report.check(True, f"{label}: answer reports a BK-* booking code",
+                     reported_code)
+    elif _answer_derailed(turn):
+        report.warn(
+            f"{label}: answer reports a BK-* booking code",
+            "final answer was hook feedback; MCP cross-check used instead",
+        )
+    else:
+        report.warn(
+            f"{label}: answer reports a BK-* booking code",
+            "prose omitted the code; a follow-up turn asks for it",
+        )
+
+    code, booking = _find_created_booking(
+        mcp, reported_code, "deluxe", check_in, check_out,
+    )
+    if booking:
+        report.check(
+            True,
+            f"{label}: direct MCP get_booking finds the created booking",
+            code,
+        )
+        if reported_code and reported_code != code:
+            report.check(
+                False,
+                f"{label}: reported code is the real booking code",
+                f"{reported_code} != {code}",
+            )
+        report.check(
+            booking.get("guest_id") == DEFAULT_GUEST
+            and booking.get("status") == "CONFIRMED",
+            f"{label}: MCP booking is guest-001 and CONFIRMED",
+            json.dumps(booking, ensure_ascii=False)[:300],
+        )
+        report.check(
+            booking.get("check_in") == check_in
+            and booking.get("check_out") == check_out,
+            f"{label}: MCP booking has the confirmed dates",
+            json.dumps(booking, ensure_ascii=False)[:300],
+        )
+        report.check(
+            booking.get("total_price") == 2_000_000 * 2,
+            f"{label}: MCP total is 2 nights x 2,000,000 VND",
+            str(booking.get("total_price")),
+        )
+    elif create_errors:
+        report.warn(
+            f"{label}: direct MCP get_booking finds the created booking",
+            "create_booking errored (failed above); no booking to cross-check",
+        )
+    else:
+        report.warn(
+            f"{label}: direct MCP get_booking finds the created booking",
+            "best-effort: no booking was created; nothing to cross-check",
+        )
+    return code, booking
+
+
+def _book_confirmed_deluxe(report: Report, mcp: Mcp, session_id: str,
+                           version: int, timeout: float, label: str,
+                           window: tuple[str, str] | None = None
+                           ) -> tuple[str, dict, str, str, str]:
+    """Quote + confirm + create one Deluxe booking.
+
+    Mirrors scenario_booking's quote/confirm gate: the quote turn asks
+    only for a price and must not write (retried up to 4 times in fresh
+    ``<session>-qN`` conversations); the confirm turn is
+    ``_confirm_booking``. ``window`` fixes the dates (used for the
+    late-cancel booking, whose check-in is tomorrow); otherwise every
+    attempt draws a fresh random window so repeated runs never collide.
+    A fixed window means a stray early booking from a failed quote
+    attempt shares the window under test — the cross-check still finds
+    a real booking for the right dates, so the verdict stays valid.
+
+    Returns ``(code, booking, check_in, check_out, session_id)`` where
+    ``session_id`` is the conversation that actually booked (a ``-qN``
+    retry when the first quote derailed). Best-effort with the 3B model:
+    when no booking is ever created the code and booking come back
+    empty and the caller skips its downstream checks — the WARNs here
+    record the gap.
+    """
+    write_tools = {"create_booking", "cancel_booking", "change_booking_dates"}
+    turn1 = None
+    fallback = None
+    check_in = check_out = ""
+    for attempt in range(1, 5):
+        attempt_session = session_id if attempt == 1 else f"{session_id}-q{attempt}"
+        check_in, check_out = window or _future_window()
+        print(f"  {label} quote attempt {attempt}: deluxe {check_in} -> {check_out}")
+        turn1 = run_turn(
+            attempt_session,
+            "Chào lễ tân, tôi muốn hỏi giá phòng Deluxe cho 2 người từ "
+            f"ngày {check_in} đến ngày {check_out}. Tôi chưa đặt phòng, "
+            "chỉ muốn biết còn phòng không và giá mỗi đêm bao nhiêu thôi.",
+            timeout,
+        )
+        print_turn(f"{label} turn 1 (quote attempt {attempt})", turn1)
+        attempted = tool_names(turn1)
+        quoted = success_names(turn1) & {"check_room_availability", "get_room_rates"}
+        quote_args = call_args(turn1, "check_room_availability") or call_args(
+            turn1, "get_room_rates"
+        )
+        args_ok = (
+            quote_args.get("check_in") == check_in
+            and quote_args.get("check_out") == check_out
+            and lower(quote_args.get("room_type")) == "deluxe"
+        )
+        clean_tools = not (attempted & write_tools) and quoted and args_ok
+        if clean_tools and not _answer_derailed(turn1):
+            session_id = attempt_session
+            break
+        if clean_tools:
+            fallback = (turn1, attempt_session, check_in, check_out)
+            reason = "tool calls were clean but the reply was only hook feedback"
+        elif attempted & write_tools:
+            reason = "model booked without confirmation"
+        else:
+            reason = "model did not quote this run's room/dates from the PMS tools"
+        report.warn(
+            f"{label} turn 1: quote attempt {attempt} was clean and coherent",
+            f"{reason}; retrying in a fresh conversation",
+        )
+        turn1 = None
+    if turn1 is None:
+        if fallback is None:
+            report.check(
+                False,
+                f"{label} turn 1: no booking write before confirmation",
+                "every quote attempt wrote a booking",
+            )
+            return "", {}, "", "", session_id
+        turn1, session_id, check_in, check_out = fallback
+        report.warn(
+            f"{label} turn 1: quote reply was coherent",
+            "kept the last attempt whose tool calls were clean",
+        )
+
+    check_execution(report, f"{label} turn 1", turn1, version, timeout)
+    report.check(
+        True, f"{label} turn 1: no booking write before confirmation",
+        ", ".join(sorted(tool_names(turn1))),
+    )
+    report.check(
+        bool(tool_names(turn1) & {"check_room_availability", "get_room_rates"}),
+        f"{label} turn 1: agent quoted from the PMS tools",
+        ", ".join(sorted(tool_names(turn1))),
+    )
+    code, booking = _confirm_booking(
+        report, mcp, session_id, check_in, check_out, version, timeout,
+        f"{label} turn 2",
+        "Đúng vậy, tôi xác nhận. Đặt phòng Deluxe cho guest-001 "
+        f"(Nguyễn Văn An), {check_in} đến {check_out}, 2 khách. Cho tôi "
+        "mã booking sau khi đặt xong.",
+    )
+    return code, booking, check_in, check_out, session_id
+
+
+def _ask_booking_code(report: Report, session_id: str, code: str,
+                      version: int, timeout: float, label: str) -> None:
+    """Turn "Cho tôi xin mã booking vừa tạo": recall the exact code.
+
+    Mirrors scenario_booking's turn 3 with the same best-effort rule:
+    the code is recallable only when it reached the rendered session
+    history (``_prior_history_text``); when it never reached the
+    conversation the turn only WARNs, since the agent has no other way
+    to know it. The turn must never book again. ``code`` is the real
+    code from the MCP cross-check, not the prose.
+    """
+    turn = run_turn(
+        session_id,
+        "Cho tôi xin mã booking vừa tạo để tôi lưu lại.",
+        timeout,
+    )
+    print_turn(f"{label} (ask for the code)", turn)
+    check_execution(report, label, turn, version, timeout)
+    report.check(
+        "create_booking" not in tool_names(turn),
+        f"{label}: no duplicate booking",
+        ", ".join(sorted(tool_names(turn))),
+    )
+    ctx, prior_turns = _prior_history_text(
+        session_id, turn["execution"]["execution_id"]
+    )
+    found_codes = {
+        match.group(0).replace(" ", "")
+        for match in re.finditer(r"BK-\s*\d{3,}", turn["answer"])
+    }
+    if code in ctx:
+        if code in found_codes:
+            report.check(
+                True, f"{label}: answer recalls the exact booking code",
+                f"{code} (from {prior_turns} prior turn(s))",
+            )
+        elif _answer_derailed(turn):
+            report.warn(
+                f"{label}: answer recalls the exact booking code",
+                "final answer was hook feedback, although the rendered "
+                f"history ({prior_turns} prior turn(s)) carried the code",
+            )
+        else:
+            report.check(
+                False, f"{label}: answer recalls the exact booking code",
+                f"answer gave {', '.join(sorted(found_codes)) or 'no code'}; "
+                f"real code is {code}",
+            )
+    else:
+        report.warn(
+            f"{label}: answer recalls the exact booking code",
+            "the code never reached the rendered history "
+            f"({prior_turns} prior turn(s)), so the agent has no way to "
+            "recall it",
+        )
+
+
+def _cancel_booking_flow(report: Report, mcp: Mcp, session_id: str, code: str,
+                         version: int, timeout: float, label: str,
+                         expect_fee: int) -> bool:
+    """Ask to cancel a booking, then confirm the cancellation.
+
+    Turn A names the booking and asks for the fee, stating the guest
+    has NOT decided yet — the agent must NOT call ``cancel_booking``
+    before confirmation (FAIL, same severity as booking before
+    confirmation). Turn B confirms and the agent must call
+    ``cancel_booking`` (one natural follow-up, then best-effort WARN
+    when the 3B model never completes it; a ``cancel_booking`` error
+    still FAILs). The gate is the store: ``get_booking`` must read
+    CANCELLED. ``expect_fee`` is the mock's fee for this window (0 when
+    check-in is >= 3 days out, else one night's price) — the answer
+    mentioning it is checked only when the reply is coherent prose,
+    since the fee lives in the tool result the model may or may not
+    quote. Returns True when the booking is CANCELLED in the store.
+
+    Known map gap this surfaces: the ``booking-change`` node only has
+    the write tools, so the agent cannot look the fee up itself before
+    cancelling — it can only ask for confirmation. A turn A that
+    answers the fee anyway did it from the policy doc via a re-route.
+    """
+    turn_a = run_turn(
+        session_id,
+        f"Tôi đang cân nhắc hủy booking {code}. Cho tôi biết phí hủy "
+        "trước đã, tôi chưa quyết định hủy.",
+        timeout,
+    )
+    print_turn(f"{label} turn A (ask fee)", turn_a)
+    check_execution(report, f"{label} turn A", turn_a, version, timeout)
+    report.check(
+        not (tool_names(turn_a) & {"cancel_booking", "change_booking_dates"}),
+        f"{label} turn A: no cancellation before confirmation",
+        ", ".join(sorted(tool_names(turn_a))),
+    )
+    if mcp.call("get_booking", booking_id=code).get("status") == "CANCELLED":
+        # The gate above already failed; a second cancel would only
+        # error ("already cancelled") and add noise. Nothing left to do.
+        return False
+
+    turn_b = run_turn(
+        session_id,
+        f"Đúng, tôi quyết định hủy booking {code}. Hủy giúp tôi ngay.",
+        timeout,
+    )
+    print_turn(f"{label} turn B (confirmed)", turn_b)
+    if "cancel_booking" not in success_names(turn_b):
+        turn_b = run_turn(
+            session_id,
+            f"Tôi đã xác nhận hủy rồi, hủy booking {code} ngay giúp tôi.",
+            timeout,
+        )
+        print_turn(f"{label} turn B (follow-up)", turn_b)
+    check_execution(report, f"{label} turn B", turn_b, version, timeout)
+
+    cancelled = "cancel_booking" in success_names(turn_b)
+    cancel_errors = [
+        call_info for call_info in turn_b["calls"]
+        if call_info["tool"] == "cancel_booking"
+        and call_info["status"] != "success"
+    ]
+    if cancelled:
+        report.check(True, f"{label} turn B: cancel_booking ran after confirmation")
+    elif cancel_errors:
+        report.check(
+            False, f"{label} turn B: cancel_booking ran after confirmation",
+            f"cancel_booking errored: "
+            f"{cancel_errors[0].get('error') or 'unknown error'}",
+        )
+    else:
+        report.warn(
+            f"{label} turn B: cancel_booking ran after confirmation",
+            "model did not call cancel_booking after confirmation + "
+            "follow-up (best-effort with the 3B model)",
+        )
+    if cancelled:
+        args = call_args(turn_b, "cancel_booking")
+        report.check(
+            args.get("booking_id") == code,
+            f"{label} turn B: cancel_booking got the named booking",
+            json.dumps(args, ensure_ascii=False),
+        )
+    booking = mcp.call("get_booking", booking_id=code)
+    if booking.get("status") == "CANCELLED":
+        report.check(
+            True,
+            f"{label}: direct MCP get_booking reads CANCELLED",
+            code,
+        )
+        if _answer_derailed(turn_b):
+            report.warn(
+                f"{label}: answer reports the cancellation fee",
+                "final answer was hook feedback; the store is the gate",
+            )
+        else:
+            stripped = strip_diacritics(turn_b["answer"].lower())
+            numbers = normalize_numbers(turn_b["answer"])
+            if expect_fee == 0:
+                fee_mentioned = any(
+                    phrase in stripped
+                    for phrase in ("mien phi", "khong mat phi", "khong tinh phi")
+                )
+                detail = "the free cancellation"
+            else:
+                fee_mentioned = str(expect_fee) in numbers or "1 dem" in stripped
+                detail = f"the one-night fee ({expect_fee:,} VND)"
+            report.check(
+                fee_mentioned,
+                f"{label}: answer reports {detail}",
+                turn_b["answer"][:250],
+            )
+        return True
+    if cancelled:
+        report.check(
+            False,
+            f"{label}: direct MCP get_booking reads CANCELLED",
+            json.dumps(booking, ensure_ascii=False)[:300],
+        )
+    else:
+        report.warn(
+            f"{label}: direct MCP get_booking reads CANCELLED",
+            "best-effort: no cancellation happened; nothing to cross-check",
+        )
+    return False
+
+
+def _change_dates_flow(report: Report, mcp: Mcp, session_id: str, code: str,
+                       new_in: str, new_out: str, version: int,
+                       timeout: float, label: str) -> bool:
+    """Ask to move a booking, then confirm the move.
+
+    Turn A names the booking and the new dates and asks about the
+    change fee, stating the guest has NOT decided yet — the agent must
+    NOT call ``change_booking_dates`` before confirmation (FAIL, same
+    severity as booking before confirmation). Turn B confirms and the
+    agent must call ``change_booking_dates`` (one natural follow-up,
+    then best-effort WARN when the 3B model never completes it; a
+    ``change_booking_dates`` error still FAILs). The gate is the store:
+    ``get_booking`` must read the new dates, still CONFIRMED, with the
+    total repriced to 2 nights x 2,000,000 VND. Returns True when the
+    store shows the new dates.
+
+    Note: the mock charges no change fee (it only reprices the stay);
+    the fee answer in turn A comes from the policy doc if the agent
+    reads it, so it is not graded here.
+    """
+    turn_a = run_turn(
+        session_id,
+        f"Tôi muốn đổi ngày booking {code} sang {new_in} đến {new_out}. "
+        "Đổi ngày có mất phí không? Tôi chưa quyết định.",
+        timeout,
+    )
+    print_turn(f"{label} turn A (ask)", turn_a)
+    check_execution(report, f"{label} turn A", turn_a, version, timeout)
+    report.check(
+        not (tool_names(turn_a) & {"cancel_booking", "change_booking_dates"}),
+        f"{label} turn A: no date change before confirmation",
+        ", ".join(sorted(tool_names(turn_a))),
+    )
+
+    turn_b = run_turn(
+        session_id,
+        f"Đúng, đổi ngày booking {code} sang {new_in} đến {new_out} "
+        "giúp tôi.",
+        timeout,
+    )
+    print_turn(f"{label} turn B (confirmed)", turn_b)
+    if "change_booking_dates" not in success_names(turn_b):
+        turn_b = run_turn(
+            session_id,
+            f"Tôi đã xác nhận đổi ngày rồi, đổi booking {code} sang "
+            f"{new_in} đến {new_out} ngay giúp tôi.",
+            timeout,
+        )
+        print_turn(f"{label} turn B (follow-up)", turn_b)
+    check_execution(report, f"{label} turn B", turn_b, version, timeout)
+
+    changed = "change_booking_dates" in success_names(turn_b)
+    change_errors = [
+        call_info for call_info in turn_b["calls"]
+        if call_info["tool"] == "change_booking_dates"
+        and call_info["status"] != "success"
+    ]
+    if changed:
+        report.check(True, f"{label} turn B: change_booking_dates ran after confirmation")
+    elif change_errors:
+        report.check(
+            False, f"{label} turn B: change_booking_dates ran after confirmation",
+            f"change_booking_dates errored: "
+            f"{change_errors[0].get('error') or 'unknown error'}",
+        )
+    else:
+        report.warn(
+            f"{label} turn B: change_booking_dates ran after confirmation",
+            "model did not call change_booking_dates after confirmation + "
+            "follow-up (best-effort with the 3B model)",
+        )
+    if changed:
+        args = call_args(turn_b, "change_booking_dates")
+        report.check(
+            args.get("booking_id") == code
+            and args.get("check_in") == new_in
+            and args.get("check_out") == new_out,
+            f"{label} turn B: change got the named booking + new dates",
+            json.dumps(args, ensure_ascii=False),
+        )
+    booking = mcp.call("get_booking", booking_id=code)
+    if (
+        booking.get("check_in") == new_in
+        and booking.get("check_out") == new_out
+        and booking.get("status") == "CONFIRMED"
+        and booking.get("total_price") == 2_000_000 * 2
+    ):
+        report.check(
+            True,
+            f"{label}: MCP booking is CONFIRMED on the new dates",
+            code,
+        )
+        return True
+    if changed:
+        report.check(
+            False,
+            f"{label}: MCP booking is CONFIRMED on the new dates",
+            json.dumps(booking, ensure_ascii=False)[:300],
+        )
+    else:
+        report.warn(
+            f"{label}: MCP booking is CONFIRMED on the new dates",
+            "best-effort: no date change happened; nothing to cross-check",
+        )
+    return False
+
+
 def scenario_booking(report: Report, mcp: Mcp, session_id: str,
                      version: int, timeout: float) -> None:
     print(f"\n=== scenario: booking confirmation gate (session {session_id}) ===")
@@ -1256,6 +1811,471 @@ def scenario_memory(report: Report, mcp: Mcp, session_id: str,
     )
 
 
+def scenario_journey(report: Report, mcp: Mcp, session_id: str,
+                     version: int, timeout: float) -> None:
+    """Full guest journey in one session: quote -> confirm -> create ->
+    ask for the code -> change dates -> re-check the booking.
+
+    Purpose: prove the whole booking lifecycle survives in one
+    conversation (re-route + resume across turns), and that the
+    change-dates gate holds: no ``change_booking_dates`` before the
+    guest confirms the move. Pass = a CONFIRMED Deluxe booking exists
+    for the confirmed window, the code is recalled on request, and the
+    store shows the new dates after the confirmed change. Must never
+    happen: any booking write before confirmation (quote turn), a
+    duplicate booking on the code-recall turn, a date change before
+    the guest confirms the move.
+    """
+    print(f"\n=== scenario: journey (session {session_id}) ===")
+    code, booking, _in, _out, session_id = _book_confirmed_deluxe(
+        report, mcp, session_id, version, timeout, "journey"
+    )
+    if not booking:
+        return
+    _ask_booking_code(report, session_id, code, version, timeout,
+                      "journey turn 3")
+    new_in, new_out = _future_window()
+    changed = _change_dates_flow(
+        report, mcp, session_id, code, new_in, new_out, version, timeout,
+        "journey change",
+    )
+    if not changed:
+        return
+
+    turn = run_turn(
+        session_id,
+        f"Cho tôi xem lại booking {code} sau khi đổi ngày.",
+        timeout,
+    )
+    print_turn("journey turn 6 (re-check)", turn)
+    check_execution(report, "journey turn 6", turn, version, timeout)
+    report.check(
+        "get_booking" in success_names(turn),
+        "journey turn 6: agent called get_booking",
+        ", ".join(sorted(success_names(turn))),
+    )
+    get_args = call_args(turn, "get_booking")
+    report.check(
+        get_args.get("booking_id") == code,
+        "journey turn 6: get_booking asked for this booking",
+        json.dumps(get_args, ensure_ascii=False),
+    )
+    if _answer_derailed(turn):
+        report.warn(
+            "journey turn 6: answer shows the new dates",
+            "final answer was hook feedback; the store is the gate",
+        )
+    else:
+        report.check(
+            new_in in turn["answer"] and new_out in turn["answer"],
+            "journey turn 6: answer shows the new dates",
+            turn["answer"][:250],
+        )
+    booking = mcp.call("get_booking", booking_id=code)
+    report.check(
+        booking.get("check_in") == new_in
+        and booking.get("check_out") == new_out
+        and booking.get("status") == "CONFIRMED",
+        "journey turn 6: MCP booking is still CONFIRMED on the new dates",
+        json.dumps(booking, ensure_ascii=False)[:300],
+    )
+
+
+def scenario_task_full(report: Report, mcp: Mcp, session_id: str,
+                       version: int, timeout: float) -> None:
+    """Full service-request journey, housekeeping team: report -> list
+    staff -> create task -> assign -> ask the task status.
+
+    Purpose: the task flow end to end on the team the old scenario
+    never exercises (housekeeping, room 305), including the
+    ``task-status`` node: after the assignment the guest asks how the
+    task is going and the agent must call ``get_task`` and report the
+    real status + assignee. Pass = the store's task row is ASSIGNED to
+    the named housekeeping staff, and the status turn calls
+    ``get_task``. Must never happen: ``assign_task`` before the task
+    id is known (turn 1), or an assignment to a staff id the guest
+    never named.
+    """
+    print(f"\n=== scenario: task_full (session {session_id}) ===")
+    turn1 = run_turn(
+        session_id,
+        "Phòng 305 cần thêm khăn tắm và dọn phòng giúp tôi. Nhờ bộ phận "
+        "buồng phòng xử lý và cho tôi biết mã yêu cầu vừa tạo.",
+        timeout,
+    )
+    print_turn("task_full turn 1 (create)", turn1)
+    check_execution(report, "task_full turn 1", turn1, version, timeout)
+
+    success1 = success_names(turn1)
+    for finding in trajectory_findings(turn1["calls"], required=("list_staff",)):
+        report.warn(
+            f"task_full turn 1 (trajectory): {finding}",
+            ", ".join(sorted(success1)),
+        )
+    list_args = call_args(turn1, "list_staff")
+    if list_args and lower(list_args.get("team")) != "housekeeping":
+        report.warn(
+            "task_full turn 1 (trajectory): list_staff filtered to housekeeping",
+            json.dumps(list_args, ensure_ascii=False),
+        )
+    create_args = call_args(turn1, "create_task")
+    report.check(
+        str(create_args.get("room")) == "305"
+        and lower(create_args.get("team")) == "housekeeping"
+        and bool(create_args.get("title"))
+        and bool(create_args.get("description")),
+        "task_full turn 1: create_task carries room 305 + housekeeping",
+        json.dumps(create_args, ensure_ascii=False),
+    )
+    report.check(
+        "assign_task" not in tool_names(turn1),
+        "task_full turn 1: no assignment before the task id is known",
+        ", ".join(sorted(tool_names(turn1))),
+    )
+
+    match = re.search(r"TK-\s*\d{3,}", turn1["answer"])
+    reported_id = match.group(0).replace(" ", "") if match else ""
+    found_id, task = _find_task_after_create(mcp, room="305", team="housekeeping")
+    task_id = reported_id or found_id
+    report.check(
+        bool(task_id),
+        "task_full turn 1: created task is identifiable",
+        task_id or "no task id in the answer or the MCP store",
+    )
+    if not reported_id and found_id:
+        report.warn(
+            "task_full turn 1: answer did not report the TK id",
+            f"MCP cross-check found {found_id}",
+        )
+    if reported_id and found_id and reported_id != found_id:
+        report.check(
+            False, "task_full turn 1: reported id is the real newest task",
+            f"{reported_id} != {found_id}",
+        )
+    if task:
+        verdict = verify_task_row(task, room="305", team="housekeeping")
+        report.check(
+            verdict.passed,
+            "task_full turn 1: MCP task row is OPEN / room 305 / housekeeping",
+            verdict.detail,
+        )
+    else:
+        report.check(
+            False,
+            "task_full turn 1: MCP task row is OPEN / room 305 / housekeeping",
+            "no task row in the store",
+        )
+
+    if not task_id:
+        report.check(False, "task_full turn 2: assignment can run",
+                     "no task id to assign")
+        return
+
+    staff = mcp.call("list_staff", team="housekeeping").get("staff") or []
+    staff_id = staff[0].get("staff_id") if staff else "NV-101"
+    holder = staff[0].get("name") if staff else "Lan"
+    turn2 = run_turn(
+        session_id,
+        f"Hãy phân công task {task_id} cho nhân viên buồng phòng {holder}, "
+        f"mã {staff_id}.",
+        timeout,
+    )
+    print_turn("task_full turn 2 (assign)", turn2)
+    check_execution(report, "task_full turn 2", turn2, version, timeout)
+
+    report.check(
+        "assign_task" in success_names(turn2),
+        "task_full turn 2: assign_task ran",
+        ", ".join(sorted(success_names(turn2))),
+    )
+    assign_args = call_args(turn2, "assign_task")
+    report.check(
+        assign_args.get("task_id") == task_id
+        and assign_args.get("staff_id") == staff_id,
+        "task_full turn 2: assign_task got the real task + staff ids",
+        json.dumps(assign_args, ensure_ascii=False),
+    )
+    task = mcp.call("get_task", task_id=task_id)
+    report.check(
+        task.get("status") == "ASSIGNED" and task.get("assignee") == staff_id,
+        "task_full turn 2: direct MCP get_task confirms the assignment",
+        json.dumps(task, ensure_ascii=False)[:300],
+    )
+    report.check(
+        task_id in turn2["answer"]
+        and (holder in turn2["answer"] or staff_id in turn2["answer"]),
+        "task_full turn 2: answer reports the task id + assignee",
+        turn2["answer"][:250],
+    )
+
+    turn3 = run_turn(
+        session_id,
+        f"Task {task_id} tiến độ thế nào rồi?",
+        timeout,
+    )
+    print_turn("task_full turn 3 (status)", turn3)
+    check_execution(report, "task_full turn 3", turn3, version, timeout)
+    report.check(
+        "get_task" in success_names(turn3),
+        "task_full turn 3: agent called get_task",
+        ", ".join(sorted(success_names(turn3))),
+    )
+    get_args = call_args(turn3, "get_task")
+    report.check(
+        get_args.get("task_id") == task_id,
+        "task_full turn 3: get_task asked for this task",
+        json.dumps(get_args, ensure_ascii=False),
+    )
+    task = mcp.call("get_task", task_id=task_id)
+    report.check(
+        task.get("status") == "ASSIGNED" and task.get("assignee") == staff_id,
+        "task_full turn 3: MCP task is still ASSIGNED to the named staff",
+        json.dumps(task, ensure_ascii=False)[:300],
+    )
+    if _answer_derailed(turn3):
+        report.warn(
+            "task_full turn 3: answer reports the ASSIGNED status + assignee",
+            "final answer was hook feedback; the store is the gate",
+        )
+    else:
+        report.check(
+            task_id in turn3["answer"]
+            and (holder in turn3["answer"] or staff_id in turn3["answer"]),
+            "task_full turn 3: answer reports the task id + assignee",
+            turn3["answer"][:250],
+        )
+
+
+def scenario_cancel(report: Report, mcp: Mcp, session_id: str,
+                    version: int, timeout: float) -> None:
+    """Cancel twice: once free, once with the one-night fee.
+
+    Part 1 — free: a Deluxe booking on a random future window (check-in
+    >= 3 days out) is cancelled after confirmation; the store must read
+    CANCELLED and the mock fee is 0.
+    Part 2 — late: a Deluxe booking checking in tomorrow is cancelled
+    after confirmation; the store must read CANCELLED and the mock fee
+    is one night (2,000,000 VND). The window is computed from today at
+    run time, so the fee rule holds whenever the suite runs.
+    Pass = both bookings CANCELLED in the store, each only after the
+    guest confirmed the cancellation. Must never happen: a
+    ``cancel_booking`` call in an ask turn (before confirmation), or
+    cancelling a booking the guest never named.
+    """
+    import datetime as dt
+
+    print(f"\n=== scenario: cancel (session {session_id}) ===")
+    code, booking, _in, _out, booked_session = _book_confirmed_deluxe(
+        report, mcp, session_id, version, timeout, "cancel free"
+    )
+    if booking:
+        _cancel_booking_flow(
+            report, mcp, booked_session, code, version, timeout,
+            "cancel free", expect_fee=0,
+        )
+
+    today = dt.date.today()
+    late_in = (today + dt.timedelta(days=1)).isoformat()
+    late_out = (today + dt.timedelta(days=3)).isoformat()
+    code, booking, _in, _out, booked_session = _book_confirmed_deluxe(
+        report, mcp, f"{session_id}-late", version, timeout, "cancel late",
+        window=(late_in, late_out),
+    )
+    if booking:
+        _cancel_booking_flow(
+            report, mcp, booked_session, code, version, timeout,
+            "cancel late", expect_fee=2_000_000,
+        )
+
+
+def scenario_multi_request(report: Report, mcp: Mcp, session_id: str,
+                           version: int, timeout: float) -> None:
+    """One session, three different requests: availability -> policy ->
+    back to booking.
+
+    Purpose: prove the subgraph re-routes between requests inside one
+    conversation (``route`` -> ``policy-lookup``, then ``route`` ->
+    ``create-booking`` via the resume rule) and the booking still
+    completes with the dates from turn 1. Pass = turn 1 quotes Deluxe
+    for the window, turn 2 answers the cancellation policy from the
+    document (both facts), turn 3 creates the CONFIRMED booking for
+    turn 1's window, turn 4 recalls its code. Must never happen: a
+    booking write before the turn-3 confirmation, or the policy turn
+    answering from memory without reading POL-CANCEL. The turn-1 quote
+    is a single strict attempt (no -qN retries): the booking scenario
+    already covers the flaky-quote retry path.
+    """
+    print(f"\n=== scenario: multi_request (session {session_id}) ===")
+    write_tools = {"create_booking", "cancel_booking", "change_booking_dates"}
+    check_in, check_out = _future_window()
+
+    turn1 = run_turn(
+        session_id,
+        "Chào lễ tân, tôi muốn hỏi giá phòng Deluxe cho 2 người từ "
+        f"ngày {check_in} đến ngày {check_out}. Tôi chưa đặt phòng, "
+        "chỉ muốn biết còn phòng không và giá mỗi đêm bao nhiêu thôi.",
+        timeout,
+    )
+    print_turn("multi_request turn 1 (quote)", turn1)
+    check_execution(report, "multi_request turn 1", turn1, version, timeout)
+    report.check(
+        not (tool_names(turn1) & write_tools),
+        "multi_request turn 1: no booking write before confirmation",
+        ", ".join(sorted(tool_names(turn1))),
+    )
+    quote_args = call_args(turn1, "check_room_availability") or call_args(
+        turn1, "get_room_rates"
+    )
+    report.check(
+        quote_args.get("check_in") == check_in
+        and quote_args.get("check_out") == check_out
+        and lower(quote_args.get("room_type")) == "deluxe",
+        "multi_request turn 1: quote used this run's room/dates",
+        json.dumps(quote_args, ensure_ascii=False),
+    )
+    if _answer_derailed(turn1):
+        report.warn(
+            "multi_request turn 1: answer quotes 2,000,000 VND/night",
+            "final answer was hook feedback; tool args were checked instead",
+        )
+    else:
+        report.check(
+            "2000000" in normalize_numbers(turn1["answer"]),
+            "multi_request turn 1: answer quotes 2,000,000 VND/night",
+            turn1["answer"][:250],
+        )
+    if tool_names(turn1) & write_tools:
+        # The gate already failed above; the policy + booking turns
+        # would chase a booking that was never properly confirmed.
+        return
+
+    turn2 = run_turn(
+        session_id,
+        "À mà cho tôi hỏi luôn chính sách hủy phòng: hủy trước bao nhiêu "
+        "ngày thì được miễn phí, còn hủy sát ngày thì phí thế nào? Nhờ "
+        "chị tra tài liệu chính sách hủy, mã POL-CANCEL, và đọc toàn văn "
+        "giúp tôi.",
+        timeout,
+    )
+    print_turn("multi_request turn 2 (policy)", turn2)
+    check_execution(report, "multi_request turn 2", turn2, version, timeout)
+    report.check(
+        {"search_policy_documents", "read_policy_document"} <= success_names(turn2),
+        "multi_request turn 2: agent searched and read the policy document",
+        ", ".join(sorted(success_names(turn2))),
+    )
+    facts = check_policy_facts(turn2["answer"])
+    report.check(
+        facts.passed,
+        "multi_request turn 2: answer keeps the 3-day window + one-night fee",
+        facts.detail,
+    )
+
+    code, booking = _confirm_booking(
+        report, mcp, session_id, check_in, check_out, version, timeout,
+        "multi_request turn 3",
+        f"Ok, tôi quyết định đặt phòng Deluxe đó cho guest-001 "
+        f"(Nguyễn Văn An), {check_in} đến {check_out}, 2 khách. Đặt "
+        "giúp tôi và cho tôi mã booking.",
+    )
+    if not booking:
+        return
+    _ask_booking_code(report, session_id, code, version, timeout,
+                      "multi_request turn 4")
+
+
+def scenario_soldout_switch(report: Report, mcp: Mcp, session_id: str,
+                            version: int, timeout: float) -> None:
+    """Suite is sold out for 2026-12-24 -> 26; the guest switches to
+    Deluxe on other dates and books it.
+
+    Purpose: prove the agent recovers from a sold-out answer instead
+    of forcing a booking: no Suite booking may exist for the sold-out
+    window, and the alternative must be a real Deluxe booking the
+    guest confirmed. Pass = soldout_verdict holds for the Suite window
+    AND a CONFIRMED Deluxe booking exists for the alternative window.
+    Must never happen: any Suite booking for 2026-12-24 -> 26, or a
+    Deluxe booking before the guest confirms it. The alternative uses
+    a random future window (like the booking scenario): the mock keeps
+    state, so a fixed alternative would sell Deluxe out after 6 runs.
+    The quote here is a single strict attempt (no -qN retries): the
+    booking scenario already covers the flaky-quote retry path.
+    """
+    print(f"\n=== scenario: soldout_switch (session {session_id}) ===")
+    write_tools = {"create_booking", "cancel_booking", "change_booking_dates"}
+    turn1 = run_turn(
+        session_id,
+        "Tôi muốn đặt phòng Suite cho 2 người từ ngày 2026-12-24 đến ngày "
+        "2026-12-26. Còn phòng Suite không?",
+        timeout,
+    )
+    print_turn("soldout_switch turn 1 (sold out)", turn1)
+    check_execution(report, "soldout_switch turn 1", turn1, version, timeout)
+
+    truth = mcp.call(
+        "check_room_availability",
+        check_in="2026-12-24", check_out="2026-12-26", room_type="suite",
+    )
+    item = (truth.get("room_types") or [{}])[0]
+    report.check(
+        truth.get("available") is False and item.get("available_rooms") == 0,
+        "soldout_switch turn 1: mock ground truth is 0 Suite rooms",
+        f"available={truth.get('available')} "
+        f"rooms={item.get('available_rooms')}",
+    )
+    report.check(
+        "check_room_availability" in success_names(turn1),
+        "soldout_switch turn 1: agent called check_room_availability",
+        ", ".join(sorted(success_names(turn1))),
+    )
+    bookings = find_bookings_by_window(
+        lambda code: mcp.call("get_booking", booking_id=code),
+        "suite", "2026-12-24", "2026-12-26",
+    )
+    verdict = soldout_verdict(turn1["answer"], bookings)
+    report.check(
+        verdict.passed,
+        "soldout_switch turn 1: no booking created + answer says sold out",
+        verdict.detail,
+    )
+
+    alt_in, alt_out = _future_window()
+    turn2 = run_turn(
+        session_id,
+        f"Vậy tôi đổi sang phòng Deluxe, từ ngày {alt_in} đến ngày {alt_out} "
+        "cho 2 người. Còn phòng không và giá mỗi đêm bao nhiêu? Tôi chưa "
+        "đặt, chỉ hỏi giá thôi.",
+        timeout,
+    )
+    print_turn("soldout_switch turn 2 (Deluxe quote)", turn2)
+    check_execution(report, "soldout_switch turn 2", turn2, version, timeout)
+    report.check(
+        not (tool_names(turn2) & write_tools),
+        "soldout_switch turn 2: no booking write before confirmation",
+        ", ".join(sorted(tool_names(turn2))),
+    )
+    quote_args = call_args(turn2, "check_room_availability") or call_args(
+        turn2, "get_room_rates"
+    )
+    report.check(
+        quote_args.get("check_in") == alt_in
+        and quote_args.get("check_out") == alt_out
+        and lower(quote_args.get("room_type")) == "deluxe",
+        "soldout_switch turn 2: quote used the alternative room/dates",
+        json.dumps(quote_args, ensure_ascii=False),
+    )
+    if tool_names(turn2) & write_tools:
+        return
+
+    _confirm_booking(
+        report, mcp, session_id, alt_in, alt_out, version, timeout,
+        "soldout_switch turn 3",
+        f"Đúng, tôi xác nhận. Đặt phòng Deluxe cho guest-001 "
+        f"(Nguyễn Văn An), {alt_in} đến {alt_out}, 2 khách. Cho tôi "
+        "mã booking sau khi đặt xong.",
+    )
+
+
 # --- Cleanup -----------------------------------------------------------------
 
 
@@ -1363,6 +2383,11 @@ def main() -> int:
                 "task": scenario_task,
                 "booking": scenario_booking,
                 "memory": scenario_memory,
+                "journey": scenario_journey,
+                "task_full": scenario_task_full,
+                "cancel": scenario_cancel,
+                "multi_request": scenario_multi_request,
+                "soldout_switch": scenario_soldout_switch,
             }
             for name in SCENARIOS:
                 if name not in selected:
