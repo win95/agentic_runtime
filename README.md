@@ -1062,7 +1062,7 @@ gì từ `app/`, DB riêng (`user_service`), migration chain riêng
   per-user cost cap, rate limit login, CORS. Session chưa gắn user
   (execution đã mang `user_id`).
 
-## 27. Hybrid retrieval — vector + graph (Phases 0–3)
+## 27. Hybrid retrieval — vector + graph (Phases 0–4)
 
 Hybrid retrieval cho mission `fault_analysis`: Qdrant top-40 dense
 ∪ Neo4j 1-hop expansion (payload `node_ids[]` nối vector hit với
@@ -1074,15 +1074,22 @@ cứng; context budget 3.000 token. Phase 3 thêm gated expansion
 (multi-query ≤3 paraphrase khi vector thiếu tự tin hoặc không có
 exact match, decomposition khi câu hỏi nhiều phần) và log feature
 row đầy đủ cho LTR (chưa train — 252 pairs so với ~3.000 cần
-thiết). Đánh giá bằng golden set 36 case qua
-`make eval-retrieval-phase0/1/2/3` (fake setups, chưa có live
+thiết). Phase 4 thêm QueryPlan: link (gazetteer, có chuẩn hoá)
++ intent (fusion-style, không LLM) luôn chạy, rồi một cổng
+gating duy nhất quyết định có mở rộng không (decomposition
+trước, paraphrase sau, có guardrail kiểm tra giữ code/số/threshold
+và cấm HyDE); link recall 0,762, intent accuracy 0,500 trên
+golden set fake, downstream nDCG@6 không đổi trên setup blurred.
+Đánh giá bằng golden set 36 case qua
+`make eval-retrieval-phase0/1/2/3/4` (fake setups, chưa có live
 Qdrant/Neo4j trong VM này); `search_documents` và hook
 `retrieval_context` chưa đổi — chưa wire live, xem checklist ở
 cuối doc tổng hợp.
 
 - Chi tiết: `docs/hybrid-retrieval.md` (thiết kế as-built Phases
-  0–3, toàn bộ locked decisions, checklist live-verification) và
+  0–4, toàn bộ locked decisions, checklist live-verification) và
   các doc theo phase `docs/hybrid-retrieval-phase0.md`,
   `docs/hybrid-retrieval-phase1.md`,
   `docs/hybrid-retrieval-phase2.md`,
-  `docs/hybrid-retrieval-phase3.md`.
+  `docs/hybrid-retrieval-phase3.md`,
+  `docs/hybrid-retrieval-phase4.md`.

@@ -1,4 +1,4 @@
-.PHONY: install install-requirements run-api run-worker run-beat migrate migrate-users run-user-service seed-admin test lint docker-up docker-down seed seed-dry-run seed-edge ingest ingest-dry-run demo eval eval-real eval-genai eval-genai-real langgraph-dev gen-synthetic-data eval-tool-use eval-retrieval eval-retrieval-phase0 eval-retrieval-phase1 eval-retrieval-phase2 train-embedding train-llm mlflow-report eval-retrieval-phase3
+.PHONY: install install-requirements run-api run-worker run-beat migrate migrate-users run-user-service seed-admin test lint docker-up docker-down seed seed-dry-run seed-edge ingest ingest-dry-run demo eval eval-real eval-genai eval-genai-real langgraph-dev gen-synthetic-data eval-tool-use eval-retrieval eval-retrieval-phase0 eval-retrieval-phase1 eval-retrieval-phase2 train-embedding train-llm mlflow-report eval-retrieval-phase3 eval-retrieval-phase4
 
 # Prefer the project venv when it exists (this checkout), else system python.
 PYTHON := $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python)
@@ -162,6 +162,15 @@ eval-retrieval-phase2:
 # to MLflow (the blurred ON run also logs ltr_feature_rows.json).
 eval-retrieval-phase3:
 	$(PYTHON) -m scripts.eval_retrieval_phase3 $(if $(TRACKING_URI),--tracking-uri $(TRACKING_URI))
+
+# Phase 4 hybrid retrieval: QueryPlan (link + intent + gated expansion)
+# A/B plan off vs on, both fake setups + entity-link accuracy, intent
+# accuracy (overall + per query_type + gated subset), rewrite
+# faithfulness (kept-variant re-check must be 100%), downstream
+# nDCG@6 delta. Exit code 0 = no nDCG@6 regression + faithfulness
+# 100%. Pass TRACKING_URI=<mlflow uri> to log to MLflow.
+eval-retrieval-phase4:
+	$(PYTHON) -m scripts.eval_retrieval_phase4 $(if $(TRACKING_URI),--tracking-uri $(TRACKING_URI))
 
 train-embedding:
 	$(PYTHON) -m training.embedding.train --config training/configs/embedding.yaml

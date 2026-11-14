@@ -1,4 +1,4 @@
-# Hybrid retrieval — design AS BUILT (Phases 0–3)
+# Hybrid retrieval — design AS BUILT (Phases 0–4)
 
 Research report:
 `~/workspace/research_notes/hybrid-vector-graph-retrieval-20261114-0430/report.md`
@@ -6,7 +6,9 @@ Per-phase docs: `docs/hybrid-retrieval-phase0.md` (golden set +
 harness + baseline), `docs/hybrid-retrieval-phase1.md` (link +
 fused rerank), `docs/hybrid-retrieval-phase2.md` (PPR + coverage +
 hub), `docs/hybrid-retrieval-phase3.md` (gated expansion,
-decomposition, LTR logging). Pilot mission: `fault_analysis`.
+decomposition, LTR logging), `docs/hybrid-retrieval-phase4.md`
+(QueryPlan: link + intent + gated expansion). Pilot mission:
+`fault_analysis`.
 
 This document is the consolidated as-built record. Where it
 disagrees with the research report, **this document wins** — it
@@ -19,17 +21,24 @@ runs the adapted formula in §3 below.
 
 Status: **evaluated on fakes only, NOT wired live.**
 `search_documents` and the `retrieval_context` hook are untouched
-in all four phases — no mission's behaviour changes. The opt-in
-wiring follow-up is §8; the live checklist is §9.
+in all five phases — no mission's behaviour changes. The opt-in
+wiring follow-up is §12; the live checklist is §11.
 
 ## 1. Pipeline (one query)
 
 ```
 question
-  │  Phase 3 (gated — §6): detect multi-part → decompose (≤3 sub-questions),
-  │  else gate on vector confidence / gazetteer miss → paraphrase (≤3 variants).
-  │  Each variant is retrieved like the original; rows are merged (mean)
-  │  and reranked by the same fusion. No expansion by default.
+  │  Phase 4 (QueryPlan — §6a): link (gazetteer, incl. normalised
+  │  variants) + intent (fusion-style, deterministic) ALWAYS;
+  │  then the single gate (Phase 3 rule) decides whether the
+  │  expensive parts run: decomposition (sub-questions first) or
+  │  paraphrase variants (≤3, guardrail-checked, HyDE excluded).
+  │  A gated-off plan carries intent + links as-is, no variants.
+  ▼
+  Phase 3 (gated — §6): detect multi-part → decompose (≤3 sub-questions),
+  else gate on vector confidence / gazetteer miss → paraphrase (≤3 variants).
+  Each variant is retrieved like the original; rows are merged (mean)
+  and reranked by the same fusion. No expansion by default.
   ▼
 vector arm:  Qdrant top-40 dense (real LiteLLM embeddings live,
              deterministic BoW / code-blurred fakes in this VM)
@@ -198,6 +207,42 @@ Merged set reranked by the same fusion (§3). Per-variant
 retrieval overlap (top-6 Jaccard vs base, candidate Jaccard) is
 logged per query.
 
+## 6a. QueryPlan — link + intent + the single gate (Phase 4)
+
+`runtime/retrieval_query_plan.py::build_query_plan` wraps the
+Phase 3 machinery in one per-question object. Linking
+(gazetteer, §4, now with Worker A's normalisation: diacritics
+and separator variants at confidence 0.8) and intent scoring
+(`runtime/retrieval_intent.py::score_intents`, six intents,
+`final = 0.50·z(vec) + 0.30·graph + 0.20·exact`, deterministic,
+no LLM) run ALWAYS; the Phase 3 gate then decides whether the
+expensive parts run. A gated-off plan carries the scored intent
++ linked nodes as-is, no variants, `fallback_reason="confident
+— no expansion"`. **Difference from Phase 3:** the gate is
+single — a confident multi-part question no longer decomposes
+(C02/C03/C05, M07 pass through untouched, intent intact),
+where Phase 3 decomposed regardless of confidence. When the
+gate opens, decomposition takes precedence over paraphrasing,
+as in Phase 3. No retriever → gating falls back to
+gazetteer-miss-only. No seeds → `fallback_reason="no confident
+link"`, no rewrite variants ever.
+
+Rewrite guardrails (`check_rewrite_variants`, pure checks):
+(a) preservation floor — variant links to all original seeds,
+keeps every fault code (`FAULT_CODE_RE`) and every
+number-with-unit (`NUMBER_RE`, both imported, not copied);
+(b) drift cap — variant seeds ⊆ original seeds ∪ 1-hop
+neighbourhood, and no new fault code / number-with-unit;
+(c) no seeds → all variants dropped; (d) cap ≤3. HyDE is
+explicitly excluded. The seam is
+`HybridRetriever.retrieve(question, query_plan=None)`: with a
+plan it uses the plan's seeds and its sub-questions / variants
+(merged via the Phase 3 merge path); without a plan it is
+byte-identical to Phases 1–2. Golden-set intent labels are
+deliberate per-case judgements of the question's ASK (never
+copied from `query_type`; unanswerable cases are labelled by
+their ask, never `unanswerable`).
+
 ## 7. Context assembly (Phase 1, report §5)
 
 `runtime/retrieval_context.py::assemble_context` — 3,000-token
@@ -232,14 +277,39 @@ fake saturates and the graph arm cannot beat it.
 | 2 | blurred | 0.942 → 0.958; multi-hop 0.954 → 1.000 | Hub penalty fixes M08; PPR ablation delta +0.003 |
 | 3 | blurred | 0.958 → 0.958 (expansion off → on) | **No measurable gain; expansion value unproven on this corpus** |
 | 3 | BoW | 0.958 → 0.965; gated 0.917 → 0.936 | Only movement: aggregate 0.838 → 0.890 |
+| 4 | blurred | 0.958 → 0.958 (plan off → on) | **No measurable gain; link recall 0.762, intent accuracy 0.500, faithfulness 100%** |
+| 4 | BoW | 0.958 → 0.962; gated 0.917 → 0.928 | Only movement: aggregate 0.838 → 0.870; below Phase 3's 0.965 because seedless A02 no longer expands (linking-failure rule) |
 
 Phase 3 exit numbers (off → on): Precision@6 0.217 → 0.217,
 Recall@6 1.000 → 1.000, nDCG@6 0.958 → 0.958 on both setups;
 gated subset blurred 0.931 → 0.931, BoW 0.917 → 0.936. Trigger
-rate 12–13/36 queries; mean top-6 Jaccard vs base 0.88 — variants
+rate 13/36 (BoW) / 11/36 (blurred) queries — see the note below
+on the blurred count; mean top-6 Jaccard vs base 0.88 — variants
 DO move rankings, they just do not improve them on 7 docs.
 Recall@20 is 1.000 by construction on this corpus (the pool
 holds all 7 docs) — never quote it as a gain.
+
+**Phase 4 exit numbers (plan off → on):** Precision@6 0.217 →
+0.217, Recall@6 1.000 → 1.000, nDCG@6 blurred 0.958 → 0.958
+(gated 0.930 → 0.930), BoW 0.958 → 0.962 (gated 0.917 →
+0.928). Entity-link accuracy (entity nodes only: gold nodes
+minus `doc-*`): mean recall **0.762**, exact-set rate 0.611
+(ceiling below 1.0 — gold nodes include answer nodes the
+question never mentions). Intent accuracy vs the deliberate
+§4 labels: **18/36 = 0.500** (lookup 0.500, multi-hop 0.500,
+comparison 0.667, aggregate 0.500, unanswerable 0.333 — the
+unanswerable confusion: only U05 is scored `unanswerable`,
+and its gold label is diagnosis; intent ≠ answerability).
+Rewrite faithfulness: generated preservation rate 0.857 (BoW)
+ / 0.800 (blurred) — the stub's code-stripping variant being
+caught — and the kept-variant re-check is 100% on both
+setups. Gate opened on 14/36 (BoW) / 12/36 (blurred)
+questions. **Note on the Phase 3 trigger counts:** the
+blurred count is now 11/36, not 12/36 — Worker A's gazetteer
+normalisation lets U04 ("building B2") link, so it is no
+longer a gazetteer miss (see `docs/hybrid-retrieval-phase4.md`
+§7 for the verified cause); every Phase 3 headline number
+still reproduces.
 
 **Grid search (w_graph, vec:exact 5:1, blurred):** 0.30 → 0.957,
 0.40 (priors, kept) → 0.958, 0.50 → 0.978. The priors are kept
@@ -276,6 +346,17 @@ labelled pairs (210 answerable) vs ~3,000 needed for LambdaMART
   first.
 - **No LTR training:** 252 pairs is 8% of the threshold; training
   on this golden set would overfit its quirks. Logging only.
+- **No live QueryPlan wiring, and no routing consumes intent:**
+  the plan is built and evaluated, but `search_documents`, the
+  `retrieval_context` hook, the route node and skill selection
+  are untouched. Intent accuracy is 0.500 on the fake setup
+  (§8) — nothing downstream may treat the scored intent as
+  ground truth until the live A/B in §11 passes. The opt-in
+  wiring is §12 (`execution.retrieval.query_plan`).
+- **No intent-weight tuning on this golden set:** `W_VEC /
+  W_GRAPH / W_EXACT` (0.50 / 0.30 / 0.20) are documented
+  priors, not tuned; re-tuning them to lift 0.500 on 36 cases
+  would be overfitting the fake BoW overlap.
 - **No 2-hop traversal as default:** 2 hops is where explosion
   lives; 1 hop + PPR covers the multi-hop cases on this corpus
   (multi-hop nDCG@6 1.000 since Phase 2).
@@ -328,7 +409,7 @@ in `infra/qdrant_client.py`).
    timeout and the vector-only fallback on a forced graph error.
 4. **Run the golden set live through each phase's eval script:**
    `make eval-retrieval-phase1`, `make eval-retrieval-phase2`,
-   `make eval-retrieval-phase3` (pass
+   `make eval-retrieval-phase3`, `make eval-retrieval-phase4` (pass
    `TRACKING_URI=<mlflow uri>` to log to the live MLflow server;
    confirm the `agentic-runtime-retrieval` experiment shows the
    runs, including the Phase 3 `ltr_feature_rows.json` artifact).
@@ -360,6 +441,22 @@ in `infra/qdrant_client.py`).
    (the O22/C2 → controller-doc shape); confirm the hub penalty
    demotes the building-mediated distractor rather than the gold
    doc.
+10. **Live QueryPlan A/B:** swap the stub generators for the
+    live ones (`build_query_plan` with no generator arguments)
+    and re-run the Phase 4 A/B with the same exit criterion
+    (kept-variant re-check 100%, no nDCG@6 regression, gated
+    subset reported separately). Re-tune the gating thresholds
+    live (0.35 / 0.15 are fake-BoW cosine values): log the
+    top-1/margin distribution on live traffic, target ~10–30%
+    of queries expanding. Spot-check that live paraphrases never
+    add asset names/codes/thresholds (the guardrail drop rate
+    on live paraphrases is itself a finding), and that the live
+    decomposition splits the wordings the stub cannot (C02
+    "Both X and Y", C04/C05 "Compare X with Y").
+11. **Grow the QU golden set** before trusting any QueryPlan
+    claim or tuning intent weights / thresholds — 36 cases
+    with 5 intent labels is enough to measure the plumbing,
+    not to tune on.
 
 ## 12. Opt-in wiring follow-up (from Phase 1 §6, still NOT done)
 
@@ -378,7 +475,13 @@ behaves exactly as today. The hook must pass real corpus
 doc-counts for seed specificity (§11.3). No change to
 `search_documents` / the tool surface is needed; the hybrid
 module already accepts injected embeddings/client/store, so the
-wiring is a call-site change, not a redesign.
+wiring is a call-site change, not a redesign. The Phase 4
+variant of the same flag is `execution.retrieval.query_plan:
+true`: build the QueryPlan first (live generators), then call
+`HybridRetriever(use_live_graph=True).retrieve(question,
+query_plan=plan)` and log the plan (intent, margin, seeds,
+gating, fallback reason, kept/dropped variants with reasons)
+to MLflow alongside the trace.
 
 Why not wired yet: there is no live Qdrant/Neo4j in this VM to
 verify the live path against, and wiring without a live check

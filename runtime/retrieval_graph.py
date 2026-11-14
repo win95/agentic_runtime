@@ -4,7 +4,14 @@
 
 Seeds come from a deterministic gazetteer first (exact match on the
 demo vocabulary: asset/component/building/document codes and fault
-codes — no LLM, no embedding similarity in Phase 1). Expansion runs
+codes — no LLM, no embedding similarity in Phase 1). Phase 4 adds a
+normalisation-only variant pass on top of the exact gazetteer
+(``gazetteer_seeds``): diacritics-insensitive matching plus
+hyphen/space/underscore separator variants of the same codes
+(``O-21`` / ``O 21`` / ``o21`` -> ``O21``, ``F204`` -> ``F-204``,
+``motor m2`` / ``motorM2`` -> ``motor-M2``), at confidence 0.8
+instead of 1.0. Exact hits are byte-identical to Phase 1; a variant
+hit for a node that also has an exact hit keeps the 1.0.
 over an allowlisted relation set on an in-memory adjacency built from
 ``seeds/demo_data.py`` RELATIONS + the payload links
 (``runtime/retrieval_linking.py``); the live path calls the existing
@@ -35,6 +42,8 @@ import logging
 import math
 import re
 import time
+import unicodedata
+from collections.abc import Callable
 
 from runtime.retrieval_fusion import zscores
 
@@ -145,6 +154,147 @@ def _canonical_code(code: str) -> str:
     return code  # building-b*, doc-* are already lowercase keys
 
 
+# --- Phase 4: gazetteer normalisation (no LLM entity linker) -----------
+# The exact gazetteer above is unchanged. The variant pass below runs
+# on a diacritics-stripped copy of the lowercased question and matches
+# separator variants of the SAME codes: hyphens, spaces and
+# underscores between the code's parts are optional, so "O-21",
+# "O 21" and "o21" all resolve to O21, "F204" to F-204, "motor m2" /
+# "motorM2" to motor-M2, and likewise for door-sensor-DS1,
+# controller-C1, brake-BK1 and building-B1. Every variant pattern
+# still requires word boundaries on the normalised text, so a code
+# embedded in a longer token ("XO21", "O21x", "motorm2x") never
+# matches. A variant hit scores NORMALISED_CONFIDENCE (0.8), not
+# 1.0 — downstream PPR already weighs seeds by confidence
+# (``runtime/retrieval_ppr.py``), so a normalised hit counts
+# slightly less than an exact one. When nothing links confidently
+# the gazetteer returns [] — the QueryPlan caller says so
+# explicitly; there is no scored-guess fallback here.
+
+NORMALISED_CONFIDENCE = 0.8
+
+_SEP = r"[-_\s]*"  # optional separator(s) between code parts
+
+
+def _strip_diacritics(text: str) -> str:
+    """NFKD strip of combining marks; Vietnamese đ/Đ are not
+    decomposable, so they are mapped to d by hand."""
+    stripped = "".join(
+        ch for ch in unicodedata.normalize("NFKD", text)
+        if not unicodedata.combining(ch)
+    )
+    return stripped.replace("đ", "d").replace("Đ", "D")
+
+
+def _variant_asset(match: re.Match[str]) -> list[tuple[str, str]]:
+    return [("Asset", f"O{match.group(1)}")]
+
+
+def _variant_fault(match: re.Match[str]) -> list[tuple[str, str]]:
+    """Fault-code expansion through a normalised code: same
+    FAULT_CODE_LINKS as the exact pass (unknown fault -> no seeds)."""
+    asset, component = FAULT_CODE_LINKS.get(f"F-{match.group(1)}", (None, None))
+    out: list[tuple[str, str]] = []
+    if asset:
+        out.append(("Asset", asset))
+    if component:
+        out.append(("Component", component))
+    return out
+
+
+def _variant_motor(match: re.Match[str]) -> list[tuple[str, str]]:
+    return [("Component", f"motor-M{match.group(1)}")]
+
+
+def _variant_door_sensor(match: re.Match[str]) -> list[tuple[str, str]]:
+    return [("Component", f"door-sensor-DS{match.group(1)}")]
+
+
+def _variant_controller(match: re.Match[str]) -> list[tuple[str, str]]:
+    return [("Component", f"controller-C{match.group(1)}")]
+
+
+def _variant_brake(match: re.Match[str]) -> list[tuple[str, str]]:
+    return [("Component", f"brake-BK{match.group(1)}")]
+
+
+def _variant_building(match: re.Match[str]) -> list[tuple[str, str]]:
+    return [("Building", f"building-B{match.group(1)}")]
+
+
+_VARIANT_CODE_PATTERNS: list[
+    tuple[re.Pattern[str], Callable[[re.Match[str]], list[tuple[str, str]]]]
+] = [
+    (re.compile(r"\bo" + _SEP + r"(\d{2})\b"), _variant_asset),
+    (re.compile(r"\bf" + _SEP + r"(\d{3})\b"), _variant_fault),
+    (re.compile(r"\bmotor" + _SEP + r"m" + _SEP + r"(\d)\b"), _variant_motor),
+    (
+        re.compile(r"\bdoor" + _SEP + r"sensor" + _SEP + r"ds" + _SEP + r"(\d)\b"),
+        _variant_door_sensor,
+    ),
+    (re.compile(r"\bcontroller" + _SEP + r"c" + _SEP + r"(\d)\b"), _variant_controller),
+    (re.compile(r"\bbrake" + _SEP + r"bk" + _SEP + r"(\d)\b"), _variant_brake),
+    (re.compile(r"\bbuilding" + _SEP + r"b" + _SEP + r"(\d)\b"), _variant_building),
+]
+
+# Document ids in the demo corpus. A doc id's hyphens are the only
+# thing separating its words, so a fully concatenated mention
+# ("docmotoroverheat") can only be segmented back with this
+# vocabulary; a hyphen/space variant of an UNKNOWN doc id does not
+# link (its exact hyphenated form still does, via _CODE_RE).
+KNOWN_DOC_IDS = frozenset({
+    "doc-door-sensor",
+    "doc-motor-overheat",
+    "doc-brake-inspection",
+    "doc-controller-errors",
+    "doc-leveling",
+    "doc-rope-inspection",
+    "doc-o23-overview",
+})
+_DOC_COMPACT = {doc_id.replace("-", ""): doc_id for doc_id in KNOWN_DOC_IDS}
+# At most two word-segments after "doc": every known doc id has one
+# or two, and capping the run keeps a following doc mention (or any
+# following word) from being swallowed into this match.
+_DOC_RUN_RE = re.compile(r"\bdoc" + _SEP + r"([a-z0-9]+(?:[-_\s]+[a-z0-9]+)?)\b")
+
+
+def _doc_variant_matches(norm_text: str) -> list[tuple[int, str]]:
+    """(start, canonical doc id) for separator variants of doc codes.
+
+    Resolution order per match: (1) the separator-stripped mention
+    equals a known doc id ("docmotoroverheat" -> doc-motor-overheat);
+    (2) the longest leading segments form a known doc id
+    ("doc motor overheat manual" -> doc-motor-overheat, "manual" is
+    not part of the id; "doc leveling for ..." -> doc-leveling).
+    Nothing else links: the run is greedy over up to two segments,
+    so a following word can land inside it ("docmotoroverheated
+    manual"), and reconstructing an unknown id from those segments
+    would invent a node — unknown doc ids link only through their
+    exact hyphenated form.
+    """
+    matches: list[tuple[int, str]] = []
+    for match in _DOC_RUN_RE.finditer(norm_text):
+        segments = re.split(r"[-_\s]+", match.group(1))
+        known = _DOC_COMPACT.get("doc" + "".join(segments))
+        if known is not None:
+            matches.append((match.start(), known))
+            continue
+        for end in range(len(segments), 0, -1):
+            candidate = "doc-" + "-".join(segments[:end])
+            if candidate in KNOWN_DOC_IDS:
+                matches.append((match.start(), candidate))
+                break
+    return matches
+
+
+def _variant_name_pattern(name: str) -> re.Pattern[str]:
+    """Component-name pattern on normalised text: the words may be
+    joined by a hyphen/space/underscore or nothing ("door-sensor",
+    "doorsensor"), and diacritic forms match via the stripped text."""
+    parts = [re.escape(word) for word in name.split(" ")]
+    return re.compile(r"\b" + _SEP.join(parts) + r"\b")
+
+
 def _node_type(key: str) -> str:
     if key.startswith("building-"):
         return "Building"
@@ -158,32 +308,77 @@ def _node_type(key: str) -> str:
 def gazetteer_seeds(question: str) -> list[dict]:
     """Deterministic seed entities from a question.
 
-    Returns ``[{"type": ..., "key": ..., "confidence": 1.0}]`` in
-    first-mention order, deduped. Confidence is 1.0: a gazetteer hit
-    is an exact code/name match, not a scored guess.
+    Returns ``[{"type": ..., "key": ..., "confidence": ...}]`` in
+    first-mention order, deduped by key. Confidence is 1.0 for an
+    exact gazetteer hit (today's behaviour, unchanged) and 0.8 for
+    a normalised-variant hit (Phase 4: diacritics-insensitive,
+    hyphen/space/underscore separator variants of the same codes —
+    see the Phase 4 block above). An exact hit and its normalised
+    twin are the same node: the 1.0 is kept.
+
+    Ordering note (deliberate): exact seeds keep today's order
+    (codes in mention order, then component names), so an
+    exact-only question returns byte-identical output to Phase 1.
+    Variant-only seeds slot in by first-mention position among the
+    seeds already placed — for the usual all-code question that is
+    exact first-mention order; a variant mentioned before a
+    component-name exact seed lands before the code seeds but the
+    name seed itself stays last, as it does today. [] when nothing
+    links confidently: no LLM linker, no scored guesses.
     """
     text = (question or "").lower()
     seeds: list[dict] = []
     seen: set[str] = set()
+    positions: list[int] = []  # mention position per seed, same order
 
-    def _add(node_type: str, key: str) -> None:
+    def _add(node_type: str, key: str, position: int) -> None:
         if key not in seen:
             seen.add(key)
             seeds.append({"type": node_type, "key": key, "confidence": 1.0})
+            positions.append(position)
 
+    # Exact pass — unchanged from Phase 1.
     for match in _CODE_RE.finditer(text):
         code = _canonical_code(match.group(1))
         if code.startswith("F-"):
             asset, component = FAULT_CODE_LINKS.get(code, (None, None))
             if asset:
-                _add("Asset", asset)
+                _add("Asset", asset, match.start())
             if component:
-                _add("Component", component)
+                _add("Component", component, match.start())
         else:
-            _add(_node_type(code), code)
+            _add(_node_type(code), code, match.start())
     for name, (node_type, key) in COMPONENT_NAME_LINKS.items():
-        if re.search(rf"\b{re.escape(name)}\b", text):
-            _add(node_type, key)
+        name_match = re.search(rf"\b{re.escape(name)}\b", text)
+        if name_match:
+            _add(node_type, key, name_match.start())
+
+    # Phase 4 variant pass on diacritics-stripped text (confidence 0.8).
+    norm_text = _strip_diacritics(text)
+    offers: list[tuple[int, str, str]] = []
+    for pattern, expand in _VARIANT_CODE_PATTERNS:
+        for match in pattern.finditer(norm_text):
+            for node_type, key in expand(match):
+                offers.append((match.start(), node_type, key))
+    for start, key in _doc_variant_matches(norm_text):
+        offers.append((start, "Document", key))
+    for name, (node_type, key) in COMPONENT_NAME_LINKS.items():
+        name_match = _variant_name_pattern(name).search(norm_text)
+        if name_match:
+            offers.append((name_match.start(), node_type, key))
+    offers.sort(key=lambda offer: offer[0])  # stable: first-mention order
+    for position, node_type, key in offers:
+        if key in seen:
+            continue  # exact twin already placed at 1.0
+        seen.add(key)
+        index = next(
+            (i for i, pos in enumerate(positions) if pos > position), len(seeds)
+        )
+        seeds.insert(
+            index,
+            {"type": node_type, "key": key, "confidence": NORMALISED_CONFIDENCE},
+        )
+        positions.insert(index, position)
     return seeds
 
 

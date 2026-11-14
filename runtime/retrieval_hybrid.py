@@ -67,17 +67,21 @@ logger = logging.getLogger(__name__)
 VECTOR_LIMIT = 40
 
 
-def _exact_match(question: str, doc: dict) -> int:
+def _exact_match(question: str, doc: dict, seeds: list[dict] | None = None) -> int:
     """1 if a code the question names appears verbatim in the doc.
 
     Codes are the gazetteer seeds (asset/component/building/doc
     codes) plus fault codes found in the question text (``F-204`` —
     the codes the docs actually print). Only codes the question
-    names count, never the whole fault table.
+    names count, never the whole fault table. ``seeds`` overrides
+    the gazetteer lookup (the Phase 4 plan seam passes the plan's
+    seeds); ``None`` re-derives them from the question, as before.
     """
     import re
 
-    question_codes = {s["key"].lower() for s in gazetteer_seeds(question)}
+    if seeds is None:
+        seeds = gazetteer_seeds(question)
+    question_codes = {s["key"].lower() for s in seeds}
     for match in re.finditer(r"\bf-\d{3}\b", question.lower()):
         question_codes.add(match.group(0))
     text = f"{doc.get('title', '')} {doc.get('content', '')}".lower()
@@ -144,7 +148,7 @@ class HybridRetriever:
             graph_missing=graph_missing,
         )
 
-    def _candidate_rows(self, question: str):
+    def _candidate_rows(self, question: str, seeds: list[dict] | None = None):
         """Per-question candidate rows (pre-RRF, pre-fusion).
 
         Returns ``(candidates, seeds, expansion, graph_missing)``.
@@ -154,6 +158,11 @@ class HybridRetriever:
         ``best_path_rels`` — everything ``fuse_candidates`` needs.
         Phase 3 expansion calls this once per variant and merges the
         rows before ranking; ``retrieve`` calls it once.
+        ``seeds`` overrides the gazetteer lookup (the Phase 4 plan
+        seam passes the plan's linked nodes); ``None`` (the
+        default) re-derives them from the question, exactly as
+        before — the no-plan path is unchanged. An explicitly
+        empty list means "no confident link" (vector-only).
         """
         from infra.qdrant_client import search_documents
 
@@ -163,7 +172,7 @@ class HybridRetriever:
         vec_by_id = {d["doc_id"]: d for d in vector_docs}
         vec_scores = {d["doc_id"]: float(d.get("score", 0.0)) for d in vector_docs}
 
-        seeds = gazetteer_seeds(question)
+        seeds = seeds if seeds is not None else gazetteer_seeds(question)
         if self.use_live_graph:
             expansion = expand_via_graph_query(seeds, store=self.graph_store)
         else:
@@ -230,7 +239,7 @@ class HybridRetriever:
                 "content": doc.get("content", ""),
                 "vec_score": vec_scores.get(doc_id, 0.0),
                 "graph_score": gscore,
-                "exact": _exact_match(question, doc),
+                "exact": _exact_match(question, doc, seeds=seeds),
                 "g5_direct": features["g5_direct"],
                 "best_path_rels": features["best_path_rels"],
                 "arms": arms,
@@ -238,11 +247,105 @@ class HybridRetriever:
             })
         return candidates, seeds, expansion, graph_missing
 
-    def retrieve(self, question: str):
-        candidates, seeds, expansion, graph_missing = self._candidate_rows(question)
-        final = self._rank_candidates(candidates, graph_missing)
-        ranked_ids = [c["doc_id"] for c in final]
-        trace = {
+    def retrieve(self, question: str, query_plan=None):
+        """Rank docs for one question, optionally through a QueryPlan.
+
+        With ``query_plan=None`` (the default) this is exactly the
+        Phase 1–2 path: one ``_candidate_rows`` call, one fusion
+        rank, the same trace — byte-identical to before Phase 4.
+        With a plan (``runtime/retrieval_query_plan.QueryPlan``):
+        the plan's ``linked_nodes`` seed the original question's
+        rows instead of ``gazetteer_seeds(question)``, and — only
+        when the plan is not gated off — its sub-questions (or,
+        failing those, its rewrite variants) are each retrieved
+        via ``_candidate_rows``, merged with
+        ``merge_candidate_rows`` (the Phase 3 merge path, mean
+        vec/graph, max exact) and ranked by the same
+        ``_rank_candidates``. Sub-question rows re-derive their
+        seeds from the sub-question text (identical to the keys
+        the plan stores for them, confidences preserved); the
+        original row uses the plan's seeds directly. The trace
+        gains a ``query_plan`` block (intent, gating, seeds,
+        sub-questions, variants, fallback reason) and an
+        ``expansion`` block; every other trace key is as before.
+        """
+        if query_plan is None:
+            return self._retrieve_no_plan(question)
+        # Lazy import: retrieval_expansion imports this module at
+        # its top level, so a top-level import here would be circular.
+        from runtime.retrieval_expansion import merge_candidate_rows
+
+        plan_seeds = list(query_plan.linked_nodes or [])
+        base_rows, seeds, expansion, graph_missing = self._candidate_rows(
+            question, seeds=plan_seeds
+        )
+        base_final = self._rank_candidates(base_rows, graph_missing)
+        base_ranked = [c["doc_id"] for c in base_final]
+        if query_plan.sub_questions:
+            expansion_texts = [sq["text"] for sq in query_plan.sub_questions]
+            kind = "decomposition"
+        elif query_plan.rewrite_variants:
+            expansion_texts = list(query_plan.rewrite_variants)
+            kind = "multi-query"
+        else:
+            expansion_texts = []
+            kind = "none"
+        plan_trace = {
+            "intent": query_plan.intent,
+            "confidence": query_plan.confidence,
+            "gated_off": query_plan.gated_off,
+            "fallback_reason": query_plan.fallback_reason,
+            "linked_nodes": [s["key"] for s in seeds],
+            "sub_questions": [sq["text"] for sq in query_plan.sub_questions],
+            "rewrite_variants": list(query_plan.rewrite_variants),
+            "related": query_plan.related,
+            "shared_nodes": list(query_plan.shared_nodes or []),
+            "gating": dict(query_plan.gating or {}),
+        }
+        if not expansion_texts:
+            ranked_ids, trace = base_ranked, self._trace(
+                base_rows, base_final, seeds, expansion, graph_missing
+            )
+            trace["query_plan"] = plan_trace
+            trace["expansion"] = {
+                "triggered": False,
+                "kind": "none",
+                "gating": dict(query_plan.gating or {}),
+                "variants": [],
+            }
+            return ranked_ids, trace
+        variant_rows = []
+        variant_rankings = []
+        for text in expansion_texts:
+            rows, _s, _e, _gm = self._candidate_rows(text)
+            variant_rows.append(rows)
+            variant_rankings.append(
+                [c["doc_id"] for c in self._rank_candidates(rows, graph_missing)]
+            )
+        merged = merge_candidate_rows([base_rows, *variant_rows])
+        all_rankings = [base_ranked, *variant_rankings]
+        for row in merged:
+            row["provenance_variants"] = [
+                i for i, ranked in enumerate(all_rankings)
+                if row["doc_id"] in set(ranked)
+            ]
+        merged_final = self._rank_candidates(merged, graph_missing)
+        ranked_ids = [c["doc_id"] for c in merged_final]
+        trace = self._trace(
+            merged, merged_final, seeds, expansion, graph_missing
+        )
+        trace["query_plan"] = plan_trace
+        trace["expansion"] = {
+            "triggered": True,
+            "kind": kind,
+            "gating": dict(query_plan.gating or {}),
+            "variants": expansion_texts,
+        }
+        return ranked_ids, trace
+
+    def _trace(self, candidates, final, seeds, expansion, graph_missing):
+        """The standard retrieve trace (shared by both paths)."""
+        return {
             "fake": True,
             "phase2": self.phase2,
             "seeds": [s["key"] for s in seeds],
@@ -272,6 +375,13 @@ class HybridRetriever:
                 for c in final
             },
         }
+
+    def _retrieve_no_plan(self, question: str):
+        """The Phase 1–2 retrieve path, untouched by Phase 4."""
+        candidates, seeds, expansion, graph_missing = self._candidate_rows(question)
+        final = self._rank_candidates(candidates, graph_missing)
+        ranked_ids = [c["doc_id"] for c in final]
+        trace = self._trace(candidates, final, seeds, expansion, graph_missing)
         return ranked_ids, trace
 
 
