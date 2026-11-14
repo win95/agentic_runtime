@@ -1,9 +1,14 @@
 """Phase 2 hybrid retrieval tests — PPR (G7), coverage (G6), hub (G8),
 the locked full graph_score formula, the PPR ablation flag, and the
-harness exit criterion on both fake setups.
+Phase 1 -> Phase 2 ranking flip on canned inputs.
 
-Fake-only: no LiteLLM proxy, no Qdrant/Neo4j server. Main features
-only — no parametrized explosion.
+No LiteLLM proxy, no Qdrant/Neo4j server. All retrieval data is
+injected from ``tests/retrieval_stubs.py`` (canned adjacency from
+the real seed RELATIONS, canned payloads, stub embeddings/client);
+the old harness exit-criterion numbers on the fake setups
+(multi-hop nDCG 0.954 -> 1.000 and friends) are gone with the
+fakes and are not reproduced here. Main features only — no
+parametrized explosion.
 """
 
 from __future__ import annotations
@@ -11,7 +16,6 @@ from __future__ import annotations
 import math
 
 from runtime.retrieval_graph import (
-    build_demo_adjacency,
     expand_one_hop,
     gazetteer_seeds,
     graph_features,
@@ -19,16 +23,31 @@ from runtime.retrieval_graph import (
     phase2_graph_scores,
     seed_coverage,
 )
-from runtime.retrieval_harness import evaluate_retriever, load_golden_set
-from runtime.retrieval_hybrid import build_hybrid_retriever
 from runtime.retrieval_ppr import (
     RESTART_PROB,
     personalized_pagerank,
     seed_specificity,
 )
+from tests.retrieval_stubs import (
+    CANNED_DOC_LINKS,
+    canned_adjacency,
+    make_hybrid_retriever,
+)
 
 M08 = ("Elevator O22's controller C2 has CAN bus errors (F-207). "
        "Which document explains CAN bus diagnosis?")
+
+# Vector arm deliberately ranks the wrong doc first (the hub-transiting
+# overview); the graph arm must flip it in Phase 2, not Phase 1.
+M08_VECTOR_SCORES = {
+    "doc-o23-overview": 0.9,
+    "doc-controller-errors": 0.5,
+    "doc-motor-overheat": 0.4,
+    "doc-door-sensor": 0.3,
+    "doc-brake-inspection": 0.2,
+    "doc-leveling": 0.1,
+    "doc-rope-inspection": 0.05,
+}
 
 
 def _toy_adjacency() -> dict:
@@ -122,7 +141,7 @@ def test_seed_specificity_rare_seed_outweighs_ubiquitous_seed():
     weights = {s["key"]: s["confidence"] * spec[s["key"]] for s in seeds}
     scores = personalized_pagerank(adjacency, seeds, seed_weights=weights)
     assert scores["A"] > scores["B"]
-    # The demo corpus: O21 is in 6 docs, motor-M2 in 1.
+    # The canned counts: O21 is in 6 docs, motor-M2 in 1.
     demo_spec = seed_specificity(
         [{"type": "Asset", "key": "O21", "confidence": 1.0},
          {"type": "Component", "key": "motor-M2", "confidence": 1.0}],
@@ -156,20 +175,27 @@ def test_coverage_counts_seeds_within_two_hops():
 
 # --- Hub (G8) ---------------------------------------------------------------
 
-def test_hub_value_is_building_transit_only():
+def test_hub_value_is_building_transit_only(demo_gazetteer):
     # M08: doc-o23-overview's best path transits through building-B2
-    # (degree 4) — a Building — so it carries a hub value; the
-    # directly seed-linked motor doc for M01 carries none.
-    adjacency = build_demo_adjacency()
+    # (degree 3 in the canned adjacency) — a Building — so it
+    # carries a hub value; the directly seed-linked motor doc for
+    # M01 carries none.
+    adjacency = canned_adjacency()
     seeds08 = gazetteer_seeds(M08)
     expansion08 = expand_one_hop(seeds08, adjacency)
-    o23 = graph_features("doc-o23-overview", seeds08, expansion08, adjacency)
+    o23 = graph_features(
+        "doc-o23-overview", seeds08, expansion08, adjacency,
+        payload={"node_ids": list(CANNED_DOC_LINKS["doc-o23-overview"])},
+    )
     assert o23["g8_transit_key"] == "building-B2"
-    assert o23["g8_hub"] == round(math.log1p(4), 4)
+    assert o23["g8_hub"] == round(math.log1p(3), 4)
     seeds01 = gazetteer_seeds(
         "Elevator O21's traction motor M2 overheated (F-204).")
     expansion01 = expand_one_hop(seeds01, adjacency)
-    motor = graph_features("doc-motor-overheat", seeds01, expansion01, adjacency)
+    motor = graph_features(
+        "doc-motor-overheat", seeds01, expansion01, adjacency,
+        payload={"node_ids": list(CANNED_DOC_LINKS["doc-motor-overheat"])},
+    )
     assert motor["g8_transit_key"] is None and motor["g8_hub"] == 0.0
 
 
@@ -218,52 +244,13 @@ def test_phase2_formula_ppr_term_is_log_minmax_not_zscore():
     assert ablated[0] == ablated[1]
 
 
-def test_m08_fixed_by_phase2_not_phase1():
-    # The one multi-hop case Phase 1 got wrong on the blurred setup:
-    # gold doc-controller-errors ranked 2nd behind doc-o23-overview.
-    # Phase 2 (hub penalty) puts the gold doc first; Phase 1 does not.
-    ranked2, _ = build_hybrid_retriever(blurred=True)(M08)
+def test_m08_fixed_by_phase2_not_phase1(demo_gazetteer):
+    # M08, canned inputs: the vector arm ranks the hub-transiting
+    # overview first. Phase 2 (hub penalty inside the path term)
+    # puts the controller doc first; Phase 1 does not.
+    ranked2, _ = make_hybrid_retriever(
+        vector_scores=M08_VECTOR_SCORES).retrieve(M08)
     assert ranked2[0] == "doc-controller-errors"
-    ranked1, _ = build_hybrid_retriever(blurred=True, phase2=False)(M08)
+    ranked1, _ = make_hybrid_retriever(
+        vector_scores=M08_VECTOR_SCORES, phase2=False).retrieve(M08)
     assert ranked1[0] == "doc-o23-overview"
-
-
-# --- Harness: exit criterion ------------------------------------------------
-
-def test_phase2_beats_phase1_on_blurred_multi_hop():
-    golden = load_golden_set()
-    phase1 = evaluate_retriever(
-        build_hybrid_retriever(blurred=True, phase2=False),
-        golden["cases"], retriever_name="p1")
-    phase2 = evaluate_retriever(
-        build_hybrid_retriever(blurred=True), golden["cases"], retriever_name="p2")
-    assert phase2["by_query_type"]["multi-hop"]["ndcg@6"] == 1.000
-    assert phase2["by_query_type"]["multi-hop"]["ndcg@6"] > \
-        phase1["by_query_type"]["multi-hop"]["ndcg@6"]
-    assert phase2["aggregate"]["ndcg@6"] >= phase1["aggregate"]["ndcg@6"]
-    assert phase2["sibling_confusion"]["ndcg@6"] == 1.000
-
-
-def test_ppr_ablation_changes_rankings_on_blurred():
-    golden = load_golden_set()
-    full = evaluate_retriever(
-        build_hybrid_retriever(blurred=True), golden["cases"], retriever_name="full")
-    ablated = evaluate_retriever(
-        build_hybrid_retriever(blurred=True, w_ppr=0.0),
-        golden["cases"], retriever_name="ablated")
-    changed = [a["id"] for a, b in zip(full["per_query"], ablated["per_query"])
-               if a["ranked_ids"] != b["ranked_ids"]]
-    assert changed  # the flag is a live code path, not a dead parameter
-    assert full["aggregate"]["ndcg@6"] > ablated["aggregate"]["ndcg@6"]
-
-
-def test_phase2_does_not_regress_on_bow_setup():
-    golden = load_golden_set()
-    from runtime.retrieval_baseline import build_baseline_retriever
-
-    base = evaluate_retriever(
-        build_baseline_retriever(), golden["cases"], retriever_name="b")
-    hyb = evaluate_retriever(
-        build_hybrid_retriever(blurred=False), golden["cases"], retriever_name="h")
-    assert hyb["aggregate"]["ndcg@6"] >= base["aggregate"]["ndcg@6"]
-    assert hyb["aggregate"]["recall@6"] >= base["aggregate"]["recall@6"]

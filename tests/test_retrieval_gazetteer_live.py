@@ -7,9 +7,8 @@ the dynamic gazetteer in ``runtime/retrieval_graph.py``
 ``run_query`` returns canned keys. The fake store holds NON-demo
 keys (``AHU-7``, ``pump-P5``) whose shapes the demo patterns do
 not cover, so a link for them proves the patterns came from the
-ontology list, not the demo tables. Demo-mode behaviour itself is
-covered by the existing ``test_query_plan_linking.py`` /
-``test_retrieval_phase1.py`` files, which must pass unmodified.
+ontology list, not any built-in vocabulary. With an empty cache
+the gazetteer links nothing — there is no demo mode any more.
 Main features only.
 """
 
@@ -53,7 +52,7 @@ LIVE_KEYS = {
 
 
 @pytest.fixture(autouse=True)
-def _demo_mode():
+def _clear_cache():
     clear_gazetteer_codes()
     yield
     clear_gazetteer_codes()
@@ -151,10 +150,10 @@ def test_dynamic_no_false_positive_on_embedded_keys():
     assert gazetteer_seeds("The pumpP5x unit.") == []
 
 
-def test_dynamic_keys_do_not_link_in_demo_mode():
-    # AHU-7 / pump-P5 shapes are outside the demo vocabulary, so
-    # they link only after a refresh — proof the live patterns
-    # come from the ontology list, not the demo tables.
+def test_dynamic_keys_do_not_link_before_refresh():
+    # AHU-7 / pump-P5 shapes are outside any built-in vocabulary,
+    # so they link only after a refresh — proof the live patterns
+    # come from the ontology list, not a fallback.
     assert gazetteer_seeds("Check AHU-7.") == []
     assert gazetteer_seeds("Check pump P5.") == []
 
@@ -203,10 +202,11 @@ def test_second_refresh_replaces_cache_no_stale_keys():
     assert _seed_map("Elevator O77 is stuck.") == {"O77": 1.0}
 
 
-def test_clear_returns_to_demo_mode():
+def test_clear_returns_to_empty():
+    # There is no demo mode any more: clearing the cache leaves
+    # the gazetteer linking nothing until the next refresh.
     _refresh()
     assert gazetteer_seeds("Elevator O21 is stuck.") == []
     clear_gazetteer_codes()
-    assert _seed_map("Elevator O21 is stuck.") == {"O21": 1.0}
-    assert _seed_map("Elevator O-21 is stuck.") == {"O21": 0.8}
+    assert gazetteer_seeds("Elevator O21 is stuck.") == []
     assert gazetteer_seeds("Check AHU-7.") == []

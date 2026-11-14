@@ -49,7 +49,7 @@ from runtime.retrieval_harness import (  # noqa: E402
     load_golden_set,
     run_retrieval_eval,
 )
-from runtime.retrieval_hybrid import build_live_hybrid_retriever  # noqa: E402
+from runtime.retrieval_hybrid import build_hybrid_retriever  # noqa: E402
 
 PREFLIGHT_EXIT_CODE = 2
 
@@ -199,10 +199,10 @@ def preflight_live_stores(*, client=None, graph_store=None) -> dict:
 def build_live_baseline_retriever(limit: int = 20, *, embeddings=None, client=None):
     """Plain-vector live baseline — ``search_documents``, no graph arm.
 
-    Mirrors ``build_blurred_baseline_retriever`` but live: a small
-    ``retrieve(question)`` closure over the real Qdrant client and the
-    real query-time embeddings. Accepts injected ``embeddings`` /
-    ``client`` so tests can build it against mocked stores.
+    A small ``retrieve(question)`` closure over the real Qdrant
+    client and the real query-time embeddings. Accepts injected
+    ``embeddings`` / ``client`` so tests can build it against
+    mocked stores.
     """
     from infra.qdrant_client import get_client, search_documents
     from runtime.llm_factory import build_embeddings
@@ -289,7 +289,7 @@ def main() -> int:
     }
 
     baseline = build_live_baseline_retriever()
-    hybrid = build_live_hybrid_retriever()
+    hybrid = build_hybrid_retriever()
     results: dict = {}
     for label, retriever in (("baseline", baseline), ("hybrid", hybrid)):
         key = f"live / {label}"

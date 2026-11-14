@@ -1,7 +1,7 @@
 """Phase 4 — decomposition along graph paths (Query Understanding).
 
-Pilot mission: ``fault_analysis`` only. Fake-only in this VM: no live
-LLM, Qdrant, or Neo4j; the live decomposition generator is lazy
+Pilot mission: ``fault_analysis`` only. No live LLM, Qdrant, or
+Neo4j is built here; the live decomposition generator is lazy
 (no model is built until a gated query actually needs one).
 
 This module answers ONE question about a multi-part question:
@@ -12,7 +12,7 @@ multi-part — that is ``detect_multi_part`` from
 ``runtime/retrieval_expansion.py`` (rules (a)–(d)), imported here,
 never copied — and it does NOT split questions itself: sub-questions
 come only from the EXISTING pluggable generators
-(``stub_decompose_question`` for the fake path,
+(``stub_decompose_question`` for the deterministic stub path,
 ``build_live_decomposition_generator`` by default).
 
 Relatedness rule (exact, as built)
@@ -24,10 +24,11 @@ the seed set of part i (seed keys only). Only parts with a non-empty
 seed set count as *seeded* parts.
 
 * Two seeded parts are RELATED iff the BFS distance between their
-  seed sets on the UNDIRECTED demo adjacency
-  (``build_demo_adjacency``) is <= 2 — i.e. the parts share a node
-  within 1 hop of both parts' seeds — or they share a seed outright
-  (distance 0, a special case of the same rule).
+  seed sets on the UNDIRECTED adjacency supplied by the caller
+  (the live graph adjacency — see ``relatedness_verdict``) is
+  <= 2 — i.e. the parts share a node within 1 hop of both parts'
+  seeds — or they share a seed outright (distance 0, a special
+  case of the same rule).
 * ``shared_nodes`` is the intersection of the parts' closed 1-hop
   neighbourhoods (each part's seeds UNION their 1-hop neighbours),
   sorted, for the related pair(s). It therefore names the shared
@@ -37,9 +38,7 @@ seed set count as *seeded* parts.
 * The question-level verdict is RELATED iff ANY seeded pair is
   related; INDEPENDENT iff there are >= 2 seeded parts and NO pair
   is related. ``min_distance`` is the smallest BFS distance over
-  seeded pairs (``None`` when no path exists between any pair —
-  the demo graph has two disconnected components, B1 and B2, so
-  O21-vs-O22 pairs have no path at all).
+  seeded pairs (``None`` when no path exists between any pair).
 
 Design decisions that differ from the brief (deliberate, not tuning)
 --------------------------------------------------------------------
@@ -47,7 +46,7 @@ Design decisions that differ from the brief (deliberate, not tuning)
    in three cases where no verdict exists, rather than forcing one:
    (a) the question is not detected multi-part (M06 — see below);
    (b) the generator returns the question unchanged ("no
-   decomposition" — C02, C04, C05 in the fake path), so there are
+   decomposition" — C02, C04, C05 in the stub path), so there are
    no parts to compare; (c) fewer than two parts carry seeds
    (C06: the second stub part names no code). Forcing
    INDEPENDENT in case (c) would be wrong: a seedless part is
@@ -71,7 +70,7 @@ Known limits, preserved (not fixed here)
 * The stub splitter cannot split "Both X and Y" (C02) or
   "Compare X with Y" (C04/C05) wordings — those report "no
   decomposition" (``sub_questions=[]``, ``related=None``) in the
-  fake path. Do not write a smarter splitter here; the live
+  stub path. Do not write a smarter splitter here; the live
   generator is the path that splits them.
 * The stub splitter is naive about clause boundaries: in C03 its
   second clause re-mentions the door sensor, so that part's seeds
@@ -90,7 +89,7 @@ from runtime.retrieval_expansion import (
     detect_multi_part,
     stub_decompose_question,
 )
-from runtime.retrieval_graph import build_demo_adjacency, gazetteer_seeds
+from runtime.retrieval_graph import gazetteer_seeds
 
 __all__ = [
     "decompose_question",
@@ -110,7 +109,7 @@ RELATED_MAX_DISTANCE = 2
 def _undirected_neighbours(adjacency: dict, node: str) -> set[str]:
     """Neighbours of ``node`` on the undirected graph.
 
-    The demo adjacency stores each edge in both directions, but the
+    The adjacency stores each edge in both directions, but the
     lookup is written direction-insensitively (a listed edge counts
     either way) so a synthetic adjacency that lists an edge once
     still behaves as undirected, as the rule specifies.
@@ -168,8 +167,15 @@ def relatedness_verdict(seed_sets: list[list[str]], adjacency: dict | None = Non
     otherwise ``True`` iff any seeded pair is within
     ``RELATED_MAX_DISTANCE`` hops, with ``shared_nodes`` the sorted
     union of the closed-1-hop intersections of the related pairs.
+
+    ``adjacency`` is REQUIRED (the live graph adjacency): there is
+    no demo adjacency to fall back to.
     """
-    adjacency = adjacency if adjacency is not None else build_demo_adjacency()
+    if adjacency is None:
+        raise ValueError(
+            "relatedness_verdict requires 'adjacency' (the live graph "
+            "adjacency); no default adjacency exists."
+        )
     seeded = [list(seeds) for seeds in seed_sets if seeds]
     if len(seeded) < 2:
         return {"related": None, "shared_nodes": [], "min_distance": None}
@@ -221,12 +227,20 @@ def decompose_question(
     ``decomposition_generator`` is a pluggable callable
     ``question -> list[str]``; the default is
     ``build_live_decomposition_generator`` (lazy model build — no
-    LLM call in this VM). Pass ``stub_decompose_question`` for the
-    fake path. When the generator returns the question unchanged
+    LLM call until a gated query needs one). Pass
+    ``stub_decompose_question`` for the deterministic stub path.
+    ``adjacency`` is REQUIRED (the live graph adjacency) and is
+    passed through to ``relatedness_verdict``. When the generator
+    returns the question unchanged
     (or nothing), that is reported as "no decomposition":
     ``sub_questions=[]`` and ``related=None`` — sub-questions are
     never invented here.
     """
+    if adjacency is None:
+        raise ValueError(
+            "decompose_question requires 'adjacency' (the live graph "
+            "adjacency); no default adjacency exists."
+        )
     detection = detect_multi_part(question)
     if not detection["is_multi_part"]:
         return {

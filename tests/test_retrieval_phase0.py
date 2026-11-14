@@ -1,20 +1,17 @@
-"""Phase 0 hybrid retrieval tests — metrics, golden set, harness, baseline.
+"""Phase 0 hybrid retrieval tests — metrics, golden set, harness.
 
-Fake-only: no LiteLLM proxy, no Qdrant/Neo4j server, no live embedding
-model. The MLflow test uses a throwaway local SQLite backend (real
-MLflow code, no network).
+No live Qdrant/Neo4j server, no LiteLLM proxy: the metrics and
+harness tests run on canned inputs and stub callables, and the
+MLflow test uses a throwaway local SQLite backend (real MLflow
+code, no network). The old fake-vector baseline section is gone
+with the fake removal (option B): there is no baseline retriever
+in ``runtime/`` any more, so nothing here measures one.
 """
 
 from __future__ import annotations
 
 import pytest
 
-from runtime.retrieval_baseline import (
-    DeterministicFakeEmbeddings,
-    FakeQdrantClient,
-    baseline_search,
-    build_baseline_retriever,
-)
 from runtime.retrieval_harness import (
     evaluate_retriever,
     load_golden_set,
@@ -172,40 +169,3 @@ def test_harness_mlflow_logs_locally_and_never_crashes(tmp_path):
     assert log_to_mlflow(result, tracking_uri="http://127.0.0.1:1") is None
     # No tracking URI: skipped cleanly.
     assert log_to_mlflow(result, tracking_uri=None) is None
-
-
-# --- Baseline (fakes only) -------------------------------------------------
-
-def test_baseline_uses_real_search_path_and_ranks_door_doc_first():
-    docs = baseline_search("door sensor faults F-101")
-    assert docs[0]["doc_id"] == "doc-door-sensor"
-    assert all("doc_id" in d and "score" in d for d in docs)
-    assert len(docs) == len(DOCUMENTS)
-
-
-def test_baseline_deterministic_and_smoke_through_harness(golden):
-    retriever = build_baseline_retriever()
-    first = retriever("What causes motor overheating?")
-    second = retriever("What causes motor overheating?")
-    assert first[0] == second[0]  # same ranking on repeat
-    assert first[0][0] == "doc-motor-overheat"
-
-    result = evaluate_retriever(retriever, golden["cases"],
-                                retriever_name="plain_vector_baseline")
-    agg = result["aggregate"]
-    assert agg["n_cases"] == len(golden["cases"])
-    assert agg["n_answerable"] + agg["n_unanswerable"] == agg["n_cases"]
-    for key in ("recall@6", "ndcg@6", "mrr", "recall@20"):
-        assert 0.0 <= agg[key] <= 1.0
-    # With only 7 docs and a limit-20 pool, Recall@20 saturates;
-    # Recall@6 is the discriminating metric.
-    assert agg["recall@20"] >= agg["recall@6"]
-    assert result["sibling_confusion"]["n"] >= 4
-
-
-def test_fake_embeddings_share_vocabulary_with_fake_client():
-    embeddings = DeterministicFakeEmbeddings()
-    client = FakeQdrantClient(embeddings)
-    assert embeddings.dimension > 0
-    assert client.embeddings is embeddings
-    assert len(embeddings.embed_query("motor overheating")) == embeddings.dimension

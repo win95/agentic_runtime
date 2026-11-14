@@ -1,5 +1,16 @@
 # Hybrid retrieval — Phase 1: link + fused rerank (no reranker model)
 
+> **REMOVED IN PART 2026-11-14 (user option B — delete the
+> fakes entirely).** The code-blurred fake embeddings
+> (`runtime/retrieval_blurred.py`) and this phase's eval
+> script (`scripts/eval_retrieval_phase1.py`,
+> `make eval-retrieval-phase1`) are DELETED, and the
+> `--fake` flag of `scripts/backfill_qdrant_links.py` is
+> gone. The linking / fusion / context-assembly code
+> survives. The numbers in §5 are HISTORICAL fake-setup
+> measurements and are NOT reproducible; the only retrieval
+> eval left is `make eval-retrieval-live`.
+
 Report: `~/workspace/research_notes/hybrid-vector-graph-retrieval-20261114-0430/report.md`
 (§4.1, §4.2, §4.7 fusion + guardrails, §5 context assembly, §8 Phase 1).
 Phase 0: `docs/hybrid-retrieval-phase0.md`. Pilot mission: `fault_analysis`.
@@ -11,12 +22,12 @@ Phase 0: `docs/hybrid-retrieval-phase0.md`. Pilot mission: `fault_analysis`.
 | `runtime/retrieval_linking.py` | Grounded `DOCUMENT_LINKS` table for the 7 demo docs + `compute_document_links` / `with_document_links` / `linking_coverage`. |
 | `runtime/retrieval_graph.py` | Gazetteer seed linking, demo adjacency, 1-hop expansion (caps + hub), G1/G2/G4/G5 + `graph_score`. |
 | `runtime/retrieval_fusion.py` | Exact fusion formula, RRF pre-fusion, guardrails 1–4. |
-| `runtime/retrieval_blurred.py` | Code-blurred fake embeddings (the exit-criterion setup). |
-| `runtime/retrieval_hybrid.py` | `HybridRetriever` (dense + 1-hop graph + fusion) + fake builders. |
+| `runtime/retrieval_blurred.py` | ~~Code-blurred fake embeddings (the exit-criterion setup).~~ **DELETED 2026-11-14** (fake removal). |
+| `runtime/retrieval_hybrid.py` | `HybridRetriever` (dense + 1-hop graph + fusion). The factory is now `build_hybrid_retriever` (real stores only — the fake builders are deleted). |
 | `runtime/retrieval_context.py` | §5 context assembly (budget, dedup, verbalised triples). |
 | `infra/qdrant_client.py` | `set_document_payloads` + `backfill_document_links` (payload-only, no re-embedding). |
-| `scripts/backfill_qdrant_links.py` | `python -m scripts.backfill_qdrant_links [--fake]`. |
-| `scripts/eval_retrieval_phase1.py` | Baseline vs hybrid on both fake setups + w_graph grid search. `make eval-retrieval-phase1`. |
+| `scripts/backfill_qdrant_links.py` | `python -m scripts.backfill_qdrant_links` (the `--fake` flag was removed 2026-11-14 — real client only). |
+| `scripts/eval_retrieval_phase1.py` | ~~Baseline vs hybrid on both fake setups + w_graph grid search. `make eval-retrieval-phase1`.~~ **DELETED 2026-11-14** (fake removal). Use `make eval-retrieval-live`. |
 | `tests/test_retrieval_phase1.py` | Main-feature tests only (24 tests). |
 
 Changed, not new: `seeds/demo_data.py` (payload link fields on all
@@ -25,7 +36,9 @@ Changed, not new: `seeds/demo_data.py` (payload link fields on all
 `ingest/loaders.py` (`load_documents` fills missing links),
 `runtime/retrieval_baseline.py` (`FakeQdrantClient` gains
 `retrieve` / `scroll` / `set_payload` / `upsert` + a payload store,
-so the backfill is testable). Untouched on purpose:
+so the backfill is testable). **Note:** that file was deleted
+2026-11-14 with the fakes; the backfill is now tested via the
+test-local doubles in `tests/retrieval_stubs.py`. Untouched on purpose:
 `app/config.py`, `runtime/llm_factory.py`, the embedding paths in
 `infra/qdrant_client.py`, `search_documents`, the `retrieval_context`
 hook, `services/user_service/`, and every other mission.
@@ -68,7 +81,8 @@ hybrid top-6 on both fake setups).
 Phase 1 never pick up `node_ids`. `backfill_document_links`
 scrolls every point, computes links from `retrieval_linking`, and
 calls `set_payload` — payload-only, no re-embedding. Idempotent
-(second run: 0 updated, 7 unchanged on the fake). Live:
+(second run: 0 updated, 7 unchanged — measured on the deleted
+fake). Live:
 `python -m scripts.backfill_qdrant_links` (Qdrant up).
 
 ## 2. Neo4j 1-hop expansion (report §3.2, §4.1, §4.2)
@@ -91,7 +105,8 @@ handling (a node with degree >50 is a hub; `LOCATED_IN` through a
 hub weighs 0.15, not 0.40), Neo4j timeout 150 ms with graceful
 vector-only fallback. `expansion_nodes_returned` +
 `expansion_truncated` are logged per query in the hybrid trace.
-The fake/eval graph is an in-memory adjacency built from
+The fake/eval graph (deleted with the fakes, 2026-11-14) was an
+in-memory adjacency built from
 `RELATIONS` + payload doc links (the payload edges are what make
 the 4 non-Document docs reachable at all); the live path calls the
 existing `ontology/knowledge/graph_query.py::neighbors` via
@@ -195,10 +210,10 @@ approximation, documented as such; no tokenizer dependency was
 added. Live serving must re-measure with the real tokenizer before
 trusting the budget edge.
 
-## 5. Numbers — both fake setups (golden set phase0-v1, n=36/30)
+## 5. Numbers — both fake setups (golden set phase0-v1, n=36/30) — HISTORICAL, not reproducible
 
-Run: `python -m scripts.eval_retrieval_phase1` (exit code 0 = exit
-criterion passed). All numbers are fake-setup numbers.
+~~Run: `python -m scripts.eval_retrieval_phase1` (exit code 0 = exit
+criterion passed).~~ The eval script is deleted. All numbers are fake-setup numbers.
 
 | Setup | Retriever | Recall@6 | nDCG@6 | MRR | sibling Recall@6 | sibling nDCG@6 |
 |---|---|---|---|---|---|---|
@@ -244,9 +259,11 @@ after live verification below): add an opt-in mission-config flag,
 e.g. `execution.retrieval.hybrid: true` on `fault_analysis` only,
 read by the `retrieval_context` hook (SessionStart, the existing
 pre-retrieval hook): when set, the hook calls
-`HybridRetriever(use_live_graph=True)` with the real LiteLLM
-embeddings + Qdrant client + the live Neo4j store
-(`expand_via_graph_query`), assembles context with
+`build_hybrid_retriever()` (the single factory — real LiteLLM
+embeddings + Qdrant client + live Neo4j store; the old
+`HybridRetriever(use_live_graph=True)` call shape no longer
+constructs, the retriever requires injected embeddings +
+client), assembles context with
 `runtime/retrieval_context.py::assemble_context`, and logs the
 trace (seeds, expansion, per-candidate G1–G5, guardrail flags) to
 MLflow. When unset, the hook behaves exactly as today. No change
@@ -266,14 +283,16 @@ stopping point for Phase 1.
    `python -m scripts.backfill_qdrant_links` for an existing
    collection; confirm with a Qdrant scroll that all 7 points carry
    non-empty `node_ids`.
-2. Run the real vector retriever through the same harness, then
-   the hybrid with `use_live_graph=True` against the live Neo4j
-   graph; replace the fake numbers above with live ones. Expect
+2. Run the golden set live via `make eval-retrieval-live`
+   (live baseline + live hybrid through the same harness);
+   replace the fake numbers above with live ones. Expect
    the live sibling-subset gain to be *smaller* than the blurred
    fake's (real embeddings retain some code signal) — re-run the
    w_graph grid search live and re-check 0.50 vs the 0.40 priors.
-3. Point the eval at the live MLflow server
-   (`python -m scripts.eval_retrieval_phase1 --tracking-uri <uri>`)
+   (The per-phase eval script is deleted, so there is no
+   `make eval-retrieval-phase1` live run anymore.)
+3. Point the live eval at the live MLflow server
+   (`python -m scripts.eval_retrieval_live --tracking-uri <uri>`)
    and confirm the `agentic-runtime-retrieval` experiment shows the
    runs.
 4. Grow the corpus before trusting Recall@20: with 7 docs it is

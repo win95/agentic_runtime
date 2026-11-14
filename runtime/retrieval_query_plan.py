@@ -1,8 +1,12 @@
 """Phase 4 — QueryPlan: link + intent + gated expansion, one object.
 
-Pilot mission: ``fault_analysis`` only. Fake-only in this VM: no
-live LLM, Qdrant, or Neo4j; the generators are pluggable and the
-live ones are built lazily (see ``runtime/retrieval_expansion.py``).
+Pilot mission: ``fault_analysis`` only. No live LLM, Qdrant, or
+Neo4j is built here; the generators are pluggable and the live
+ones are built lazily (see ``runtime/retrieval_expansion.py``).
+The adjacency is supplied by the caller (the live graph
+adjacency) — there is no demo adjacency — and the intent
+scorer takes injected embeddings (its vector signal is 0 when
+none are supplied; see ``runtime/retrieval_intent.py``).
 
 A QueryPlan is the per-question understanding that the retriever
 may use. It is built by ``build_query_plan`` in four steps:
@@ -120,11 +124,7 @@ from runtime.retrieval_expansion import (
     MAX_VARIANTS,
     gating_decision,
 )
-from runtime.retrieval_graph import (
-    build_demo_adjacency,
-    expand_one_hop,
-    gazetteer_seeds,
-)
+from runtime.retrieval_graph import expand_one_hop, gazetteer_seeds
 from runtime.retrieval_intent import NUMBER_RE, score_intents
 
 logger = logging.getLogger(__name__)
@@ -221,8 +221,15 @@ def check_rewrite_variants(
     trivially — the caller (``build_query_plan``) filters those
     out before calling, as Phase 3 does; the check itself does
     not special-case them. Deterministic, no LLM.
+
+    ``adjacency`` is REQUIRED (the live graph adjacency): there
+    is no demo adjacency to fall back to.
     """
-    adjacency = adjacency if adjacency is not None else build_demo_adjacency()
+    if adjacency is None:
+        raise ValueError(
+            "check_rewrite_variants requires 'adjacency' (the live graph "
+            "adjacency); no default adjacency exists."
+        )
     kept: list[str] = []
     dropped: list[str] = []
     reasons: dict[str, list[str]] = {}
@@ -292,6 +299,9 @@ def build_query_plan(
     retriever=None,
     embeddings=None,
     adjacency: dict | None = None,
+    asset_data: dict | None = None,
+    doc_links: dict | None = None,
+    vocabulary: set[str] | None = None,
     paraphrase_generator=None,
     decomposition_generator=None,
 ) -> QueryPlan:
@@ -300,17 +310,31 @@ def build_query_plan(
     Order: link + intent (always) -> gate -> expand only if the
     gate opens. ``retriever`` is a ``HybridRetriever`` (or None);
     its ``_candidate_rows`` supply the pre-fusion rows gating
-    reads. ``embeddings`` / ``adjacency`` are passed through to
-    ``score_intents`` / the guardrails (defaults: the fake
-    embeddings and the demo adjacency). Generators are pluggable
+    reads. ``embeddings`` is passed through to ``score_intents``
+    (``None`` means the intent vector signal is 0 — see
+    ``runtime/retrieval_intent.py``); ``asset_data`` /
+    ``doc_links`` / ``vocabulary`` are the injected intent data,
+    passed through likewise. ``adjacency`` is REQUIRED (the live
+    graph adjacency) and is passed through to ``score_intents``,
+    the guardrails and the decomposition. Generators are pluggable
     callables; when omitted the LIVE generators apply (lazy
     model build — no LLM call until a gated query needs one,
     and no call at all for a gated-off question).
     """
-    adjacency = adjacency if adjacency is not None else build_demo_adjacency()
+    if adjacency is None:
+        raise ValueError(
+            "build_query_plan requires 'adjacency' (the live graph "
+            "adjacency); no default adjacency exists."
+        )
     seeds = gazetteer_seeds(question or "")
     intent_result = score_intents(
-        question or "", seeds=seeds, embeddings=embeddings, adjacency=adjacency
+        question or "",
+        seeds=seeds,
+        embeddings=embeddings,
+        adjacency=adjacency,
+        asset_data=asset_data,
+        doc_links=doc_links,
+        vocabulary=vocabulary,
     )
     detection = detect_multi_part(question or "")
 

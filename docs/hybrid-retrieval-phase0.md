@@ -1,5 +1,18 @@
 # Hybrid retrieval — Phase 0: golden set + harness + baseline
 
+> **REMOVED 2026-11-14 (user option B — delete the fakes
+> entirely).** The fake baseline in this phase
+> (`runtime/retrieval_baseline.py`,
+> `DeterministicFakeEmbeddings`, `FakeQdrantClient`) and its
+> eval script (`scripts/eval_retrieval.py`,
+> `make eval-retrieval-phase0`) are DELETED. This doc is kept
+> as the historical record of the phase: the golden set and
+> the harness survive, the baseline numbers below are
+> HISTORICAL fake-setup measurements and are NOT
+> reproducible. The only retrieval eval left is
+> `make eval-retrieval-live` (live plain-vector baseline
+> inside `scripts/eval_retrieval_live.py`).
+
 Report: `~/workspace/research_notes/hybrid-vector-graph-retrieval-20261114-0430/report.md`
 (§8 Phase 0, §6 evaluation). Pilot mission: `fault_analysis`.
 
@@ -10,8 +23,8 @@ Report: `~/workspace/research_notes/hybrid-vector-graph-retrieval-20261114-0430/
 | `scripts/golden_set_fault_analysis.json` | Golden set, version `phase0-v1`, 36 cases. Chosen home: next to the other eval script (`scripts/eval_mission.py`), because it is eval data, not a seed — it is *verified against* `seeds/demo_data.py`, never loaded by the seeders. |
 | `runtime/retrieval_metrics.py` | Pure metrics: recall@k, nDCG@k (binary relevance), MRR. No infra. |
 | `runtime/retrieval_harness.py` | `load_golden_set` / `validate_golden_set`, `evaluate_retriever`, `log_to_mlflow` (never raises), `run_retrieval_eval`, `format_results_table`. |
-| `runtime/retrieval_baseline.py` | Deterministic plain-vector baseline, fakes only. |
-| `scripts/eval_retrieval.py` | CLI: `python -m scripts.eval_retrieval [--tracking-uri URI] [--output FILE]`. Also `make eval-retrieval-phase0`. |
+| `runtime/retrieval_baseline.py` | ~~Deterministic plain-vector baseline, fakes only.~~ **DELETED 2026-11-14** (fake removal). The live plain-vector baseline now lives inside `scripts/eval_retrieval_live.py` (`build_live_baseline_retriever`). |
+| `scripts/eval_retrieval.py` | ~~CLI: `python -m scripts.eval_retrieval [--tracking-uri URI] [--output FILE]`. Also `make eval-retrieval-phase0`.~~ **DELETED 2026-11-14** (fake removal). Use `make eval-retrieval-live`. |
 | `tests/test_retrieval_phase0.py` | Main-feature tests only. |
 
 ## Golden-set grounding rules (how each case was built)
@@ -59,7 +72,7 @@ Report: `~/workspace/research_notes/hybrid-vector-graph-retrieval-20261114-0430/
   10 s timeout).
 - `k_context=6` (the context size) and `k_pool=20` (pre-rerank pool).
 
-## Baseline decisions (all fakes — no live LLM/Qdrant/Neo4j in this VM)
+## Baseline decisions (all fakes — DELETED 2026-11-14, historical record)
 
 - `DeterministicFakeEmbeddings`: bag-of-words vectors over a fixed
   vocabulary built **from the seeded document texts only**, never from
@@ -80,10 +93,11 @@ Report: `~/workspace/research_notes/hybrid-vector-graph-retrieval-20261114-0430/
   re-measured on the user's machine with the real embedding model and
   a seeded Qdrant (see "Live verification" below).
 
-## Baseline numbers (fake setup)
+## Baseline numbers (fake setup — HISTORICAL, not reproducible)
 
-Run `python -m scripts.eval_retrieval` to reproduce. Recorded
-2026-11-14 (golden set `phase0-v1`, n=36, answerable=30,
+~~Run `python -m scripts.eval_retrieval` to reproduce.~~ The
+eval script is deleted; these numbers cannot be re-run.
+Recorded 2026-11-14 (golden set `phase0-v1`, n=36, answerable=30,
 unanswerable=6; mean latency ~0.01–0.02 s/query — fake wall-clock,
 varies run to run, not a serving measurement):
 
@@ -124,8 +138,10 @@ retrieval quality.
    run the real vector retriever through the same harness — the
    baseline numbers above must be replaced by live ones.
 2. Point the harness at a live MLflow server:
-   `python -m scripts.eval_retrieval --tracking-uri <uri>` and confirm
-   the `agentic-runtime-retrieval` experiment shows the run with the
-   per-query trace artifact.
+   `python -m scripts.eval_retrieval_live --tracking-uri <uri>`
+   and confirm the `agentic-runtime-retrieval` experiment shows
+   the run with the per-query trace artifact. (The old
+   `python -m scripts.eval_retrieval` command is deleted with
+   the fake eval.)
 3. Grow the corpus before trusting Recall@20: with 7 docs it is
    saturated by construction.

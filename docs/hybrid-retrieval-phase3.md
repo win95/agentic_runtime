@@ -1,5 +1,14 @@
 # Hybrid retrieval — Phase 3: gated expansion, decomposition, LTR logging
 
+> **REMOVED IN PART 2026-11-14 (user option B — delete the
+> fakes entirely).** This phase's eval script
+> (`scripts/eval_retrieval_phase3.py`,
+> `make eval-retrieval-phase3`) is DELETED. The expansion /
+> gating / merge / LTR-logging code survives. The numbers in
+> §7 are HISTORICAL fake-setup measurements (stub
+> generators) and are NOT reproducible; the only retrieval
+> eval left is `make eval-retrieval-live`.
+
 Report: `~/workspace/research_notes/hybrid-vector-graph-retrieval-20261114-0430/report.md`
 (§2 expansion methods, §4.1 feature rows, §4.4d LTR, §8 Phase 3).
 Phase 0: `docs/hybrid-retrieval-phase0.md`. Phase 1:
@@ -15,9 +24,9 @@ Phase 0: `docs/hybrid-retrieval-phase0.md`. Phase 1:
 | `runtime/retrieval_metrics.py` | `precision_at_k` (binary relevance). `evaluate_ranking` untouched — a Phase 0 test pins its exact key set. |
 | `runtime/retrieval_harness.py` | Precision@6 in per-query rows, aggregates, per-type breakdown, sibling subset, `format_results_table`, MLflow metrics; `ltr_feature_rows` + `ltr_pair_count`; `log_to_mlflow(..., ltr_rows=...)` logs `ltr_feature_rows.json`. |
 | `runtime/retrieval_hybrid.py` | Refactor only: `retrieve` split into `_candidate_rows` (pre-fusion rows) + `_rank_candidates` (RRF → fusion → guardrails), `trace_feature_rows` (full per-candidate rows for LTR logging), `arms` on each candidate. No score changed — Phase 1/2 evals reproduce their documented numbers exactly. |
-| `scripts/eval_retrieval_phase3.py` (new) | Expansion A/B off vs on, both fake setups + per-type + gated-subset breakdown, Precision@6, per-variant overlap stats, LTR pair count. `make eval-retrieval-phase3`. |
+| `scripts/eval_retrieval_phase3.py` (new) | ~~Expansion A/B off vs on, both fake setups + per-type + gated-subset breakdown, Precision@6, per-variant overlap stats, LTR pair count. `make eval-retrieval-phase3`.~~ **DELETED 2026-11-14** (fake removal). Use `make eval-retrieval-live`. |
 | `tests/test_retrieval_phase3.py` (new) | Main-feature tests only (23 tests). |
-| `Makefile` | New `eval-retrieval-phase3` target. |
+| `Makefile` | ~~New `eval-retrieval-phase3` target.~~ Target removed 2026-11-14 (fake removal). |
 
 Changed nothing else. Untouched on purpose: `app/config.py`,
 `runtime/llm_factory.py`, the embedding paths in
@@ -66,10 +75,12 @@ identical to the original, dedups, and caps at 3.
 **Verified only with stub generators in tests/eval** (no live LLM
 in this VM): `stub_paraphrase_variants` — a synonym-swap variant
 (word-boundary swaps only, codes/numbers copied verbatim) plus a
-code-stripped variant (parenthetical codes removed). The eval and
-the tests pass the stubs explicitly; `build_expanded_retriever`
-is the stub-wired fake convenience, live use must construct
-`ExpandedRetriever` directly so the live generators apply.
+code-stripped variant (parenthetical codes removed). The tests pass
+the stubs explicitly; `build_expanded_retriever` now builds over
+the live factory (`build_hybrid_retriever`) with the live LLM
+generators by default (tests inject the stub generators) — the
+old "stub-wired fake convenience" shape is gone with the fake
+evals.
 
 ## 3. Decomposition — deterministic heuristic first
 
@@ -151,10 +162,10 @@ merged set is reranked by the SAME fusion (RRF k=60 → top-30 →
 weighted fusion → guardrails → top-6). Expansion never invents
 candidates and never bypasses the fusion.
 
-## 7. Numbers — expansion A/B, both fake setups (golden set phase0-v1, n=36/30)
+## 7. Numbers — expansion A/B, both fake setups (golden set phase0-v1, n=36/30) — HISTORICAL, not reproducible
 
-Run: `python -m scripts.eval_retrieval_phase3` (exit code 0 =
-exit criterion passed). All numbers are fake-setup numbers with
+~~Run: `python -m scripts.eval_retrieval_phase3` (exit code 0 =
+exit criterion passed).~~ The eval script is deleted. All numbers are fake-setup numbers with
 STUB generators — they measure the merge/rerank plumbing and the
 gating, not model-written paraphrases.
 
@@ -204,14 +215,16 @@ unmeasured — that is the live A/B in §8.
 ## 8. Live verification (user's machine)
 
 Same standing items as Phases 1–2, plus Phase 3 specifics — the
-full consolidated checklist is in `docs/hybrid-retrieval.md` §9;
+full consolidated checklist is in `docs/hybrid-retrieval.md` §11;
 the Phase 3 items are:
 
-1. Run the golden set live through each phase's eval script
-   (`make eval-retrieval-phase1/2/3`) with the real embeddings +
-   Qdrant + Neo4j, and replace every fake number above with live
-   ones. Re-run the w_graph grid live with **0.50 first** (the
-   first-to-recheck-live runner-up in Phases 1–2).
+1. Run the golden set live via `make eval-retrieval-live`
+   (live baseline + live hybrid through the same harness) and
+   replace every fake number above with live ones. Re-run the
+   w_graph grid live with **0.50 first** (the
+   first-to-recheck-live runner-up in Phases 1–2). (The
+   per-phase eval scripts are deleted, so there is no
+   `make eval-retrieval-phase1/2/3` live run anymore.)
 2. Swap the stub generators for the live ones
    (`ExpandedRetriever(base)` with no generator arguments) and
    re-run the Phase 3 A/B: real 3B paraphrases may drift where
@@ -232,7 +245,9 @@ the Phase 3 items are:
 5. Grow the corpus / golden set before trusting any expansion
    claim — and before LTR: 252 pairs is 8% of the ~3,000-pair
    threshold. Do NOT train a ranker on this golden set.
-6. Point the eval at the live MLflow server
-   (`python -m scripts.eval_retrieval_phase3 --tracking-uri <uri>`)
+6. Point the live eval at the live MLflow server
+   (`python -m scripts.eval_retrieval_live --tracking-uri <uri>`)
    and confirm the `agentic-runtime-retrieval` experiment shows
    the runs, including the `ltr_feature_rows.json` artifact.
+   (The old `python -m scripts.eval_retrieval_phase3` command
+   is deleted with the fake eval.)

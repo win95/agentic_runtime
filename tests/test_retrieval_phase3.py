@@ -1,11 +1,13 @@
 """Phase 3 hybrid retrieval tests — gated expansion, decomposition
 detection, variant merge + rerank, precision@k, LTR feature-row
-logging (structure only — NO training code), and the harness A/B
-on both fake setups.
+logging (structure only — NO training code).
 
-Fake-only: no LiteLLM proxy, no Qdrant/Neo4j server. The live
-generators are verified with a stub chat model (no LLM call at
-construction, one call per generation). Main features only.
+No LiteLLM proxy, no Qdrant/Neo4j server. The live generators are
+verified with a stub chat model (no LLM call at construction, one
+call per generation). Retrieval runs over canned inputs from
+``tests/retrieval_stubs.py``; the old harness A/B numbers on the
+fake setups are gone with the fakes and are not reproduced here.
+Main features only.
 """
 
 from __future__ import annotations
@@ -14,7 +16,6 @@ from runtime.retrieval_expansion import (
     EXPANSION_PROMPT,
     LOW_TOP1_VEC,
     SMALL_MARGIN_VEC,
-    build_expanded_retriever,
     build_live_variant_generator,
     detect_multi_part,
     gating_decision,
@@ -28,8 +29,11 @@ from runtime.retrieval_harness import (
     ltr_feature_rows,
     ltr_pair_count,
 )
-from runtime.retrieval_hybrid import build_hybrid_retriever
 from runtime.retrieval_metrics import precision_at_k
+from tests.retrieval_stubs import (
+    make_expanded_retriever,
+    make_hybrid_retriever,
+)
 
 L02 = ("What should be done when a traction motor overheats (F-204) "
        "with winding temperature above 90C?")
@@ -40,6 +44,31 @@ C03 = ("O21 has a door sensor fault (F-101) and O22 has a motor overheating faul
        "Which document covers the door sensor problem?")
 A01 = "List all the fault codes the technical documents cover for elevator O21."
 M06 = "Which building is elevator O21 in, and which document covers its motor overheating?"
+# Confident, single-part, seeded: no gating trigger, no decomposition.
+CONFIDENT_Q = ("Which document covers the remedy for elevator O21's "
+               "motor M2 overheating (F-204)?")
+
+# Confident vector arm: one clear top hit (0.9) with a wide margin.
+CONFIDENT_SCORES = {
+    "doc-motor-overheat": 0.9,
+    "doc-door-sensor": 0.1,
+    "doc-brake-inspection": 0.09,
+    "doc-controller-errors": 0.08,
+    "doc-leveling": 0.07,
+    "doc-rope-inspection": 0.06,
+    "doc-o23-overview": 0.05,
+}
+# Flat, weak vector arm (0.3 everywhere): top-1 below the gate and
+# zero margin, so gating triggers on every question.
+WEAK_SCORES = {
+    "doc-door-sensor": 0.3,
+    "doc-motor-overheat": 0.3,
+    "doc-brake-inspection": 0.3,
+    "doc-controller-errors": 0.3,
+    "doc-leveling": 0.3,
+    "doc-rope-inspection": 0.3,
+    "doc-o23-overview": 0.3,
+}
 
 
 def _rows(*vec_scores):
@@ -89,20 +118,20 @@ def test_gating_gazetteer_miss_triggers():
     assert decision["triggered"] and "gazetteer_miss" in decision["reasons"]
 
 
-def test_gating_confident_exact_match_does_not_trigger():
-    decision = gating_decision(L02, _rows(0.52, 0.10, 0.0))
+def test_gating_confident_exact_match_does_not_trigger(demo_gazetteer):
+    # Seeded (O21, motor-M2), confident top-1, wide margin: nothing fires.
+    decision = gating_decision(CONFIDENT_Q, _rows(0.52, 0.10, 0.0))
     assert not decision["triggered"] and decision["reasons"] == []
 
 
-def test_gating_end_to_end_on_fake_setups():
-    # L06 (no code, top-1 0.21) expands on both setups; L02
-    # (confident, exact match) does not.
-    for blurred in (False, True):
-        base = build_hybrid_retriever(blurred=blurred)
-        rows06, _, _, _ = base._candidate_rows(L06)
-        rows02, _, _, _ = base._candidate_rows(L02)
-        assert gating_decision(L06, rows06)["triggered"]
-        assert not gating_decision(L02, rows02)["triggered"]
+def test_gating_end_to_end_on_canned_retriever(demo_gazetteer):
+    # L06 (no code) expands even with a confident vector arm
+    # (gazetteer miss); the seeded, confident question does not.
+    base = make_hybrid_retriever(vector_scores=CONFIDENT_SCORES)
+    rows06, _, _, _ = base._candidate_rows(L06)
+    rows_conf, _, _, _ = base._candidate_rows(CONFIDENT_Q)
+    assert gating_decision(L06, rows06)["triggered"]
+    assert not gating_decision(CONFIDENT_Q, rows_conf)["triggered"]
 
 
 # --- Decomposition detection -------------------------------------------------
@@ -200,18 +229,18 @@ def test_merge_takes_mean_vec_graph_and_max_exact():
     assert merged["d1"]["arms"] == ["graph"]
 
 
-def test_expanded_retriever_returns_base_when_nothing_triggers():
-    base = build_hybrid_retriever(blurred=True)
-    expanded = build_expanded_retriever(blurred=True)
-    ranked_base, _ = base.retrieve(L02)
-    ranked_exp, trace = expanded.retrieve(L02)
+def test_expanded_retriever_returns_base_when_nothing_triggers(demo_gazetteer):
+    base = make_hybrid_retriever(vector_scores=CONFIDENT_SCORES)
+    expanded = make_expanded_retriever(vector_scores=CONFIDENT_SCORES)
+    ranked_base, _ = base.retrieve(CONFIDENT_Q)
+    ranked_exp, trace = expanded.retrieve(CONFIDENT_Q)
     assert ranked_exp == ranked_base
     assert trace["expansion"]["triggered"] is False
     assert trace["expansion"]["kind"] == "none"
 
 
-def test_expanded_retriever_merges_variants_and_logs_overlap():
-    expanded = build_expanded_retriever(blurred=True)
+def test_expanded_retriever_merges_variants_and_logs_overlap(demo_gazetteer):
+    expanded = make_expanded_retriever(vector_scores=WEAK_SCORES)
     ranked, trace = expanded.retrieve(C01)
     assert trace["expansion"]["triggered"] is True
     assert trace["expansion"]["kind"] in ("decomposition", "multi-query")
@@ -222,12 +251,22 @@ def test_expanded_retriever_merges_variants_and_logs_overlap():
     assert len(ranked) == 6
 
 
+def test_expanded_retriever_keeps_base_top1_in_top6(demo_gazetteer):
+    # Expansion reranks the merged set; it must not lose the base
+    # retriever's top hit from the final top-6 on this canned set.
+    base = make_hybrid_retriever(vector_scores=WEAK_SCORES)
+    expanded = make_expanded_retriever(vector_scores=WEAK_SCORES)
+    base_ranked, _ = base.retrieve(C01)
+    ranked, _ = expanded.retrieve(C01)
+    assert base_ranked[0] in ranked
+
+
 # --- LTR feature-row logging (structure only — no training) -------------------
 
-def test_ltr_rows_carry_every_section_4_1_field():
+def test_ltr_rows_carry_every_section_4_1_field(demo_gazetteer):
     golden = load_golden_set()
     result = evaluate_retriever(
-        build_expanded_retriever(blurred=True), golden["cases"][:3],
+        make_expanded_retriever(vector_scores=WEAK_SCORES), golden["cases"][:3],
         retriever_name="ltr-check")
     rows = ltr_feature_rows(result)
     assert rows  # 3 cases x 7 candidates
@@ -250,10 +289,10 @@ def test_ltr_rows_carry_every_section_4_1_field():
     assert {r["doc_id"]: r["label"] for r in l01}["doc-door-sensor"] == 1
 
 
-def test_ltr_pair_count_is_far_below_threshold_and_no_training_exists():
+def test_ltr_pair_count_is_far_below_threshold_and_no_training_exists(demo_gazetteer):
     golden = load_golden_set()
     result = evaluate_retriever(
-        build_expanded_retriever(blurred=True), golden["cases"],
+        make_expanded_retriever(vector_scores=WEAK_SCORES), golden["cases"],
         retriever_name="ltr-count")
     count = ltr_pair_count(result)
     assert count["pairs"] == 36 * 7  # every case x every candidate
@@ -266,33 +305,3 @@ def test_ltr_pair_count_is_far_below_threshold_and_no_training_exists():
 
     assert not hasattr(expansion_mod, "train_ltr")
     assert not hasattr(harness_mod, "train_ltr")
-
-
-# --- Harness A/B end-to-end on fakes -------------------------------------------
-
-def test_expansion_ab_no_precision_loss_no_regression_blurred():
-    golden = load_golden_set()
-    off = evaluate_retriever(
-        build_hybrid_retriever(blurred=True), golden["cases"], retriever_name="off")
-    on = evaluate_retriever(
-        build_expanded_retriever(blurred=True), golden["cases"], retriever_name="on")
-    assert on["aggregate"]["precision@6"] >= off["aggregate"]["precision@6"]
-    assert on["aggregate"]["recall@6"] >= off["aggregate"]["recall@6"]
-    assert on["aggregate"]["ndcg@6"] >= off["aggregate"]["ndcg@6"]
-    gated_ids = [r["id"] for r in on["per_query"]
-                 if (r.get("trace") or {}).get("expansion", {}).get("triggered")
-                 and r["answerable"]]
-    gated_on = [r for r in on["per_query"] if r["id"] in gated_ids]
-    gated_off = [r for r in off["per_query"] if r["id"] in gated_ids]
-    assert sum(r["ndcg@6"] or 0 for r in gated_on) / len(gated_on) >= \
-        sum(r["ndcg@6"] or 0 for r in gated_off) / len(gated_off)
-
-
-def test_expansion_ab_no_regression_bow():
-    golden = load_golden_set()
-    off = evaluate_retriever(
-        build_hybrid_retriever(blurred=False), golden["cases"], retriever_name="off")
-    on = evaluate_retriever(
-        build_expanded_retriever(blurred=False), golden["cases"], retriever_name="on")
-    assert on["aggregate"]["precision@6"] >= off["aggregate"]["precision@6"]
-    assert on["aggregate"]["ndcg@6"] >= off["aggregate"]["ndcg@6"]

@@ -1,5 +1,14 @@
 # Hybrid retrieval — Phase 4: Query Understanding (QueryPlan)
 
+> **REMOVED IN PART 2026-11-14 (user option B — delete the
+> fakes entirely).** This phase's eval script
+> (`scripts/eval_retrieval_phase4.py`,
+> `make eval-retrieval-phase4`) is DELETED. The QueryPlan /
+> intent / guardrail code survives. The numbers in §6 are
+> HISTORICAL fake-setup measurements and are NOT
+> reproducible; the only retrieval eval left is
+> `make eval-retrieval-live`.
+
 Report: `~/workspace/research_notes/hybrid-vector-graph-retrieval-20261114-0430/report.md`
 (§2 expansion methods, §8 Phase 4).
 Phase 0: `docs/hybrid-retrieval-phase0.md`. Phase 1:
@@ -18,9 +27,9 @@ Phase 0: `docs/hybrid-retrieval-phase0.md`. Phase 1:
 | `runtime/retrieval_intent.py` | (Worker B) `score_intents` — fusion-style intent scoring, deterministic, no LLM. |
 | `runtime/retrieval_decompose.py` | (Worker C) `decompose_question` + `relatedness_verdict` — RELATED iff BFS distance ≤2 between parts' seed sets; `related=None` when no verdict exists. |
 | `scripts/golden_set_fault_analysis.json` | Every case gains an `"intent"` label (deliberate per-case judgement, §4). No other field changed; `load_golden_set` ignores the new field, so Phase 0–3 evals still load the set. |
-| `scripts/eval_retrieval_phase4.py` (new) | Plan off vs on, both fake setups + link accuracy, intent accuracy, rewrite faithfulness, downstream nDCG@6 delta. `make eval-retrieval-phase4`. |
+| `scripts/eval_retrieval_phase4.py` (new) | ~~Plan off vs on, both fake setups + link accuracy, intent accuracy, rewrite faithfulness, downstream nDCG@6 delta. `make eval-retrieval-phase4`.~~ **DELETED 2026-11-14** (fake removal). Use `make eval-retrieval-live`. |
 | `tests/test_retrieval_phase4.py` (new) | Main-feature tests only (21 tests). |
-| `Makefile` | New `eval-retrieval-phase4` target (+ `.PHONY`). |
+| `Makefile` | ~~New `eval-retrieval-phase4` target (+ `.PHONY`).~~ Target removed 2026-11-14 (fake removal). |
 
 Changed nothing else. Untouched on purpose: `search_documents`,
 the `retrieval_context` hook, the route node, skill selection,
@@ -38,7 +47,12 @@ One object per question, built in four steps
 2. **Intent** — `score_intents(question, seeds, embeddings,
    adjacency)` (Worker B): six intents, fusion-style
    `final = 0.50·z(vec) + 0.30·graph + 0.20·exact`, ties break in
-   `INTENT_ORDER` (lookup first, unanswerable last).
+   `INTENT_ORDER` (lookup first, unanswerable last). Inputs are
+   INJECTED since the 2026-11-14 fake removal — `score_intents`
+   now takes `embeddings`, `asset_data`, `doc_links`,
+   `vocabulary` (plus `seeds` / `adjacency`); with no
+   embeddings the vector signal is 0 for every intent and
+   graph + exact carry the score.
 3. **Decompose** — `decompose_question` (Worker C), only when the
    gate opens (see §2).
 4. **Gate** — `gating_decision` on the base retriever's PRE-fusion
@@ -227,10 +241,10 @@ aggregate ("How many floors…"), U05 is diagnosis (the scorer's
 Untouched on purpose: `search_documents`, the
 `retrieval_context` hook, the route node, skill selection.
 
-## 6. Numbers — plan off vs on, both fake setups (golden set phase0-v1, n=36/30)
+## 6. Numbers — plan off vs on, both fake setups (golden set phase0-v1, n=36/30) — HISTORICAL, not reproducible
 
-Run: `python -m scripts.eval_retrieval_phase4` (exit code 0 =
-exit criterion passed). All numbers are fake-setup numbers
+~~Run: `python -m scripts.eval_retrieval_phase4` (exit code 0 =
+exit criterion passed).~~ The eval script is deleted. All numbers are fake-setup numbers
 with STUB generators — they measure the plan plumbing, the
 gating and the guardrails, not model-written paraphrases.
 
@@ -368,7 +382,9 @@ is not claimed as a gain.
 ## 7. Phase 0–3 reproduction (no-plan path byte-identical)
 
 Re-ran all four phase evals after the Phase 4 changes
-(`make eval-retrieval-phase0/1/2/3`):
+(`make eval-retrieval-phase0/1/2/3` — then runnable; the phase
+eval scripts were deleted 2026-11-14, so this reproduction
+cannot be re-run):
 
 * Phase 0 baseline: nDCG@6 0.942 — as documented.
 * Phase 1: blurred 0.906 → 0.942, sibling 0.908 → 1.000;
@@ -407,16 +423,17 @@ Same standing items as Phases 1–3, plus Phase 4 specifics —
 the full consolidated checklist is in
 `docs/hybrid-retrieval.md` §11; the Phase 4 items are:
 
-1. Run the golden set live through each phase's eval script
-   (`make eval-retrieval-phase0/1/2/3/4`) with the real
-   embeddings + Qdrant + Neo4j, and replace every fake number
-   above with live ones. Expect link recall to be HIGHER live
-   (real questions name codes in more spellings than the
-   golden set's) and intent accuracy to move — the BoW
-   prototype overlap that drives the diagnosis-swallow in §6.2
-   is a fake-setup artefact; a real embedding model may
+1. Run the golden set live via `make eval-retrieval-live`
+   (live baseline + live hybrid through the same harness) and
+   replace every fake number above with live ones. Expect link
+   recall to be HIGHER live (real questions name codes in more
+   spellings than the golden set's) and intent accuracy to move
+   — the BoW prototype overlap that drives the diagnosis-swallow
+   in §6.2 is a fake-setup artefact; a real embedding model may
    separate lookup / diagnosis / procedure better, or worse in
-   new ways. Re-measure, do not assume.
+   new ways. Re-measure, do not assume. (The per-phase eval
+   scripts are deleted, so there is no
+   `make eval-retrieval-phase0/1/2/3/4` live run anymore.)
 2. Swap the stub generators for the live ones
    (`build_query_plan` with no generator arguments, and
    `HybridRetriever.retrieve(question, query_plan=plan)`) and
@@ -448,14 +465,16 @@ the full consolidated checklist is in
    `retrieval_context` hook: when set, the hook builds a
    QueryPlan (live generators, real LiteLLM embeddings +
    Qdrant client + live Neo4j store), calls
-   `HybridRetriever(use_live_graph=True).retrieve(question,
+   `build_hybrid_retriever().retrieve(question,
    query_plan=plan)`, assembles context with
    `runtime/retrieval_context.py::assemble_context`, and logs
    the plan (intent, margin, seeds, gating, fallback reason,
    kept/dropped variants with reasons) to MLflow. When unset,
    the hook behaves exactly as today. No change to
    `search_documents` / the tool surface is needed.
-6. Point the eval at the live MLflow server
-   (`python -m scripts.eval_retrieval_phase4 --tracking-uri
+6. Point the live eval at the live MLflow server
+   (`python -m scripts.eval_retrieval_live --tracking-uri
    <uri>`) and confirm the `agentic-runtime-retrieval`
-   experiment shows the runs.
+   experiment shows the runs. (The old
+   `python -m scripts.eval_retrieval_phase4` command is
+   deleted with the fake eval.)

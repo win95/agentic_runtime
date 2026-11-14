@@ -1,8 +1,12 @@
 """Phase 4 QueryPlan integration tests — plan build, guardrails, seam.
 
-Fake-only: no LiteLLM proxy, no Qdrant/Neo4j server. The stub
-generators stand in for the live ones everywhere. Main features
-only.
+No LiteLLM proxy, no Qdrant/Neo4j server. The stub generators
+stand in for the live ones everywhere; retrieval runs over canned
+inputs from ``tests/retrieval_stubs.py`` (canned adjacency,
+canned per-asset data, keyword-overlap embeddings). The old
+fake-corpus eval measurements (link recall 0.7616, intent
+accuracy 18/36, nDCG 0.958) are gone with the fakes and are not
+reproduced here. Main features only.
 """
 
 from __future__ import annotations
@@ -14,8 +18,7 @@ from runtime.retrieval_expansion import (
     stub_paraphrase_variants,
 )
 from runtime.retrieval_graph import gazetteer_seeds
-from runtime.retrieval_harness import evaluate_retriever, load_golden_set
-from runtime.retrieval_hybrid import build_hybrid_retriever
+from runtime.retrieval_harness import load_golden_set
 from runtime.retrieval_intent import INTENT_ORDER
 from runtime.retrieval_query_plan import (
     FALLBACK_CONFIDENT,
@@ -24,8 +27,15 @@ from runtime.retrieval_query_plan import (
     build_query_plan,
     check_rewrite_variants,
 )
+from tests.retrieval_stubs import (
+    CANNED_ASSET_DATA,
+    CANNED_DOC_LINKS,
+    KeywordEmbeddings,
+    canned_adjacency,
+    demo_vocabulary,
+    make_hybrid_retriever,
+)
 
-L08 = "What does the door sensor troubleshooting guide say about the sensor gap?"
 L06 = ("How often should traction ropes be inspected, and what defects "
        "should be checked?")
 M04 = ("Elevator O21's controller C1 reports CAN bus errors. Which document "
@@ -36,13 +46,37 @@ M01 = ("Elevator O21's traction motor M2 overheated (F-204). Which document cove
        "the remedy, and what component is involved?")
 U01 = "What is the warranty period for elevator O21's traction motor M2?"
 
+# Confident vector arm: one clear top hit (0.9) with a wide margin.
+CONFIDENT_SCORES = {
+    "doc-motor-overheat": 0.9,
+    "doc-door-sensor": 0.1,
+    "doc-brake-inspection": 0.09,
+    "doc-controller-errors": 0.08,
+    "doc-leveling": 0.07,
+    "doc-rope-inspection": 0.06,
+    "doc-o23-overview": 0.05,
+}
+# Flat, weak vector arm (0.3 everywhere): gating triggers on every question.
+WEAK_SCORES = {
+    "doc-door-sensor": 0.3,
+    "doc-motor-overheat": 0.3,
+    "doc-brake-inspection": 0.3,
+    "doc-controller-errors": 0.3,
+    "doc-leveling": 0.3,
+    "doc-rope-inspection": 0.3,
+    "doc-o23-overview": 0.3,
+}
+
 
 def _plan(question, retriever=None, **kwargs):
     return build_query_plan(
         question,
         retriever=retriever,
-        embeddings=retriever.embeddings if retriever is not None else None,
-        adjacency=retriever.adjacency if retriever is not None else None,
+        embeddings=KeywordEmbeddings(),
+        adjacency=canned_adjacency(),
+        asset_data=CANNED_ASSET_DATA,
+        doc_links=CANNED_DOC_LINKS,
+        vocabulary=demo_vocabulary(),
         paraphrase_generator=stub_paraphrase_variants,
         decomposition_generator=stub_decompose_question,
         **kwargs,
@@ -51,12 +85,13 @@ def _plan(question, retriever=None, **kwargs):
 
 # --- QueryPlan build ---------------------------------------------------------
 
-def test_gated_off_plan_keeps_intent_and_links_but_no_variants():
-    retriever = build_hybrid_retriever(blurred=True)
-    plan = _plan(L08, retriever)
-    assert plan.intent == "lookup"
+def test_gated_off_plan_keeps_intent_and_links_but_no_variants(demo_gazetteer):
+    retriever = make_hybrid_retriever(vector_scores=CONFIDENT_SCORES)
+    plan = _plan(M01, retriever)
+    assert plan.intent == "diagnosis"
     assert plan.linked_nodes == [
-        {"type": "Component", "key": "door-sensor-DS1", "confidence": 1.0}
+        {"type": "Asset", "key": "O21", "confidence": 1.0},
+        {"type": "Component", "key": "motor-M2", "confidence": 0.8},
     ]
     assert plan.gated_off is True
     assert plan.fallback_reason == FALLBACK_CONFIDENT
@@ -68,8 +103,8 @@ def test_gated_off_plan_keeps_intent_and_links_but_no_variants():
     assert plan.gating["triggered"] is False
 
 
-def test_gated_on_decomposition_plan_carries_sub_questions():
-    retriever = build_hybrid_retriever(blurred=True)
+def test_gated_on_decomposition_plan_carries_sub_questions(demo_gazetteer):
+    retriever = make_hybrid_retriever(vector_scores=WEAK_SCORES)
     plan = _plan(C01, retriever)
     assert plan.gated_off is False
     assert plan.fallback_reason is None
@@ -85,8 +120,8 @@ def test_gated_on_decomposition_plan_carries_sub_questions():
     assert plan.rewrite_variants == []
 
 
-def test_gated_on_single_part_plan_carries_kept_variants():
-    retriever = build_hybrid_retriever(blurred=True)
+def test_gated_on_single_part_plan_carries_kept_variants(demo_gazetteer):
+    retriever = make_hybrid_retriever(vector_scores=WEAK_SCORES)
     plan = _plan(M04, retriever)
     assert plan.gated_off is False
     assert plan.sub_questions == []
@@ -97,8 +132,8 @@ def test_gated_on_single_part_plan_carries_kept_variants():
     assert plan.fallback_reason is None
 
 
-def test_no_link_plan_says_so_and_carries_no_variants():
-    retriever = build_hybrid_retriever(blurred=True)
+def test_no_link_plan_says_so_and_carries_no_variants(demo_gazetteer):
+    retriever = make_hybrid_retriever(vector_scores=WEAK_SCORES)
     plan = _plan(L06, retriever)
     assert plan.linked_nodes == []
     assert plan.gated_off is False  # gazetteer miss opens the gate
@@ -106,7 +141,7 @@ def test_no_link_plan_says_so_and_carries_no_variants():
     assert plan.rewrite_variants == []
 
 
-def test_no_retriever_gating_falls_back_to_gazetteer_miss_only():
+def test_no_retriever_gating_falls_back_to_gazetteer_miss_only(demo_gazetteer):
     seeded = _plan(U01)  # seeds present, no retriever -> gated off
     assert seeded.gated_off is True
     assert seeded.gating["reasons"] == []
@@ -118,10 +153,10 @@ def test_no_retriever_gating_falls_back_to_gazetteer_miss_only():
     assert seedless.fallback_reason == FALLBACK_NO_LINK
 
 
-def test_confident_multi_part_is_gated_off_unlike_phase3():
+def test_confident_multi_part_is_gated_off_unlike_phase3(demo_gazetteer):
     # Phase 3 decomposed C02/C03/C05/M07 regardless of confidence;
     # Phase 4's single gate leaves them untouched (no LLM call).
-    retriever = build_hybrid_retriever(blurred=True)
+    retriever = make_hybrid_retriever(vector_scores=CONFIDENT_SCORES)
     c02 = ("Both O21 and O22 had controller communication errors "
            "(F-410 on O21, F-207 on O22). Which document explains CAN bus "
            "diagnosis for both?")
@@ -134,7 +169,7 @@ def test_confident_multi_part_is_gated_off_unlike_phase3():
 
 # --- Rewrite guardrails -------------------------------------------------------
 
-def test_guardrail_keeps_faithful_variant():
+def test_guardrail_keeps_faithful_variant(demo_gazetteer):
     question = ("Elevator O21's traction motor M2 overheated (F-204). "
                 "Which document covers the remedy?")
     kept, dropped, reasons = check_rewrite_variants(
@@ -142,11 +177,12 @@ def test_guardrail_keeps_faithful_variant():
         ["What guide describes the fix for the overheated traction motor M2 "
          "on elevator O21 (F-204)?"],
         linked_nodes=gazetteer_seeds(question),
+        adjacency=canned_adjacency(),
     )
     assert len(kept) == 1 and dropped == [] and reasons == {}
 
 
-def test_guardrail_drops_variant_that_drops_a_code():
+def test_guardrail_drops_variant_that_drops_a_code(demo_gazetteer):
     question = ("Elevator O21's traction motor M2 overheated (F-204). "
                 "Which document covers the remedy?")
     kept, dropped, reasons = check_rewrite_variants(
@@ -154,12 +190,13 @@ def test_guardrail_drops_variant_that_drops_a_code():
         ["Elevator O21's traction motor M2 overheated. "
          "Which document covers the remedy?"],
         linked_nodes=gazetteer_seeds(question),
+        adjacency=canned_adjacency(),
     )
     assert kept == []
     assert reasons[dropped[0]] == ["missing_fault_codes"]
 
 
-def test_guardrail_drops_variant_with_a_foreign_entity():
+def test_guardrail_drops_variant_with_a_foreign_entity(demo_gazetteer):
     question = ("Elevator O21's traction motor M2 overheated (F-204). "
                 "Which document covers the remedy?")
     kept, dropped, reasons = check_rewrite_variants(
@@ -167,13 +204,14 @@ def test_guardrail_drops_variant_with_a_foreign_entity():
         ["Elevator O22's motor M3 overheated (F-206). "
          "Which document covers the remedy?"],
         linked_nodes=gazetteer_seeds(question),
+        adjacency=canned_adjacency(),
     )
     assert kept == []
     assert "drift" in reasons[dropped[0]]
     assert "missing_entities" in reasons[dropped[0]]
 
 
-def test_guardrail_drops_variant_inventing_a_threshold():
+def test_guardrail_drops_variant_inventing_a_threshold(demo_gazetteer):
     question = ("Elevator O21's traction motor M2 overheated (F-204). "
                 "Which document covers the remedy?")
     kept, dropped, reasons = check_rewrite_variants(
@@ -181,24 +219,26 @@ def test_guardrail_drops_variant_inventing_a_threshold():
         ["What guide describes the fix for the overheated traction motor M2 "
          "on elevator O21 (F-204) at 92C?"],
         linked_nodes=gazetteer_seeds(question),
+        adjacency=canned_adjacency(),
     )
     assert kept == []
     assert reasons[dropped[0]] == ["drift"]
 
 
-def test_guardrail_drops_all_variants_when_no_seeds():
+def test_guardrail_drops_all_variants_when_no_seeds(demo_gazetteer):
     kept, dropped, reasons = check_rewrite_variants(
         L06,
         ["How often should traction ropes be inspected?",
          "What defects should be checked on traction ropes?"],
         linked_nodes=[],
+        adjacency=canned_adjacency(),
     )
     assert kept == []
     assert len(dropped) == 2
     assert all(r == ["no_seeds"] for r in reasons.values())
 
 
-def test_guardrail_caps_at_three_variants():
+def test_guardrail_caps_at_three_variants(demo_gazetteer):
     question = ("Elevator O21's traction motor M2 overheated (F-204). "
                 "Which document covers the remedy?")
     variants = [
@@ -212,20 +252,27 @@ def test_guardrail_caps_at_three_variants():
         "on elevator O21 (F-204)?",
     ]
     kept, dropped, reasons = check_rewrite_variants(
-        question, variants, linked_nodes=gazetteer_seeds(question)
+        question, variants, linked_nodes=gazetteer_seeds(question),
+        adjacency=canned_adjacency(),
     )
     assert len(kept) == 3
     assert dropped == [variants[3]]
     assert reasons[variants[3]] == ["over_cap"]
 
 
-def test_guardrail_drops_variant_dropping_a_threshold_number():
-    question = ("Brake lining is below 4mm (F-301). What must happen before "
-                "the car returns to service?")
+def test_guardrail_drops_variant_dropping_a_threshold_number(demo_gazetteer):
+    # Seeded question (O21, motor-M2) with a number-with-unit: the
+    # variant drops "92C", so the preservation floor fires. (The old
+    # F-301 wording has no seeds any more — fault codes link
+    # nothing — so it would trip the no-seeds rule instead.)
+    question = ("Elevator O21's motor M2 reached 92C (F-204). "
+                "What must happen before the car returns to service?")
     kept, dropped, reasons = check_rewrite_variants(
         question,
-        ["Brake lining is worn (F-301). What must happen before the car returns?"],
+        ["Elevator O21's motor M2 overheated (F-204). "
+         "What must happen before the car returns?"],
         linked_nodes=gazetteer_seeds(question),
+        adjacency=canned_adjacency(),
     )
     assert kept == []
     assert "missing_numbers" in reasons[dropped[0]]
@@ -233,15 +280,16 @@ def test_guardrail_drops_variant_dropping_a_threshold_number():
 
 # --- Retriever seam -------------------------------------------------------------
 
-def test_no_plan_path_is_byte_identical():
-    retriever = build_hybrid_retriever(blurred=True)
+def test_no_plan_path_is_byte_identical(demo_gazetteer):
+    retriever = make_hybrid_retriever(vector_scores=CONFIDENT_SCORES)
     expected = retriever.retrieve(M01)
     assert retriever.retrieve(M01, query_plan=None) == expected
-    assert build_hybrid_retriever(blurred=True).retrieve(M01) == expected
+    assert make_hybrid_retriever(
+        vector_scores=CONFIDENT_SCORES).retrieve(M01) == expected
 
 
-def test_with_plan_uses_plan_seeds():
-    retriever = build_hybrid_retriever(blurred=True)
+def test_with_plan_uses_plan_seeds(demo_gazetteer):
+    retriever = make_hybrid_retriever(vector_scores=WEAK_SCORES)
     plan = QueryPlan(
         intent="lookup",
         linked_nodes=[{"type": "Asset", "key": "O22", "confidence": 1.0}],
@@ -257,15 +305,15 @@ def test_with_plan_uses_plan_seeds():
     assert ranked  # a ranking is still returned
 
 
-def test_with_plan_gated_off_ranking_matches_no_plan():
-    retriever = build_hybrid_retriever(blurred=True)
-    plan = _plan(L08, retriever)
+def test_with_plan_gated_off_ranking_matches_no_plan(demo_gazetteer):
+    retriever = make_hybrid_retriever(vector_scores=CONFIDENT_SCORES)
+    plan = _plan(M01, retriever)
     assert plan.gated_off is True
-    assert retriever.retrieve(L08, query_plan=plan)[0] == retriever.retrieve(L08)[0]
+    assert retriever.retrieve(M01, query_plan=plan)[0] == retriever.retrieve(M01)[0]
 
 
-def test_with_plan_decomposition_expands_via_merge_path():
-    retriever = build_hybrid_retriever(blurred=True)
+def test_with_plan_decomposition_expands_via_merge_path(demo_gazetteer):
+    retriever = make_hybrid_retriever(vector_scores=WEAK_SCORES)
     plan = _plan(C01, retriever)
     ranked, trace = retriever.retrieve(C01, query_plan=plan)
     assert trace["expansion"]["triggered"] is True
@@ -306,38 +354,6 @@ def test_entity_link_labels_are_entity_only():
         entity = [n for n in case["gold_node_ids"] if not n.startswith("doc-")]
         assert entity, case["id"]  # every case has >= 1 entity gold node
         assert all(not n.startswith("doc-") for n in entity)
-
-
-# --- Eval exit checks (measured values, blurred setup) ---------------------------
-
-def test_phase4_eval_measurements_blurred():
-    from scripts.eval_retrieval_phase4 import (
-        _intent_accuracy,
-        _link_accuracy,
-        _make_planned_retriever,
-        _rewrite_faithfulness,
-    )
-
-    golden = load_golden_set()
-    cases = golden["cases"]
-    base = build_hybrid_retriever(blurred=True)
-    off = evaluate_retriever(base, cases, retriever_name="hybrid2_noplan")
-    planned_base = build_hybrid_retriever(blurred=True)
-    plans: dict = {}
-    on = evaluate_retriever(
-        _make_planned_retriever(planned_base, plans), cases,
-        retriever_name="hybrid2_plan")
-    link = _link_accuracy(cases, plans)
-    intent = _intent_accuracy(cases, plans)
-    faith = _rewrite_faithfulness(cases, plans)
-    assert link["mean_recall"] == 0.7616
-    assert link["exact_set_match_rate"] == 0.6111
-    assert intent["accuracy"] == 0.5
-    assert intent["n_correct"] == 18
-    assert faith["kept_recheck_pass"] is True
-    assert on["aggregate"]["ndcg@6"] >= off["aggregate"]["ndcg@6"]
-    assert round(on["aggregate"]["ndcg@6"], 3) == 0.958
-    assert round(off["aggregate"]["ndcg@6"], 3) == 0.958
 
 
 # --- HyDE exclusion (structural) -------------------------------------------------

@@ -1,5 +1,14 @@
 # Hybrid retrieval — Phase 2: PPR + coverage + hub (no reranker model)
 
+> **REMOVED IN PART 2026-11-14 (user option B — delete the
+> fakes entirely).** This phase's eval script
+> (`scripts/eval_retrieval_phase2.py`,
+> `make eval-retrieval-phase2`) is DELETED. The PPR /
+> coverage / hub code survives. The numbers in §5 are
+> HISTORICAL fake-setup measurements and are NOT
+> reproducible; the only retrieval eval left is
+> `make eval-retrieval-live`.
+
 Report: `~/workspace/research_notes/hybrid-vector-graph-retrieval-20261114-0430/report.md`
 (§4.1 G6/G7/G8, §4.4 PPR + damping warning, §4.7 fusion + guardrails,
 §8 Phase 2). Phase 1: `docs/hybrid-retrieval-phase1.md`. Phase 0:
@@ -12,10 +21,10 @@ Report: `~/workspace/research_notes/hybrid-vector-graph-retrieval-20261114-0430/
 | `runtime/retrieval_ppr.py` (new) | Pure-Python Personalized PageRank (G7): power iteration, `restart_prob = 0.5`, seed weights `confidence × specificity`. No new dependency. |
 | `runtime/retrieval_graph.py` | G6 coverage, G7 PPR passthrough, G8 hub transit in `graph_features`; `phase2_graph_scores` — the locked full formula. `graph_score` (Phase 1) unchanged. |
 | `runtime/retrieval_hybrid.py` | `HybridRetriever(phase2=True, w_ppr=0.45)` — PPR once per query, Phase 2 scoring, `w_ppr=0` ablation flag; `phase2=False` reproduces Phase 1. |
-| `scripts/eval_retrieval_phase2.py` (new) | Baseline vs Phase 1 hybrid vs Phase 2 hybrid on both fake setups + w_graph grid search + PPR ablation. `make eval-retrieval-phase2`. |
-| `scripts/eval_retrieval_phase1.py` | Pins `phase2=False` everywhere, so it keeps measuring Phase 1 exactly as documented. |
+| `scripts/eval_retrieval_phase2.py` (new) | ~~Baseline vs Phase 1 hybrid vs Phase 2 hybrid on both fake setups + w_graph grid search + PPR ablation. `make eval-retrieval-phase2`.~~ **DELETED 2026-11-14** (fake removal). Use `make eval-retrieval-live`. |
+| `scripts/eval_retrieval_phase1.py` | ~~Pins `phase2=False` everywhere, so it keeps measuring Phase 1 exactly as documented.~~ **DELETED 2026-11-14** with the other phase evals. |
 | `tests/test_retrieval_phase2.py` (new) | Main-feature tests only (13 tests). |
-| `Makefile` | New `eval-retrieval-phase2` target. |
+| `Makefile` | ~~New `eval-retrieval-phase2` target.~~ Target removed 2026-11-14 (fake removal). |
 
 Changed nothing else. Untouched on purpose: `app/config.py`,
 `runtime/llm_factory.py`, the embedding paths in
@@ -164,10 +173,10 @@ the report describes — a Building making every asset in it
 "1 hop" from every other — reproduced and fixed on the demo
 corpus.
 
-## 5. Numbers — both fake setups (golden set phase0-v1, n=36/30)
+## 5. Numbers — both fake setups (golden set phase0-v1, n=36/30) — HISTORICAL, not reproducible
 
-Run: `python -m scripts.eval_retrieval_phase2` (exit code 0 =
-exit criterion passed). All numbers are fake-setup numbers.
+~~Run: `python -m scripts.eval_retrieval_phase2` (exit code 0 =
+exit criterion passed).~~ The eval script is deleted. All numbers are fake-setup numbers.
 
 | Setup | Retriever | Recall@6 | nDCG@6 | MRR | multi-hop nDCG@6 | sibling nDCG@6 |
 |---|---|---|---|---|---|---|
@@ -265,13 +274,14 @@ Same standing items as Phase 1, plus Phase 2 specifics:
 
 1. `make seed` or `python -m scripts.backfill_qdrant_links`;
    confirm all 7 points carry non-empty `node_ids`.
-2. Run the real vector retriever through the same harness,
-   then the hybrid with `use_live_graph=True` against the live
-   Neo4j graph; replace the fake numbers above with live ones.
-   Expect the live sibling-subset gain to be *smaller* than
-   the blurred fake's (real embeddings retain some code
-   signal) — re-run the w_graph grid search live and re-check
-   0.50 vs the 0.40 priors first.
+2. Run the golden set live via `make eval-retrieval-live`
+   (live baseline + live hybrid through the same harness);
+   replace the fake numbers above with live ones. Expect the
+   live sibling-subset gain to be *smaller* than the blurred
+   fake's (real embeddings retain some code signal) — re-run
+   the w_graph grid search live and re-check 0.50 vs the 0.40
+   priors first. (The per-phase eval script is deleted, so
+   there is no `make eval-retrieval-phase2` live run anymore.)
 3. **PPR live checks:** confirm the live adjacency's node
    degrees (a Building with degree >50 is a real hub — the
    demo's buildings have degree 4–8, so the hub penalty was
@@ -279,19 +289,19 @@ Same standing items as Phase 1, plus Phase 2 specifics:
    the real candidate subgraph (≤~200 nodes by design — if the
    live expansion is larger, cap the PPR node set before
    iterating); confirm seed-specificity counts come from the
-   real corpus, not the demo linking table (the fake path
-   counts `DOCUMENT_LINKS`; the live wiring must count the
-   Qdrant payloads / Neo4j document links for the same
-   quantity).
+   real corpus (Phase 5 wired this: `count_documents_per_node`
+   over Qdrant payloads — the old fake path counted the demo
+   `DOCUMENT_LINKS` table, which is gone).
 4. **M08 live analogue:** run a query naming an asset whose
    gold document is linked to a *different* asset's component
    family (the O22/C2 → controller-doc shape) and confirm the
    hub penalty demotes the building-mediated distractor rather
    than the gold doc.
-5. Point the eval at the live MLflow server
-   (`python -m scripts.eval_retrieval_phase2 --tracking-uri <uri>`)
+5. Point the live eval at the live MLflow server
+   (`python -m scripts.eval_retrieval_live --tracking-uri <uri>`)
    and confirm the `agentic-runtime-retrieval` experiment shows
-   the runs.
+   the runs. (The old `python -m scripts.eval_retrieval_phase2`
+   command is deleted with the fake eval.)
 6. Grow the corpus before trusting Recall@20: with 7 docs it
    is saturated by construction.
 7. Re-measure the context budget with the real tokenizer

@@ -1,23 +1,27 @@
 """Hybrid retriever — Phases 1–2 (report §4.7, §8 Phases 1–2).
 
-NEW module, evaluated through the Phase 0 harness. It does NOT
-change ``infra.qdrant_client.search_documents`` or the
+It does NOT change ``infra.qdrant_client.search_documents`` or the
 ``retrieval_context`` hook — those keep their current behaviour
 (see ``docs/hybrid-retrieval-phase1.md`` for the follow-up wiring
 step, opt-in behind mission config).
 
+All data sources are INJECTED (see ``build_hybrid_retriever``):
+real LiteLLM query embeddings, a real Qdrant client, and the live
+Neo4j graph. There are no fake embeddings, no fake client, no
+demo corpus and no demo adjacency anywhere in this module.
+
 Pipeline per question:
 1. Vector arm: ``search_documents`` (real code path) top-40 dense,
-   via the injected embeddings + client (fakes in this VM, real
-   LiteLLM/Qdrant live).
-2. Gazetteer seeds (``runtime/retrieval_graph.py``) from the question.
-3. Graph arm: 1-hop expansion over the demo adjacency (fakes) or
+   via the injected embeddings + client.
+2. Gazetteer seeds (``runtime/retrieval_graph.py``) from the question
+   — dynamic cache only (see ``refresh_gazetteer_codes``).
+3. Graph arm: 1-hop expansion over the supplied adjacency, or
    ``expand_via_graph_query`` (live); every doc linked to a seed or
    a 1-hop neighbour becomes a candidate, with G1/G2/G4/G5 (Phase 1)
    plus G6 coverage, G7 PPR and G8 hub (Phase 2, default on). On the
    live path G6/G7/G8 run over ``build_live_adjacency`` (real edges
    out to the second hop), degrading to the expansion-only adjacency
-   if the live build fails — never over the demo adjacency.
+   if the live build fails — never over a fabricated adjacency.
 4. Candidates = vector top-40 UNION graph-linked docs, deduped.
 5. RRF (k=60) over vector rank + graph rank -> top-30.
 6. Fusion (``runtime/retrieval_fusion.py``) -> guardrails -> top-6.
@@ -28,9 +32,8 @@ Phase 2 (default): ``graph_score`` is the locked full formula
 ``0.45 * minmax_log(PPR) + 0.30 * z(path_term) + 0.25 * coverage``
 (``runtime/retrieval_graph.py::phase2_graph_scores``), with the
 hub penalty inside the path term. ``phase2=False`` reproduces the
-Phase 1 score (``scripts/eval_retrieval_phase1.py`` pins it so
-Phase 1's numbers stay reproducible). ``w_ppr=0`` is the PPR
-ablation flag: it zeroes the PPR sub-weight with no renormalising.
+Phase 1 score. ``w_ppr=0`` is the PPR ablation flag: it zeroes
+the PPR sub-weight with no renormalising.
 
 Trace per query (logged by the harness): seeds, expansion nodes
 returned / truncated, graph_missing, per-candidate features and
@@ -41,11 +44,6 @@ from __future__ import annotations
 
 import logging
 
-from runtime.retrieval_baseline import (
-    DeterministicFakeEmbeddings,
-    FakeQdrantClient,
-)
-from runtime.retrieval_blurred import CodeBlurredFakeEmbeddings
 from runtime.retrieval_fusion import (
     W_EXACT,
     W_GRAPH,
@@ -55,7 +53,6 @@ from runtime.retrieval_fusion import (
 )
 from runtime.retrieval_graph import (
     W_PPR,
-    build_demo_adjacency,
     build_expansion_adjacency,
     build_live_adjacency,
     expand_one_hop,
@@ -65,7 +62,6 @@ from runtime.retrieval_graph import (
     graph_score,
     phase2_graph_scores,
 )
-from runtime.retrieval_linking import DOCUMENT_LINKS
 
 logger = logging.getLogger(__name__)
 
@@ -94,7 +90,22 @@ def _exact_match(question: str, doc: dict, seeds: list[dict] | None = None) -> i
 
 
 class HybridRetriever:
-    """Dense + 1-hop graph + deterministic fusion. Fake-friendly."""
+    """Dense + 1-hop graph + deterministic fusion.
+
+    All data sources are INJECTED — there are no built-in
+    defaults, no demo corpus and no fake embeddings/client.
+    ``embeddings`` and ``client`` are required (a missing one
+    raises ``ValueError`` naming it). ``adjacency`` is the graph
+    substrate for the non-live path; it is required unless the
+    live path applies (``use_live_graph`` or a ``graph_store``),
+    in which case it defaults to ``{}`` and the per-query
+    substrate is built from real store data
+    (``build_live_adjacency``, degrading to
+    ``build_expansion_adjacency``). ``doc_counts`` /
+    ``doc_links`` / ``doc_texts`` default to empty when not
+    supplied; the live factory supplies callables reading the
+    real Qdrant client.
+    """
 
     def __init__(
         self,
@@ -113,9 +124,31 @@ class HybridRetriever:
         phase2: bool = True,
         w_ppr: float = W_PPR,
     ):
-        self.embeddings = embeddings or DeterministicFakeEmbeddings()
-        self.client = client or FakeQdrantClient(self.embeddings)
-        self.adjacency = adjacency if adjacency is not None else build_demo_adjacency()
+        if embeddings is None:
+            raise ValueError(
+                "HybridRetriever requires 'embeddings' (an object with "
+                "embed_query); no default embeddings exist."
+            )
+        if client is None:
+            raise ValueError(
+                "HybridRetriever requires 'client' (a Qdrant client); "
+                "no default client exists."
+            )
+        self.embeddings = embeddings
+        self.client = client
+        if adjacency is None:
+            if use_live_graph or graph_store is not None:
+                # Live path: the per-query substrate is built from
+                # real store data in _candidate_rows; an empty
+                # adjacency is only the pre-expansion placeholder.
+                adjacency = {}
+            else:
+                raise ValueError(
+                    "HybridRetriever requires 'adjacency' (the graph "
+                    "substrate for expand_one_hop), or use_live_graph=True "
+                    "with a graph_store so the substrate is built live."
+                )
+        self.adjacency = adjacency
         self.use_live_graph = use_live_graph
         self.graph_store = graph_store
         self.weights = {"w_vec": w_vec, "w_graph": w_graph, "w_exact": w_exact}
@@ -123,13 +156,15 @@ class HybridRetriever:
         # PPR ablation flag: w_ppr=0 zeroes the PPR sub-weight
         # (no renormalising — see phase2_graph_scores).
         self.w_ppr = w_ppr
-        # Live sources for the three demo tables below. Each accepts
+        # Live sources for the three tables below. Each accepts
         # a precomputed dict or a callable; a callable is resolved
         # LAZILY (once, cached, on the first query that needs it)
-        # and never at construction, so the fake path (all three
-        # None) never touches Qdrant. The live factory supplies
-        # callables reading the real client (see
-        # ``build_live_hybrid_retriever``).
+        # and never at construction, so construction never touches
+        # Qdrant. The live factory supplies callables reading the
+        # real client (see ``build_hybrid_retriever``). When a
+        # source is not supplied it defaults to EMPTY (see
+        # ``_resolved_doc_counts`` / ``_resolved_doc_links`` /
+        # ``_docs``) — there is no demo-table fallback.
         # - doc_counts: {node key: n docs linked} for seed
         #   specificity (``runtime/retrieval_ppr.py::seed_specificity``:
         #   a missing/empty count is maximally specific, so an empty
@@ -145,27 +180,20 @@ class HybridRetriever:
         self._doc_texts_source = doc_texts
         self._fetched_texts: dict[str, dict] = {}
         self._missing_texts: set[str] = set()
-        if doc_texts is None:
-            # Doc texts for the graph arm / exact feature (fake corpus).
-            from seeds.demo_data import DOCUMENTS
-
-            self._docs = {d["id"]: d for d in DOCUMENTS}
-        elif isinstance(doc_texts, dict):
+        if isinstance(doc_texts, dict):
             self._docs = dict(doc_texts)
         else:  # callable: fetched per query, batched (see _fetch_doc_texts)
+            # None means no precomputed texts: {} — the live factory
+            # supplies a callable; there is no demo-corpus fallback.
             self._docs = {}
 
     def _resolved_doc_counts(self) -> dict[str, int]:
-        """Doc counts per node, demo table unless a live source was given."""
+        """Doc counts per node, from the injected source ({} when none)."""
         if self._doc_counts_cache is not None:
             return self._doc_counts_cache
         source = self._doc_counts_source
         if source is None:
-            counts: dict[str, int] = {}
-            for links in DOCUMENT_LINKS.values():
-                for node_key in links["node_ids"]:
-                    counts[node_key] = counts.get(node_key, 0) + 1
-            self._doc_counts_cache = counts
+            self._doc_counts_cache = {}
         elif callable(source):
             self._doc_counts_cache = dict(source() or {})
         else:
@@ -173,15 +201,12 @@ class HybridRetriever:
         return self._doc_counts_cache
 
     def _resolved_doc_links(self) -> dict[str, list[str]]:
-        """Doc -> node ids, demo table unless a live source was given."""
+        """Doc -> node ids, from the injected source ({} when none)."""
         if self._doc_links_cache is not None:
             return self._doc_links_cache
         source = self._doc_links_source
         if source is None:
-            self._doc_links_cache = {
-                doc_id: list(links["node_ids"])
-                for doc_id, links in DOCUMENT_LINKS.items()
-            }
+            self._doc_links_cache = {}
         elif callable(source):
             self._doc_links_cache = {
                 doc_id: list(node_ids) for doc_id, node_ids in (source() or {}).items()
@@ -195,8 +220,8 @@ class HybridRetriever:
     def _fetch_doc_texts(self, doc_ids: list[str]) -> dict[str, dict]:
         """Batch-fetch payloads for doc ids missing from _docs / vector results.
 
-        Only the live callable source fetches anything; the fake path
-        (no source) and the precomputed-dict source return {} without
+        Only the callable source fetches anything; a missing
+        source and the precomputed-dict source return {} without
         a call. Ids already fetched, or already known missing, are
         not re-fetched. A fetch failure propagates (a Qdrant failure
         surfaces as RuntimeError naming the store, never a silent
@@ -219,7 +244,7 @@ class HybridRetriever:
         return fetched
 
     def _doc_for(self, doc_id: str, vec_by_id: dict) -> dict:
-        """Candidate doc: demo/dict texts, vector payload, fetched payload, else stub."""
+        """Candidate doc: dict texts, vector payload, fetched payload, else stub."""
         return (
             self._docs.get(doc_id)
             or vec_by_id.get(doc_id)
@@ -279,10 +304,10 @@ class HybridRetriever:
         graph_missing = not seeds or not expansion.get("nodes")
 
         # Substrate for PPR (G7), coverage (G6) and hub (G8): on the
-        # live path these must run over REAL graph edges, not the
-        # demo adjacency — a live doc's PPR computed from demo edges
-        # would be meaningless. The fake path keeps self.adjacency
-        # (byte-identical behaviour). Degradation, live path only:
+        # live path these must run over REAL graph edges — a live
+        # doc's PPR computed from fabricated edges would be
+        # meaningless. The non-live path uses self.adjacency as
+        # given. Degradation, live path only:
         # if the live build raises or comes back empty while the
         # 1-hop expansion itself succeeded, fall back to the
         # expansion-only adjacency (seeds + expansion nodes + their
@@ -310,7 +335,7 @@ class HybridRetriever:
             expansion["graph_adjacency_nodes"] = len(graph_adjacency)
 
         # Phase 2 PPR (once per query, over the candidate subgraph —
-        # here the whole demo adjacency, <=~200 nodes by design).
+        # the live adjacency, <=~200 nodes by design).
         # Seeds weigh confidence * specificity; a seed in no linked
         # document is maximally specific (weight 1.0).
         ppr_scores: dict = {}
@@ -325,8 +350,8 @@ class HybridRetriever:
 
         # Graph-linked candidate docs: docs whose linked nodes touch a
         # seed or a 1-hop neighbour, plus docs that ARE expansion nodes.
-        # Links come from the demo table on the fake path, from real
-        # Qdrant payload node_ids on the live path (see _resolved_doc_links).
+        # Links come from real Qdrant payload node_ids
+        # (see _resolved_doc_links).
         graph_doc_ids: set[str] = set()
         for doc_id, node_ids in self._resolved_doc_links().items():
             linked = set(node_ids)
@@ -336,8 +361,8 @@ class HybridRetriever:
                 graph_doc_ids.add(doc_id)
         # Payloads for graph-only candidates (not in the vector
         # results): title/content/node_ids for the exact feature and
-        # the graph features. Fetched in one batch; on the fake path
-        # this is a no-op (no live source, _docs already has them).
+        # the graph features. Fetched in one batch; with no callable
+        # source this is a no-op.
         self._fetch_doc_texts(
             sorted(graph_doc_ids | set(expansion.get("nodes", {})))
         )
@@ -488,7 +513,6 @@ class HybridRetriever:
     def _trace(self, candidates, final, seeds, expansion, graph_missing):
         """The standard retrieve trace (shared by both paths)."""
         trace = {
-            "fake": True,
             "phase2": self.phase2,
             "seeds": [s["key"] for s in seeds],
             "expansion_nodes_returned": expansion.get("nodes_returned", 0),
@@ -517,8 +541,7 @@ class HybridRetriever:
                 for c in final
             },
         }
-        # Live path only: which adjacency PPR/coverage/hub ran over.
-        # Absent on the fake path (trace byte-identical there) and
+        # Which adjacency PPR/coverage/hub ran over. Absent
         # when the expansion itself was empty (graph_missing).
         if "graph_adjacency_source" in expansion:
             trace["graph_adjacency_source"] = expansion["graph_adjacency_source"]
@@ -537,8 +560,8 @@ class HybridRetriever:
 def trace_feature_rows(candidates: list[dict], final: list[dict]) -> list[dict]:
     """Full per-candidate feature rows for one query (Phase 3 LTR logging).
 
-    One row per candidate in the fused set (pre-fusion, i.e. all 7
-    docs on the demo corpus — not just the final top-6), with the
+    One row per candidate in the fused set (pre-fusion — every
+    fused candidate, not just the final top-6), with the
     §4.1 feature row (G1–G9), both ranks (``rrf_rank`` = rank before
     the fusion rerank, ``rank`` = final rank, ``None`` when the
     candidate was cut by the top-6), the final score, and the
@@ -579,24 +602,7 @@ def trace_feature_rows(candidates: list[dict], final: list[dict]) -> list[dict]:
     return rows
 
 
-def build_hybrid_retriever(*, blurred: bool = False, phase2: bool = True,
-                           w_ppr: float = W_PPR, **kwargs):
-    """Hybrid retriever over the fake corpus.
-
-    ``blurred=True`` uses the code-blurred fake embeddings (the
-    exit-criterion setup); ``False`` reuses the Phase 0 BoW fake.
-    ``phase2=False`` reproduces the Phase 1 graph score;
-    ``w_ppr=0`` is the PPR ablation flag.
-    """
-    embeddings = CodeBlurredFakeEmbeddings() if blurred else DeterministicFakeEmbeddings()
-    client = FakeQdrantClient(embeddings)
-    retriever = HybridRetriever(embeddings=embeddings, client=client,
-                                phase2=phase2, w_ppr=w_ppr, **kwargs)
-    retriever.__name__ = "hybrid_blurred" if blurred else "hybrid_bow"
-    return retriever
-
-
-def build_live_hybrid_retriever(
+def build_hybrid_retriever(
     *,
     client=None,
     graph_store=None,
@@ -605,7 +611,11 @@ def build_live_hybrid_retriever(
     w_ppr: float = W_PPR,
     **kwargs,
 ):
-    """Live hybrid retriever: real LiteLLM query embeddings + real Qdrant + live Neo4j graph.
+    """Hybrid retriever over the REAL stores — THE factory.
+
+    Real LiteLLM query embeddings + real Qdrant + live Neo4j graph.
+    This is the only factory: there is no fake/blurred variant and
+    no demo corpus behind it.
 
     Reads the embedding model from settings — ``EMBEDDING_MODEL_QUERY``
     falling back to ``EMBEDDING_MODEL`` (``app/config.py``); set
@@ -627,8 +637,8 @@ def build_live_hybrid_retriever(
     exception (including the function not existing yet) a warning is
     logged and the factory continues with whatever gazetteer state
     results — the refresh itself never raises, and a failed refresh
-    leaves the gazetteer in live mode with an empty cache (it links
-    nothing rather than falling back to demo codes).
+    leaves the gazetteer with an empty cache (it links nothing
+    rather than falling back to any built-in vocabulary).
 
     Fail fast: an empty ``QDRANT_URL`` raises RuntimeError; missing
     embedding config raises ValueError from ``require_embedding_config``.
@@ -693,28 +703,5 @@ def build_live_hybrid_retriever(
         w_ppr=w_ppr,
         **kwargs,
     )
-    retriever.__name__ = "hybrid_live"
+    retriever.__name__ = "hybrid"
     return retriever
-
-
-def build_blurred_baseline_retriever(limit: int = 20):
-    """Plain-vector baseline on the code-blurred fake (same setup as
-    the hybrid arm, minus the graph — the exit-criterion comparison)."""
-    from runtime.retrieval_baseline import baseline_search
-
-    embeddings = CodeBlurredFakeEmbeddings()
-    client = FakeQdrantClient(embeddings)
-
-    def retrieve(question: str):
-        docs = baseline_search(question, limit=limit, embeddings=embeddings, client=client)
-        ranked_ids = [doc["doc_id"] for doc in docs]
-        trace = {
-            "scores": {doc["doc_id"]: round(doc.get("score", 0.0), 4) for doc in docs},
-            "fake": True,
-            "embedding": "code-blurred-bow (digit tokens dropped)",
-            "limit": limit,
-        }
-        return ranked_ids, trace
-
-    retrieve.__name__ = "plain_vector_blurred_baseline"
-    return retrieve

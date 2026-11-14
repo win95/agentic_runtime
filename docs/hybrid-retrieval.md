@@ -21,11 +21,19 @@ no BM25, the 0.50/0.40/0.10 fusion). Do not quote the report's
 the system's weights: there is no cross-encoder, so the system
 runs the adapted formula in §3 below.
 
-Status: **evaluated on fakes only, NOT wired live.** Phase 5
-built the live wiring — the live factory
-(`build_live_hybrid_retriever`), the real-source replacement
-in `HybridRetriever`, live adjacency, the dynamic gazetteer
-and the live eval (`make eval-retrieval-live`) — but no live
+Status: **the fake eval setups are REMOVED (2026-11-14, user option
+B — delete the fakes entirely).** `runtime/retrieval_baseline.py`,
+`runtime/retrieval_blurred.py`, `scripts/eval_retrieval.py` and
+`scripts/eval_retrieval_phase1..4.py` are deleted, as are the
+`make eval-retrieval-phase0..4` targets. The only retrieval eval
+left is the live one, `scripts/eval_retrieval_live.py`
+(`make eval-retrieval-live`); its plain-vector baseline is the
+live closure `build_live_baseline_retriever` inside that script.
+The single factory is now `build_hybrid_retriever` (the old
+`build_live_hybrid_retriever` name does not survive — §6b).
+**All fake-setup numbers in §8 are HISTORICAL measurements:**
+kept as a record, clearly marked, and NOT reproducible in this
+tree — the evals that produced them no longer exist. No live
 numbers exist yet: there is no Qdrant/Neo4j in this VM and
 `EMBEDDING_MODEL` is set by the user in his own `.env` on his
 machine. `search_documents` and the `retrieval_context` hook
@@ -49,8 +57,8 @@ question
   Each variant is retrieved like the original; rows are merged (mean)
   and reranked by the same fusion. No expansion by default.
   ▼
-vector arm:  Qdrant top-40 dense (real LiteLLM embeddings live,
-             deterministic BoW / code-blurred fakes in this VM)
+vector arm:  Qdrant top-40 dense (real LiteLLM embeddings only —
+             there is no fake embedding path anymore)
 graph arm:   gazetteer seeds (§4) → Neo4j 1-hop expansion (§5)
              → every doc linked to a seed or a 1-hop neighbour
 candidates:  vector top-40 ∪ graph-linked docs, deduped by chunk_id,
@@ -172,10 +180,11 @@ it is the Phase 3 gating trigger "gazetteer_miss" (§6).
   neighbors` (`expand_via_graph_query`) — no new Cypher.
 - PPR runs once per query over the candidate subgraph (≤~200
   nodes by design); seed specificity counts come from the
-  grounded linking table in the fake path and from the real
-  corpus via `count_documents_per_node` on the live path
-  (§6b). On the live path PPR / coverage / hub run over the
-  live adjacency (§6b), never the demo adjacency.
+  injected `doc_counts` — on the live path the real corpus
+  counts via `count_documents_per_node` (§6b); when no counts
+  are supplied they default to `{}` (maximally specific).
+  On the live path PPR / coverage / hub run over the
+  live adjacency (§6b). There is no demo adjacency anymore.
 
 ## 6. Expansion — gated multi-query + decomposition (Phase 3)
 
@@ -195,8 +204,9 @@ callable. Default live implementation calls the chat model
 (`runtime/llm_factory.build_chat_model`, lazy build) with a
 constrained few-shot prompt ("paraphrase only; do not add facts
 or asset names not in the question"). Verified only with the
-deterministic stub generators in tests/eval (no live LLM in
-this VM).
+deterministic stub generators in tests (no live LLM in
+this VM) — the fake evals that also used them are deleted
+(§8 note).
 
 **Decomposition:** ONLY on detected multi-part questions.
 Detection is a deterministic heuristic: ≥2 distinct asset codes,
@@ -226,7 +236,10 @@ Phase 3 machinery in one per-question object. Linking
 and separator variants at confidence 0.8) and intent scoring
 (`runtime/retrieval_intent.py::score_intents`, six intents,
 `final = 0.50·z(vec) + 0.30·graph + 0.20·exact`, deterministic,
-no LLM) run ALWAYS; the Phase 3 gate then decides whether the
+no LLM — inputs are INJECTED (`embeddings`, `asset_data`,
+`doc_links`, `vocabulary`); with no embeddings the vector
+signal is 0 for every intent and graph + exact carry the
+score) run ALWAYS; the Phase 3 gate then decides whether the
 expensive parts run. A gated-off plan carries the scored intent
 + linked nodes as-is, no variants, `fallback_reason="confident
 — no expansion"`. **Difference from Phase 3:** the gate is
@@ -261,9 +274,12 @@ threshold — it replaces the data sources under the formula so
 the same retriever can run against the real stores. Full
 detail: `docs/hybrid-retrieval-phase5.md`.
 
-* **Live factory** —
-  `runtime/retrieval_hybrid.py::build_live_hybrid_retriever`
-  builds query-only embeddings from
+* **Factory** —
+  `runtime/retrieval_hybrid.py::build_hybrid_retriever`
+  (renamed from `build_live_hybrid_retriever` in the
+  2026-11-14 fake removal — the old name does not survive;
+  this is THE factory, there is no other) builds query-only
+  embeddings from
   `settings.resolved_embedding_model_query`
   (`EMBEDDING_MODEL_QUERY` falling back to `EMBEDDING_MODEL`),
   the real Qdrant client via `get_client()`, passes
@@ -279,9 +295,17 @@ detail: `docs/hybrid-retrieval-phase5.md`.
 * **Real-source replacement** — `HybridRetriever` gains
   optional `doc_counts`, `doc_texts`, `doc_links` kwargs, each
   a precomputed dict or a callable, resolved lazily (once,
-  cached, on first query). The fake path (all `None`) keeps
-  demo-table behaviour byte-identically and never touches
-  Qdrant. The live factory supplies callables over
+  cached, on first query). The factory is the only
+  constructor contract that matters (below): `HybridRetriever`
+  itself REQUIRES `embeddings` + `client` (both raise
+  `ValueError` when `None` — there are no default embeddings
+  and no default client), and requires `adjacency` unless
+  `use_live_graph=True` with a `graph_store` (then the
+  substrate is built live per query and the placeholder is
+  `{}`). **Doc sources default to EMPTY** — when a source is
+  not supplied there is no demo-table fallback: counts /
+  links resolve to `{}`, texts to no text feature (exact 0).
+  The factory supplies callables over
   `infra/qdrant_client.py::count_documents_per_node`,
   `get_document_links`, `get_document_payloads` (one shared
   scroll, limit 100, `with_payload=True`, payload `node_ids`;
@@ -315,22 +339,27 @@ detail: `docs/hybrid-retrieval-phase5.md`.
   commits only on full success, and returns e.g.
   `{"assets": n, …, "source": "ontology"}`. In-memory cache
   only, no TTL, no beat job; a second refresh replaces
-  wholesale. Once refreshed, live mode is ON: demo patterns
-  are DISABLED, only cached dynamic keys link. A failed
-  refresh clears any earlier good cache, returns
-  `{"source": "unreachable", …zero counts…}`, keeps live mode
-  on, and never raises — **a wrong link is worse than no
-  link**. Fault codes are NOT fetched (no Fault entity type;
-  `FAULT_CODE_LINKS` stays demo-grounded): in live mode a
-  fault code links nothing. Matching reuses the Phase 4
+  wholesale. **There is no demo mode anymore** (removed with
+  the fakes, 2026-11-14): `gazetteer_seeds` reads ONLY the
+  dynamic cache — before any refresh, or after a failed one,
+  the cache is empty and it returns `[]` (fails closed).
+  Only cached dynamic keys link. A failed refresh clears any
+  earlier good cache, returns
+  `{"source": "unreachable", …zero counts…}`, and never raises
+  — **a wrong link is worse than no link**. Fault codes are
+  NOT fetched (no Fault entity type;
+  `FAULT_CODE_LINKS` stays demo-grounded): a fault code links
+  nothing. Matching reuses the Phase 4
   normalisation (verbatim 1.0, separator / diacritics variant
-  0.8, 1.0 twin wins dedup). `clear_gazetteer_codes()` returns
-  to demo mode.
+  0.8, 1.0 twin wins dedup). `clear_gazetteer_codes()` empties
+  the cache — the gazetteer then links nothing until
+  refreshed (it no longer "returns to demo mode": there is no
+  demo mode to return to).
 * **Live eval** — `scripts/eval_retrieval_live.py` (`make
   eval-retrieval-live`, flags `--tracking-uri` / `--output` /
   `--golden-set`): preflight → store-inventory preamble →
   live plain-vector baseline → live hybrid via
-  `build_live_hybrid_retriever()`, both through
+  `build_hybrid_retriever()`, both through
   `run_retrieval_eval` + `format_results_table`. No grid
   search. The verdict uses the Phase 1 exit criterion but is
   INFORMATIONAL — exit 0 once the eval completes, even on
@@ -360,6 +389,21 @@ NEVER raw JSON; two blocks (`## Relevant documents`,
 dependency; re-measure with the real tokenizer live (§9.7).
 
 ## 8. Evaluation — what was measured, and the honest verdicts
+
+> **HISTORICAL — fake-setup numbers, NOT reproducible.**
+> Every number in this section was measured on the
+> deterministic BoW / code-blurred fake setups (fake
+> embeddings + fake Qdrant client + demo adjacency). Those
+> fakes were deleted 2026-11-14 (user option B) along with
+> the eval scripts that produced the numbers
+> (`scripts/eval_retrieval.py`,
+> `scripts/eval_retrieval_phase1..4.py`,
+> `make eval-retrieval-phase0..4`). The numbers are kept here
+> as a record of what the design proved on the demo corpus —
+> do NOT re-run them, do NOT quote them as live retrieval
+> quality, and do NOT tune against them. The only runnable
+> retrieval eval is `make eval-retrieval-live` (§6b), which
+> measures live numbers for the first time.
 
 Golden set `scripts/golden_set_fault_analysis.json` (version
 `phase0-v1`, 36 cases: lookup 12, multi-hop 8, comparison 6,
@@ -451,10 +495,11 @@ labelled pairs (210 answerable) vs ~3,000 needed for LambdaMART
   on this golden set would overfit its quirks. Logging only.
 - **No execution-path wiring, and no routing consumes intent:**
   the plan is built and evaluated, and Phase 5 built the live
-  sources the wiring needs (`build_live_hybrid_retriever`,
+  sources the wiring needs (`build_hybrid_retriever`,
   §6b) — but `search_documents`, the `retrieval_context` hook,
   the route node and skill selection are still untouched.
-  Intent accuracy is 0.500 on the fake setup (§8) — nothing
+  Intent accuracy is 0.500 on the (now historical) fake setup
+  (§8) — nothing
   downstream may treat the scored intent as ground truth until
   the live A/B in §11 passes. The opt-in wiring is §12
   (`execution.retrieval.query_plan`).
@@ -495,16 +540,18 @@ in `infra/qdrant_client.py`).
 ## 11. Live-verification checklist (user's machine)
 
 **Done in Phase 5** (code, verified with fakes/mocks only —
-no live numbers): the live factory
-(`build_live_hybrid_retriever`, §6b), the real-source
-replacement in `HybridRetriever` (counts / links / texts from
-Qdrant), the live adjacency for PPR / coverage / hub, the
-dynamic gazetteer (live-mode keys from the ontology), and the
-live eval target (`make eval-retrieval-live`, informational
-verdict, fail-fast preflight). The only live-mode behaviour
-verified in this VM is the preflight failing fast with exit 2
-(default env: embedding config; dummy config: Qdrant
-unreachable at `http://localhost:6333`).
+no live numbers): the factory
+(`build_hybrid_retriever`, §6b — renamed from
+`build_live_hybrid_retriever` in the 2026-11-14 fake
+removal), the real-source replacement in `HybridRetriever`
+(counts / links / texts from Qdrant), the live adjacency for
+PPR / coverage / hub, the dynamic gazetteer (live-mode keys
+from the ontology), and the live eval target
+(`make eval-retrieval-live`, informational verdict, fail-fast
+preflight). The only live-mode behaviour verified in this VM
+is the preflight failing fast with exit 2 (default env:
+embedding config; dummy config: Qdrant unreachable at
+`http://localhost:6333`).
 
 **Still open** — everything below needs the user's machine:
 
@@ -537,9 +584,11 @@ unreachable at `http://localhost:6333`).
    finding about the corpus / embeddings, not a code failure.
    Expect the live sibling-subset gain to be SMALLER than the
    blurred fake's (real embeddings retain some code signal).
-   Also run the golden set live through each phase's eval
-   script (`make eval-retrieval-phase1/2/3/4`) if the fake
-   numbers need a live counterpart per phase.
+   The per-phase eval scripts (`make
+   eval-retrieval-phase1/2/3/4`) are DELETED — there is no
+   per-phase live counterpart to run; the live eval above is
+   the only golden-set run, and its numbers replace the
+   historical fake numbers in §8 when they exist.
 5. **Qdrant + Neo4j live checks:** run the real vector
    retriever through the harness, then the hybrid with the
    live factory against the live Neo4j graph; confirm live
@@ -558,8 +607,8 @@ unreachable at `http://localhost:6333`).
    dynamic gazetteer refresh summary shows the real key
    counts (`{"source": "ontology", …}`); `"unreachable"`
    with zero counts means the gazetteer linked nothing on
-   the whole run — fix Neo4j / the store wiring, do not
-   re-enable demo codes.
+   the whole run — fix Neo4j / the store wiring (there is no
+   demo-code fallback to re-enable anymore).
 6. **Re-run the w_graph grid live with 0.50 first** (the
    first-to-recheck-live runner-up in Phases 1–2; fake grid:
    0.30 → 0.957, 0.40 → 0.958, 0.50 → 0.978 — three swaps, not a
@@ -608,7 +657,7 @@ Add an opt-in mission-config flag, e.g.
 `execution.retrieval.hybrid: true` on `fault_analysis` only,
 read by the `retrieval_context` hook (SessionStart, the existing
 pre-retrieval hook): when set, the hook calls
-`build_live_hybrid_retriever()` (Phase 5, §6b — the factory
+`build_hybrid_retriever()` (Phase 5, §6b — the factory
 now exists and does the embedding / client / store / gazetteer
 work, including the real corpus doc-counts for seed
 specificity) — or `ExpandedRetriever` over it, once the live
@@ -621,7 +670,7 @@ behaves exactly as today. No change to
 a call-site change, not a redesign. The Phase 4
 variant of the same flag is `execution.retrieval.query_plan:
 true`: build the QueryPlan first (live generators), then call
-`build_live_hybrid_retriever().retrieve(question,
+`build_hybrid_retriever().retrieve(question,
 query_plan=plan)` and log the plan (intent, margin, seeds,
 gating, fallback reason, kept/dropped variants with reasons)
 to MLflow alongside the trace.
@@ -631,5 +680,7 @@ VM to verify the live path against, and no live numbers exist —
 wiring without a live check would ship an untested retrieval
 change into the fault mission. Phase 5 built the factory and
 the live eval (§6b, §11.4) so the wiring, when it lands, is a
-call-site change onto a fake-verified module; the live numbers
+call-site change onto a module verified in tests via
+test-local doubles (the fake-setup regression numbers in §8
+are historical and not reproducible); the live numbers
 come first.

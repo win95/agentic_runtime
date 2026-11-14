@@ -1,8 +1,13 @@
 """Phase 4 decomposition-along-graph-paths tests (main features only).
 
-Fake-only: no LiteLLM proxy, no Qdrant/Neo4j server. The live
-generator is never invoked here — the stub generator and injected
-callables stand in for it.
+No LiteLLM proxy, no Qdrant/Neo4j server. The live generator is
+never invoked here — the stub generator and injected callables
+stand in for it. The adjacency is the canned one built from the
+real seed RELATIONS (``tests/retrieval_stubs.py``); per-part
+seeds come from the dynamic gazetteer, so a bare name ("door
+sensor") or a fault code (F-204) links nothing — the verdicts
+below are the ones that follow from that, not the old demo-table
+ones.
 """
 
 from __future__ import annotations
@@ -16,7 +21,7 @@ from runtime.retrieval_expansion import (
     detect_multi_part as expansion_detect_multi_part,
 )
 from runtime.retrieval_expansion import stub_decompose_question
-from runtime.retrieval_graph import build_demo_adjacency
+from tests.retrieval_stubs import canned_adjacency
 
 C01 = (
     "O21's motor reached 92C (F-204) and O22's motor reached 88.5C (F-206). "
@@ -48,7 +53,7 @@ L02 = (
     "with winding temperature above 90C?"
 )
 
-ADJACENCY = build_demo_adjacency()
+ADJACENCY = canned_adjacency()
 
 
 def _synthetic_adjacency():
@@ -108,34 +113,44 @@ def test_related_verdict_none_with_fewer_than_two_seeded_parts():
     assert relatedness_verdict([], ADJACENCY)["related"] is None
 
 
-# --- Per-question decomposition (fake path: stub generator) ----------------
+def test_relatedness_verdict_requires_adjacency():
+    import pytest
 
-def test_c01_independent_with_per_part_seeds():
+    with pytest.raises(ValueError, match="'adjacency'"):
+        relatedness_verdict([["O21"], ["O22"]])
+
+
+# --- Per-question decomposition (stub generator) ---------------------------
+
+def test_c01_independent_with_per_part_seeds(demo_gazetteer):
     out = decompose_question(C01, decomposition_generator=stub_decompose_question,
                              adjacency=ADJACENCY)
     assert out["is_multi_part"] is True
     assert out["related"] is False
     assert out["shared_nodes"] == []
+    # Fault codes link nothing now, so each part seeds to its asset only.
     assert [s["linked_nodes"] for s in out["sub_questions"]] == [
-        ["O21", "motor-M2"],
-        ["O22", "motor-M3"],
+        ["O21"],
+        ["O22"],
         [],
     ]
 
 
-def test_c03_related_via_shared_seed_in_stub_split():
-    # Surprising but correct given the stub split: the second clause
-    # re-mentions the door sensor, so its seeds overlap part 1's.
+def test_c03_independent_now_that_bare_names_do_not_link(demo_gazetteer):
+    # The stub split's second clause re-mentions "the door sensor",
+    # but the dynamic gazetteer has no bare-name alias for
+    # door-sensor-DS1, so the parts seed to O21 and O22 only and
+    # the verdict is INDEPENDENT — the old RELATED verdict depended
+    # on the deleted name-alias table.
     out = decompose_question(C03, decomposition_generator=stub_decompose_question,
                              adjacency=ADJACENCY)
     assert out["is_multi_part"] is True
-    assert out["related"] is True
-    assert "door-sensor-DS1" in out["shared_nodes"]
-    assert out["sub_questions"][0]["linked_nodes"] == ["O21", "door-sensor-DS1"]
-    assert "door-sensor-DS1" in out["sub_questions"][1]["linked_nodes"]
+    assert out["related"] is False
+    assert out["shared_nodes"] == []
+    assert [s["linked_nodes"] for s in out["sub_questions"]] == [["O21"], ["O22"]]
 
 
-def test_stub_splitter_limits_no_decomposition():
+def test_stub_splitter_limits_no_decomposition(demo_gazetteer):
     # "Both X and Y" (C02) and "Compare X with Y" (C04/C05): the stub
     # returns the question unchanged — reported, not worked around.
     for question in (C02, C04, C05):
@@ -147,7 +162,7 @@ def test_stub_splitter_limits_no_decomposition():
         assert out["shared_nodes"] == []
 
 
-def test_c06_seedless_second_part_has_no_verdict():
+def test_c06_seedless_second_part_has_no_verdict(demo_gazetteer):
     out = decompose_question(C06, decomposition_generator=stub_decompose_question,
                              adjacency=ADJACENCY)
     assert out["is_multi_part"] is True
@@ -157,7 +172,7 @@ def test_c06_seedless_second_part_has_no_verdict():
     assert out["related"] is None
 
 
-def test_m06_under_trigger_preserved():
+def test_m06_under_trigger_preserved(demo_gazetteer):
     out = decompose_question(M06, decomposition_generator=stub_decompose_question,
                              adjacency=ADJACENCY)
     assert out["is_multi_part"] is False
@@ -166,7 +181,7 @@ def test_m06_under_trigger_preserved():
     assert out["sub_questions"] == []
 
 
-def test_single_fact_lookup_not_decomposed():
+def test_single_fact_lookup_not_decomposed(demo_gazetteer):
     out = decompose_question(L02, decomposition_generator=stub_decompose_question,
                              adjacency=ADJACENCY)
     assert out == {
@@ -180,7 +195,7 @@ def test_single_fact_lookup_not_decomposed():
 
 # --- Pluggable generator -----------------------------------------------------
 
-def test_pluggable_generator_accepted_and_seeds_per_part():
+def test_pluggable_generator_accepted_and_seeds_per_part(demo_gazetteer):
     def fake_generator(question):
         return [
             "Which building is elevator O21 in?",
@@ -211,7 +226,7 @@ def test_pluggable_generator_accepted_and_seeds_per_part():
     assert "O21" in out["shared_nodes"]
 
 
-def test_pluggable_generator_returning_question_unchanged():
+def test_pluggable_generator_returning_question_unchanged(demo_gazetteer):
     out = decompose_question(
         C01, decomposition_generator=lambda q: [q], adjacency=ADJACENCY
     )

@@ -2,6 +2,12 @@
 
 Mocked stores only: no LiteLLM proxy, no Qdrant/Neo4j server.
 Main features only — no parametrized explosion.
+
+The gazetteer cache is empty unless a test refreshes it: the
+autouse fixture stubs ``refresh_gazetteer_codes`` (so the factory
+never touches the real store), and tests that need seeds call
+``_refresh_live_keys`` first — the stub refresh during the factory
+build leaves the populated cache alone.
 """
 
 from __future__ import annotations
@@ -17,10 +23,8 @@ from infra.qdrant_client import (
     get_document_links,
     get_document_payloads,
 )
-from runtime.retrieval_baseline import DeterministicFakeEmbeddings, FakeQdrantClient
 from runtime.retrieval_graph import (
     ALLOWED_RELATIONS,
-    build_demo_adjacency,
     build_expansion_adjacency,
     build_live_adjacency,
     clear_gazetteer_codes,
@@ -34,10 +38,13 @@ from runtime.retrieval_graph import (
 from runtime.retrieval_hybrid import (
     HybridRetriever,
     build_hybrid_retriever,
-    build_live_hybrid_retriever,
 )
-from runtime.retrieval_linking import DOCUMENT_LINKS
 from runtime.retrieval_ppr import personalized_pagerank, seed_specificity
+from tests.retrieval_stubs import (
+    GazetteerKeyStore,
+    StubEmbeddings,
+    canned_adjacency,
+)
 
 QUESTION = "F-204 motor overheating O21"
 
@@ -56,21 +63,24 @@ LIVE_PAYLOADS = {
     },
 }
 
+# Keys the live ontology holds in these tests. QUESTION seeds to
+# [O21] only: "motor" bare does not match motor-M2, and fault
+# codes link nothing.
+LIVE_GAZETTEER_KEYS = {
+    "Asset": ["O21"],
+    "Component": ["motor-M2", "pump-P9", "brake-BK1"],
+    "Building": ["building-B1"],
+    "Document": ["doc-live-motor", "doc-live-pump"],
+}
+
 
 def _point_id(doc_id: str) -> str:
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"doc:{doc_id}"))
 
 
-class StubEmbeddings:
-    """Embeddings that return a fixed vector — no LiteLLM call."""
-
-    dimension = 4
-
-    def embed_query(self, text):  # noqa: ARG002
-        return [1.0, 0.0, 0.0, 0.0]
-
-    def embed_documents(self, texts):
-        return [[1.0, 0.0, 0.0, 0.0] for _ in texts]
+def _refresh_live_keys() -> dict:
+    """Populate the gazetteer cache with the live keys (real refresh)."""
+    return _real_refresh_gazetteer_codes(store=GazetteerKeyStore(LIVE_GAZETTEER_KEYS))
 
 
 class MockQdrantClient:
@@ -154,12 +164,13 @@ class MockGraphStore:
 
 @pytest.fixture(autouse=True)
 def _live_settings(monkeypatch):
-    """Dummy embedding credentials (no .env in this VM) + demo gazetteer.
+    """Dummy embedding credentials (no .env in this VM) + stubbed gazetteer.
 
     The factory fails fast on missing embedding config, so the tests
     supply a placeholder key; the gazetteer refresh is stubbed out
-    per test (the real one flips global live-mode state — worker B's
-    tests cover it). Demo mode is restored after every test.
+    per test (the real one flips global cache state — tests that
+    need seeds call ``_refresh_live_keys`` explicitly). The cache
+    is cleared after every test.
     """
     monkeypatch.setattr(settings, "llm_api_key", "test-key")
     monkeypatch.setattr(settings, "qdrant_url", "http://localhost:6333")
@@ -180,7 +191,7 @@ def _live_retriever(client=None, store=None, **kwargs):
         {"from_id": "O21", "rel_type": "DOCUMENTED_BY",
          "to_id": "doc-live-motor", "to_label": "Document"},
     ])
-    return build_live_hybrid_retriever(
+    return build_hybrid_retriever(
         embeddings=StubEmbeddings(), client=client, graph_store=store, **kwargs
     )
 
@@ -200,14 +211,14 @@ def test_live_factory_injects_real_stores(monkeypatch):
     embeddings = StubEmbeddings()
     client = MockQdrantClient(LIVE_PAYLOADS)
     store = MockGraphStore()
-    retriever = build_live_hybrid_retriever(
+    retriever = build_hybrid_retriever(
         embeddings=embeddings, client=client, graph_store=store
     )
     assert retriever.embeddings is embeddings
     assert retriever.client is client
     assert retriever.graph_store is store
     assert retriever.use_live_graph is True
-    assert retriever.__name__ == "hybrid_live"
+    assert retriever.__name__ == "hybrid"
     assert refresh_calls == [store]
 
 
@@ -219,7 +230,7 @@ def test_live_factory_builds_query_model_embeddings(monkeypatch):
         return StubEmbeddings()
 
     monkeypatch.setattr("runtime.llm_factory.build_embeddings", _build_embeddings)
-    retriever = build_live_hybrid_retriever(client=MockQdrantClient(LIVE_PAYLOADS))
+    retriever = build_hybrid_retriever(client=MockQdrantClient(LIVE_PAYLOADS))
     assert built["model"] == settings.resolved_embedding_model_query
     assert built["model"] == "text-embedding-3-small"  # EMBEDDING_MODEL default
     assert isinstance(retriever.embeddings, StubEmbeddings)
@@ -228,7 +239,7 @@ def test_live_factory_builds_query_model_embeddings(monkeypatch):
 def test_live_factory_fails_fast_without_qdrant_url(monkeypatch):
     monkeypatch.setattr(settings, "qdrant_url", "")
     with pytest.raises(RuntimeError, match="QDRANT_URL"):
-        build_live_hybrid_retriever(
+        build_hybrid_retriever(
             embeddings=StubEmbeddings(), client=MockQdrantClient(LIVE_PAYLOADS)
         )
 
@@ -236,7 +247,7 @@ def test_live_factory_fails_fast_without_qdrant_url(monkeypatch):
 def test_live_factory_fails_fast_without_embedding_config(monkeypatch):
     monkeypatch.setattr(settings, "embedding_model", "")
     with pytest.raises(ValueError, match="EMBEDDING_MODEL"):
-        build_live_hybrid_retriever(
+        build_hybrid_retriever(
             embeddings=StubEmbeddings(), client=MockQdrantClient(LIVE_PAYLOADS)
         )
 
@@ -246,7 +257,7 @@ def test_live_factory_refresh_failure_does_not_crash(monkeypatch):
         raise RuntimeError("Neo4j down")
 
     monkeypatch.setattr("runtime.retrieval_graph.refresh_gazetteer_codes", _boom)
-    retriever = build_live_hybrid_retriever(
+    retriever = build_hybrid_retriever(
         embeddings=StubEmbeddings(), client=MockQdrantClient(LIVE_PAYLOADS)
     )
     assert retriever.use_live_graph is True
@@ -256,7 +267,7 @@ def test_live_factory_refresh_missing_does_not_crash(monkeypatch):
     monkeypatch.delattr(
         "runtime.retrieval_graph.refresh_gazetteer_codes", raising=False
     )
-    retriever = build_live_hybrid_retriever(
+    retriever = build_hybrid_retriever(
         embeddings=StubEmbeddings(), client=MockQdrantClient(LIVE_PAYLOADS)
     )
     assert retriever.use_live_graph is True
@@ -270,7 +281,7 @@ def test_live_factory_tolerates_real_refresh_finding_nothing(monkeypatch):
         "runtime.retrieval_graph.refresh_gazetteer_codes",
         _real_refresh_gazetteer_codes,
     )
-    retriever = build_live_hybrid_retriever(
+    retriever = build_hybrid_retriever(
         embeddings=StubEmbeddings(),
         client=MockQdrantClient(LIVE_PAYLOADS),
         graph_store=MockGraphStore(rows=[]),
@@ -281,6 +292,7 @@ def test_live_factory_tolerates_real_refresh_finding_nothing(monkeypatch):
 # --- Error contract ----------------------------------------------------------
 
 def test_qdrant_search_failure_surfaces_as_runtime_error():
+    _refresh_live_keys()
     retriever = _live_retriever(
         client=MockQdrantClient(LIVE_PAYLOADS, fail_search=True)
     )
@@ -289,6 +301,7 @@ def test_qdrant_search_failure_surfaces_as_runtime_error():
 
 
 def test_graph_store_failure_falls_back_to_vector_only():
+    _refresh_live_keys()
     retriever = _live_retriever(store=MockGraphStore(fail=True))
     ranked, trace = retriever.retrieve(QUESTION)
     assert trace["graph_missing"] is True
@@ -338,14 +351,12 @@ def test_get_document_links_from_payloads():
     }
 
 
-def test_get_document_payloads_from_fake_client():
+def test_get_document_payloads_from_mock_client():
     payloads = get_document_payloads(
-        ["doc-motor-overheat", "doc-nope"], client=FakeQdrantClient()
+        ["doc-live-motor", "doc-nope"], client=MockQdrantClient(LIVE_PAYLOADS)
     )
-    assert list(payloads) == ["doc-motor-overheat"]
-    assert payloads["doc-motor-overheat"]["title"] == (
-        "Traction motor overheating — causes and remedies"
-    )
+    assert list(payloads) == ["doc-live-motor"]
+    assert payloads["doc-live-motor"]["title"] == "Motor overheat F-204"
 
 
 def test_get_document_payloads_empty_list_never_calls_client():
@@ -355,6 +366,7 @@ def test_get_document_payloads_empty_list_never_calls_client():
 
 
 def test_live_retriever_reads_counts_and_texts_from_qdrant():
+    _refresh_live_keys()
     client = MockQdrantClient(LIVE_PAYLOADS, vector_ids=["doc-live-brake"])
     retriever = _live_retriever(client=client)
     # Lazy: no Qdrant scroll before the first query.
@@ -366,7 +378,7 @@ def test_live_retriever_reads_counts_and_texts_from_qdrant():
         "O21": 2, "motor-M2": 1, "doc-live-motor": 1, "brake-BK1": 1,
     }
     # doc-live-motor is graph-only (not in the vector results): its
-    # title/content come from the payload fetch, not the demo corpus.
+    # title/content come from the payload fetch, not a canned corpus.
     rows = {row["doc_id"]: row for row in trace["feature_rows"]}
     assert "doc-live-motor" in rows
     assert "doc-live-motor" in ranked
@@ -379,6 +391,7 @@ def test_live_retriever_reads_counts_and_texts_from_qdrant():
 
 
 def test_live_retriever_empty_store_degrades():
+    _refresh_live_keys()
     retriever = _live_retriever(
         client=MockQdrantClient({}, vector_ids=[]),
         store=MockGraphStore(rows=[]),
@@ -390,21 +403,35 @@ def test_live_retriever_empty_store_degrades():
 
 
 def test_precomputed_dict_sources_are_used():
+    _refresh_live_keys()
+    adjacency = {
+        "O21": {"type": "Asset", "neighbors": [
+            ("DOCUMENTED_BY", "doc-live-motor", "Document"),
+        ]},
+        "motor-M2": {"type": "Component", "neighbors": [
+            ("DOCUMENTED_BY", "doc-live-motor", "Document"),
+        ]},
+        "doc-live-motor": {"type": "Document", "neighbors": [
+            ("DOCUMENTED_BY", "O21", "Asset"),
+            ("DOCUMENTED_BY", "motor-M2", "Component"),
+        ]},
+    }
     retriever = HybridRetriever(
-        embeddings=DeterministicFakeEmbeddings(),
-        client=FakeQdrantClient(DeterministicFakeEmbeddings()),
+        embeddings=StubEmbeddings(),
+        client=MockQdrantClient(LIVE_PAYLOADS),
+        adjacency=adjacency,
         doc_counts={"O21": 100, "motor-M2": 1},
-        doc_links={"doc-motor-overheat": ["O21", "motor-M2"]},
-        doc_texts={"doc-motor-overheat": {
+        doc_links={"doc-live-motor": ["O21", "motor-M2"]},
+        doc_texts={"doc-live-motor": {
             "title": "Motor overheat F-204", "content": "F-204",
         }},
     )
     assert retriever._resolved_doc_counts() == {"O21": 100, "motor-M2": 1}
     assert retriever._resolved_doc_links() == {
-        "doc-motor-overheat": ["O21", "motor-M2"]
+        "doc-live-motor": ["O21", "motor-M2"]
     }
     ranked, _trace = retriever.retrieve(QUESTION)
-    assert "doc-motor-overheat" in ranked
+    assert "doc-live-motor" in ranked
 
 
 # --- Live adjacency (PPR / coverage / hub substrate) ---------------------
@@ -414,7 +441,7 @@ def _row(frm, rel, to, to_label):
 
 
 # Canned live graph. The pump branch exists ONLY here (never in the
-# demo adjacency): O21 -> pump-P9 -> doc-live-pump is the real
+# canned adjacency): O21 -> pump-P9 -> doc-live-pump is the real
 # second-hop edge that proves the live substrate is used.
 LIVE_GRAPH = {
     "O21": [
@@ -495,7 +522,7 @@ def test_build_live_adjacency_has_real_second_hop_edges():
         "doc-live-pump",
         "building-B1",
     }
-    # Demo shape: type + neighbour (rel, to_key, to_type) tuples.
+    # Canned-adjacency shape: type + neighbour (rel, to_key, to_type) tuples.
     assert adjacency["doc-live-pump"]["type"] == "Document"
     assert ("DOCUMENTED_BY", "doc-live-pump", "Document") in (adjacency["pump-P9"]["neighbors"])
     assert ("DOCUMENTED_BY", "pump-P9", "Component") in (adjacency["doc-live-pump"]["neighbors"])
@@ -563,6 +590,7 @@ def test_build_live_adjacency_timeout_returns_partial():
 
 
 def test_live_retriever_uses_live_adjacency_for_ppr_coverage():
+    _refresh_live_keys()
     client = MockQdrantClient(LIVE_PUMP_PAYLOADS, vector_ids=["doc-live-brake"])
     retriever = _live_retriever(client=client, store=KeyedMockGraphStore(LIVE_GRAPH))
     ranked, trace = retriever.retrieve(QUESTION)
@@ -572,16 +600,17 @@ def test_live_retriever_uses_live_adjacency_for_ppr_coverage():
     rows = {row["doc_id"]: row for row in trace["feature_rows"]}
     pump = rows["doc-live-pump"]
     # 2-hop coverage via the real second-hop edge (pump-P9 -> O21):
-    # 1 of 2 seeds within 2 hops. PPR mass reaches the live-only doc.
-    assert pump["g6_coverage"] == 0.5
+    # the question seeds to [O21] only, and the pump doc is within
+    # 2 hops of that one seed. PPR mass reaches the live-only doc.
+    assert pump["g6_coverage"] == 1.0
     assert pump["g7_ppr"] > 0
-    # The same question scored over the demo adjacency: the
-    # live-only doc is not a demo node, so both features are zero —
+    # The same question scored over the canned adjacency: the
+    # live-only doc is not a canned node, so both features are zero —
     # proving the live values above came from the live substrate.
-    demo = build_demo_adjacency()
+    canned = canned_adjacency()
     seeds = gazetteer_seeds(QUESTION)
-    demo_ppr = personalized_pagerank(demo, seeds)
-    demo_feats = graph_features("doc-live-pump", seeds, {"nodes": {}}, demo, ppr_scores=demo_ppr)
+    demo_ppr = personalized_pagerank(canned, seeds)
+    demo_feats = graph_features("doc-live-pump", seeds, {"nodes": {}}, canned, ppr_scores=demo_ppr)
     assert demo_feats["g6_coverage"] == 0.0
     assert demo_feats["g7_ppr"] == 0.0
     assert pump["g6_coverage"] != demo_feats["g6_coverage"]
@@ -589,6 +618,7 @@ def test_live_retriever_uses_live_adjacency_for_ppr_coverage():
 
 
 def test_live_build_failure_falls_back_to_expansion_only():
+    _refresh_live_keys()
     client = MockQdrantClient(LIVE_PUMP_PAYLOADS, vector_ids=["doc-live-brake"])
     # pump-P9 is never queried by the 1-hop expansion (seeds only),
     # so the expansion succeeds and the build fails mid-way.
@@ -600,11 +630,11 @@ def test_live_build_failure_falls_back_to_expansion_only():
     rows = {row["doc_id"]: row for row in trace["feature_rows"]}
     # The second-hop doc is still a candidate (linked via the
     # expansion node pump-P9) but its live coverage/PPR are zero —
-    # no demo edges were substituted for the failed live build.
+    # no canned edges were substituted for the failed live build.
     assert rows["doc-live-pump"]["g6_coverage"] == 0.0
     assert rows["doc-live-pump"]["g7_ppr"] == 0.0
     # And the surviving features equal the expansion-only
-    # computation exactly (not the demo-adjacency values).
+    # computation exactly (not the canned-adjacency values).
     seeds = gazetteer_seeds(QUESTION)
     expansion = expand_via_graph_query(seeds, store=KeyedMockGraphStore(LIVE_GRAPH))
     fallback = build_expansion_adjacency(seeds, expansion)
@@ -616,33 +646,9 @@ def test_live_build_failure_falls_back_to_expansion_only():
 
 
 def test_live_empty_expansion_stays_graph_missing():
+    _refresh_live_keys()
     retriever = _live_retriever(store=MockGraphStore(rows=[]))
     ranked, trace = retriever.retrieve(QUESTION)
     assert trace["graph_missing"] is True
     assert "graph_adjacency_source" not in trace  # no live build attempted
     assert "doc-live-motor" in ranked  # payload links still rank it
-
-
-def test_fake_path_trace_has_no_live_adjacency_key():
-    ranked, trace = build_hybrid_retriever().retrieve(QUESTION)
-    assert "graph_adjacency_source" not in trace
-    assert "doc-motor-overheat" in ranked
-
-
-# --- Fake path untouched ------------------------------------------------------
-
-def test_fake_path_never_touches_qdrant(monkeypatch):
-    def _no_client():
-        raise AssertionError("fake path must not call get_client")
-
-    monkeypatch.setattr("infra.qdrant_client.get_client", _no_client)
-    retriever = build_hybrid_retriever()
-    ranked, _trace = retriever.retrieve(QUESTION)
-    assert "doc-motor-overheat" in ranked
-    # Demo-table behaviour, byte-identical to before Phase 5.
-    assert retriever._resolved_doc_counts()["O21"] == 6
-    assert retriever._resolved_doc_counts()["motor-M2"] == 1
-    assert set(retriever._resolved_doc_links()) == set(DOCUMENT_LINKS)
-    assert retriever._docs["doc-motor-overheat"]["title"] == (
-        "Traction motor overheating — causes and remedies"
-    )

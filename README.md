@@ -1081,15 +1081,22 @@ trước, paraphrase sau, có guardrail kiểm tra giữ code/số/threshold
 và cấm HyDE); link recall 0,762, intent accuracy 0,500 trên
 golden set fake, downstream nDCG@6 không đổi trên setup blurred.
 Phase 5 thêm live wiring (không đổi scoring): factory
-`build_live_hybrid_retriever` (real LiteLLM query embeddings +
+`build_hybrid_retriever` (real LiteLLM query embeddings +
 Qdrant + live Neo4j), nguồn thật thay bảng demo trong
 `HybridRetriever`, live adjacency cho PPR/coverage/hub, dynamic
 gazetteer từ ontology, và `make eval-retrieval-live`
 (preflight fail-fast, verdict INFORMATIONAL) — chưa có số live
 nào, chỉ mới verify preflight fail-fast trong VM này.
-Đánh giá bằng golden set 36 case qua
-`make eval-retrieval-phase0/1/2/3/4` (fake setups, chưa có live
-Qdrant/Neo4j trong VM này); `search_documents` và hook
+Ngày 2026-11-14 toàn bộ fake bị xoá (option B của user):
+`runtime/retrieval_baseline.py`,
+`runtime/retrieval_blurred.py`,
+`scripts/eval_retrieval.py`,
+`scripts/eval_retrieval_phase1..4.py` và các target
+`make eval-retrieval-phase0..4` đã bị xoá; eval duy nhất còn
+lại là `make eval-retrieval-live`. Các số fake-setup cũ
+(link recall 0,762, intent accuracy 0,500, downstream nDCG@6
+không đổi trên setup blurred) chỉ còn là số liệu lịch sử,
+không chạy lại được. `search_documents` và hook
 `retrieval_context` chưa đổi — chưa wire live, xem checklist ở
 cuối doc tổng hợp.
 

@@ -2,21 +2,27 @@
 (report §3.2, §4.1, §4.2, §4.7; locked decisions: 1 hop, fan-out
 <=10 per (seed, relation type), total <=50 nodes).
 
-Seeds come from a deterministic gazetteer first (exact match on the
-demo vocabulary: asset/component/building/document codes and fault
-codes — no LLM, no embedding similarity in Phase 1). Phase 4 adds a
-normalisation-only variant pass on top of the exact gazetteer
-(``gazetteer_seeds``): diacritics-insensitive matching plus
-hyphen/space/underscore separator variants of the same codes
-(``O-21`` / ``O 21`` / ``o21`` -> ``O21``, ``F204`` -> ``F-204``,
-``motor m2`` / ``motorM2`` -> ``motor-M2``), at confidence 0.8
-instead of 1.0. Exact hits are byte-identical to Phase 1; a variant
-hit for a node that also has an exact hit keeps the 1.0.
-over an allowlisted relation set on an in-memory adjacency built from
-``seeds/demo_data.py`` RELATIONS + the payload links
-(``runtime/retrieval_linking.py``); the live path calls the existing
-``ontology/knowledge/graph_query.py`` read functions instead
-(``expand_via_graph_query``) — no new Cypher in Phase 1.
+Seeds come ONLY from the dynamic gazetteer (``refresh_gazetteer_codes``):
+the live ontology's entity keys (Asset, Component, Building,
+Document), fetched explicitly into an in-memory cache — NO TTL, NO
+background/beat job, refresh on seed/drain or by hand only, per the
+user's sync principle (codes change slowly; sync fixed things once,
+never duplicate the tools' fetch logic). There are NO hardcoded
+demo patterns: until ``refresh_gazetteer_codes`` has loaded keys,
+``gazetteer_seeds`` links NOTHING (it fails closed to ``[]``), and
+a refresh that fails leaves the cache EMPTY, so the gazetteer
+still links nothing rather than falling back to any built-in
+vocabulary. A wrong link is worse than no link.
+
+Fault codes are NOT ontology entities — there is no Fault entity
+type — so fault codes do not link at all. The dynamic list covers
+Asset/Component/Building/Document keys only.
+
+Expansion runs over an allowlisted relation set on an adjacency
+supplied by the caller (``build_live_adjacency`` /
+``build_expansion_adjacency`` over real store data); the live path
+calls the existing ``ontology/knowledge/graph_query.py`` read
+functions instead (``expand_via_graph_query``) — no new Cypher.
 
 Per candidate the module returns G1 (min hop distance), G2
 (path_score = max over paths of prod(w_rel) * 0.6**hops, §4.2
@@ -35,38 +41,12 @@ Timeout: expansion takes ``timeout_seconds``; a store call that
 raises (including ``TimeoutError``) degrades to an empty expansion
 and the caller falls back to vector-only (guardrail 3).
 
-Phase 5 dynamic gazetteer (``refresh_gazetteer_codes`` /
-``clear_gazetteer_codes`` / ``gazetteer_seeds`` live branch): the
-demo gazetteer above only knows the demo vocabulary, so on a live
-ontology it would link demo codes that do not exist there and miss
-live codes that do. The live factory therefore refreshes the
-gazetteer explicitly from the ontology (``list_entity_keys`` per
-label: Asset, Component, Building, Document) into an in-memory
-cache — NO TTL, NO background/beat job, refresh on seed/drain or
-by hand only, per the user's sync principle (codes change slowly;
-sync fixed things once, never duplicate the tools' fetch logic).
-
-Two modes, switched by an explicit flag set only by
-``refresh_gazetteer_codes`` (never by sniffing):
-- Demo mode (default, refresh never called): today's hardcoded
-  demo patterns, byte-identical output.
-- Live mode (refresh called at least once): the demo patterns
-  are DISABLED and only the cached dynamic keys can link. A
-  wrong link is worse than no link: a live question naming O21
-  when the live ontology has no O21 must not link, so there is
-  NO fallback to demo codes. If the ontology was unreachable at
-  refresh the cache is EMPTY (a failed refresh also clears any
-  earlier cache — a stale cache could link codes the ontology
-  no longer has) and the gazetteer links NOTHING. A failed
-  refresh never raises; it returns ``{"source": "unreachable",
-  ...zero counts...}``.
-
-Limitation: fault codes are NOT ontology entities — there is no
-Fault entity type, and FAULT_CODE_LINKS maps fault codes to
-asset+component from the demo table. The dynamic list therefore
-covers Asset/Component/Building/Document keys only; fault-code
-expansion stays demo-grounded (demo mode) and does not run at
-all in live mode, until Fault becomes an ontology entity type.
+Dynamic matching reuses the Phase 4 normalisation: verbatim
+(case-insensitive whole-token) hits score 1.0, separator /
+diacritics variants score 0.8, and a 1.0 twin always wins the
+dedup. Patterns are compiled once at refresh, not per question.
+Scores, fusion weights, guardrails and gating are untouched:
+this only changes WHICH keys can become seeds.
 """
 
 from __future__ import annotations
@@ -76,7 +56,6 @@ import math
 import re
 import time
 import unicodedata
-from collections.abc import Callable
 
 from runtime.retrieval_fusion import zscores
 
@@ -142,74 +121,10 @@ HUB_LAMBDA = 1.0
 HUB_TRANSIT_TYPES = frozenset({"Building", "Document"})
 
 # --- Gazetteer ---------------------------------------------------------
-# Fault code -> (asset, component-or-None), grounded in
-# seeds/demo_data.py FAULTS rows + the component named in each fault
-# title. Codes with no component node (F-102 leveling, F-103 safety,
-# F-110 door timeout, F-205 motor vibration) map to the asset only.
-FAULT_CODE_LINKS: dict[str, tuple[str, str | None]] = {
-    "F-101": ("O21", "door-sensor-DS1"),
-    "F-204": ("O21", "motor-M2"),
-    "F-301": ("O21", "brake-BK1"),
-    "F-410": ("O21", "controller-C1"),
-    "F-206": ("O22", "motor-M3"),
-    "F-207": ("O22", "controller-C2"),
-    "F-102": ("O21", None),
-    "F-103": ("O21", None),
-    "F-110": ("O21", None),
-    "F-205": ("O21", None),
-}
-# Unambiguous component names (exactly one such component exists in
-# the demo ontology). Bare "motor" / "controller" are ambiguous
-# (M2/M3/M0, C1/C2) and are deliberately NOT mapped.
-COMPONENT_NAME_LINKS: dict[str, tuple[str, str]] = {
-    "door sensor": ("Component", "door-sensor-DS1"),
-    "brake": ("Component", "brake-BK1"),
-}
-
-_CODE_RE = re.compile(
-    r"\b(o\d{2}|building-b\d|motor-m\d|door-sensor-ds\d|controller-c\d"
-    r"|brake-bk\d|doc-[a-z0-9-]+|f-\d{3})\b"
-)
-
-
-def _canonical_code(code: str) -> str:
-    """Normalise a lowercased code match to the ontology key spelling.
-
-    Adjacency keys are case-sensitive (``O21``, ``motor-M2``,
-    ``door-sensor-DS1``); a raw lowercase match (``o21``, ``motor-m2``)
-    would silently match nothing and starve the graph arm.
-    """
-    if re.fullmatch(r"o\d{2}", code):
-        return code.upper()
-    if re.fullmatch(r"f-\d{3}", code):
-        return code.upper()
-    if re.fullmatch(r"motor-m\d", code):
-        return f"motor-M{code[-1]}"
-    if re.fullmatch(r"door-sensor-ds\d", code):
-        return f"door-sensor-DS{code[-1]}"
-    if re.fullmatch(r"controller-c\d", code):
-        return f"controller-C{code[-1]}"
-    if re.fullmatch(r"brake-bk\d", code):
-        return f"brake-BK{code[-1]}"
-    return code  # building-b*, doc-* are already lowercase keys
-
-
-# --- Phase 4: gazetteer normalisation (no LLM entity linker) -----------
-# The exact gazetteer above is unchanged. The variant pass below runs
-# on a diacritics-stripped copy of the lowercased question and matches
-# separator variants of the SAME codes: hyphens, spaces and
-# underscores between the code's parts are optional, so "O-21",
-# "O 21" and "o21" all resolve to O21, "F204" to F-204, "motor m2" /
-# "motorM2" to motor-M2, and likewise for door-sensor-DS1,
-# controller-C1, brake-BK1 and building-B1. Every variant pattern
-# still requires word boundaries on the normalised text, so a code
-# embedded in a longer token ("XO21", "O21x", "motorm2x") never
-# matches. A variant hit scores NORMALISED_CONFIDENCE (0.8), not
-# 1.0 — downstream PPR already weighs seeds by confidence
-# (``runtime/retrieval_ppr.py``), so a normalised hit counts
-# slightly less than an exact one. When nothing links confidently
-# the gazetteer returns [] — the QueryPlan caller says so
-# explicitly; there is no scored-guess fallback here.
+# Seeds come ONLY from the dynamic gazetteer (see module docstring
+# and ``refresh_gazetteer_codes`` below). No hardcoded patterns.
+# The dynamic matcher reuses the Phase 4 normalisation: verbatim
+# hits score 1.0, separator / diacritics variants score 0.8.
 
 NORMALISED_CONFIDENCE = 0.8
 
@@ -226,115 +141,6 @@ def _strip_diacritics(text: str) -> str:
     return stripped.replace("đ", "d").replace("Đ", "D")
 
 
-def _variant_asset(match: re.Match[str]) -> list[tuple[str, str]]:
-    return [("Asset", f"O{match.group(1)}")]
-
-
-def _variant_fault(match: re.Match[str]) -> list[tuple[str, str]]:
-    """Fault-code expansion through a normalised code: same
-    FAULT_CODE_LINKS as the exact pass (unknown fault -> no seeds)."""
-    asset, component = FAULT_CODE_LINKS.get(f"F-{match.group(1)}", (None, None))
-    out: list[tuple[str, str]] = []
-    if asset:
-        out.append(("Asset", asset))
-    if component:
-        out.append(("Component", component))
-    return out
-
-
-def _variant_motor(match: re.Match[str]) -> list[tuple[str, str]]:
-    return [("Component", f"motor-M{match.group(1)}")]
-
-
-def _variant_door_sensor(match: re.Match[str]) -> list[tuple[str, str]]:
-    return [("Component", f"door-sensor-DS{match.group(1)}")]
-
-
-def _variant_controller(match: re.Match[str]) -> list[tuple[str, str]]:
-    return [("Component", f"controller-C{match.group(1)}")]
-
-
-def _variant_brake(match: re.Match[str]) -> list[tuple[str, str]]:
-    return [("Component", f"brake-BK{match.group(1)}")]
-
-
-def _variant_building(match: re.Match[str]) -> list[tuple[str, str]]:
-    return [("Building", f"building-B{match.group(1)}")]
-
-
-_VARIANT_CODE_PATTERNS: list[
-    tuple[re.Pattern[str], Callable[[re.Match[str]], list[tuple[str, str]]]]
-] = [
-    (re.compile(r"\bo" + _SEP + r"(\d{2})\b"), _variant_asset),
-    (re.compile(r"\bf" + _SEP + r"(\d{3})\b"), _variant_fault),
-    (re.compile(r"\bmotor" + _SEP + r"m" + _SEP + r"(\d)\b"), _variant_motor),
-    (
-        re.compile(r"\bdoor" + _SEP + r"sensor" + _SEP + r"ds" + _SEP + r"(\d)\b"),
-        _variant_door_sensor,
-    ),
-    (re.compile(r"\bcontroller" + _SEP + r"c" + _SEP + r"(\d)\b"), _variant_controller),
-    (re.compile(r"\bbrake" + _SEP + r"bk" + _SEP + r"(\d)\b"), _variant_brake),
-    (re.compile(r"\bbuilding" + _SEP + r"b" + _SEP + r"(\d)\b"), _variant_building),
-]
-
-# Document ids in the demo corpus. A doc id's hyphens are the only
-# thing separating its words, so a fully concatenated mention
-# ("docmotoroverheat") can only be segmented back with this
-# vocabulary; a hyphen/space variant of an UNKNOWN doc id does not
-# link (its exact hyphenated form still does, via _CODE_RE).
-KNOWN_DOC_IDS = frozenset({
-    "doc-door-sensor",
-    "doc-motor-overheat",
-    "doc-brake-inspection",
-    "doc-controller-errors",
-    "doc-leveling",
-    "doc-rope-inspection",
-    "doc-o23-overview",
-})
-_DOC_COMPACT = {doc_id.replace("-", ""): doc_id for doc_id in KNOWN_DOC_IDS}
-# At most two word-segments after "doc": every known doc id has one
-# or two, and capping the run keeps a following doc mention (or any
-# following word) from being swallowed into this match.
-_DOC_RUN_RE = re.compile(r"\bdoc" + _SEP + r"([a-z0-9]+(?:[-_\s]+[a-z0-9]+)?)\b")
-
-
-def _doc_variant_matches(norm_text: str) -> list[tuple[int, str]]:
-    """(start, canonical doc id) for separator variants of doc codes.
-
-    Resolution order per match: (1) the separator-stripped mention
-    equals a known doc id ("docmotoroverheat" -> doc-motor-overheat);
-    (2) the longest leading segments form a known doc id
-    ("doc motor overheat manual" -> doc-motor-overheat, "manual" is
-    not part of the id; "doc leveling for ..." -> doc-leveling).
-    Nothing else links: the run is greedy over up to two segments,
-    so a following word can land inside it ("docmotoroverheated
-    manual"), and reconstructing an unknown id from those segments
-    would invent a node — unknown doc ids link only through their
-    exact hyphenated form.
-    """
-    matches: list[tuple[int, str]] = []
-    for match in _DOC_RUN_RE.finditer(norm_text):
-        segments = re.split(r"[-_\s]+", match.group(1))
-        known = _DOC_COMPACT.get("doc" + "".join(segments))
-        if known is not None:
-            matches.append((match.start(), known))
-            continue
-        for end in range(len(segments), 0, -1):
-            candidate = "doc-" + "-".join(segments[:end])
-            if candidate in KNOWN_DOC_IDS:
-                matches.append((match.start(), candidate))
-                break
-    return matches
-
-
-def _variant_name_pattern(name: str) -> re.Pattern[str]:
-    """Component-name pattern on normalised text: the words may be
-    joined by a hyphen/space/underscore or nothing ("door-sensor",
-    "doorsensor"), and diacritic forms match via the stripped text."""
-    parts = [re.escape(word) for word in name.split(" ")]
-    return re.compile(r"\b" + _SEP.join(parts) + r"\b")
-
-
 def _node_type(key: str) -> str:
     if key.startswith("building-"):
         return "Building"
@@ -349,107 +155,37 @@ def gazetteer_seeds(question: str) -> list[dict]:
     """Deterministic seed entities from a question.
 
     Returns ``[{"type": ..., "key": ..., "confidence": ...}]`` in
-    first-mention order, deduped by key. Confidence is 1.0 for an
-    exact gazetteer hit (today's behaviour, unchanged) and 0.8 for
-    a normalised-variant hit (Phase 4: diacritics-insensitive,
-    hyphen/space/underscore separator variants of the same codes —
-    see the Phase 4 block above). An exact hit and its normalised
-    twin are the same node: the 1.0 is kept.
-
-    Ordering note (deliberate): exact seeds keep today's order
-    (codes in mention order, then component names), so an
-    exact-only question returns byte-identical output to Phase 1.
-    Variant-only seeds slot in by first-mention position among the
-    seeds already placed — for the usual all-code question that is
-    exact first-mention order; a variant mentioned before a
-    component-name exact seed lands before the code seeds but the
-    name seed itself stays last, as it does today. [] when nothing
-    links confidently: no LLM linker, no scored guesses.
-
-    Phase 5: when the dynamic gazetteer is live (see
-    ``refresh_gazetteer_codes``), this function returns the live
-    branch instead — demo patterns disabled, only cached dynamic
-    keys link. In demo mode (default) the body below is untouched.
+    first-mention order, deduped by key. ONLY keys in the dynamic
+    cache (loaded by ``refresh_gazetteer_codes`` from the live
+    ontology) can link — verbatim hits score 1.0, separator /
+    diacritics variants score 0.8 (``NORMALISED_CONFIDENCE``), a
+    1.0 twin wins the dedup. ``[]`` when the cache is empty
+    (never refreshed, or the refresh failed) or nothing listed
+    is mentioned: no hardcoded fallback, no LLM linker, no
+    scored guesses.
     """
-    if _DYNAMIC_MODE:
-        return _dynamic_gazetteer_seeds(question)
-    text = (question or "").lower()
-    seeds: list[dict] = []
-    seen: set[str] = set()
-    positions: list[int] = []  # mention position per seed, same order
-
-    def _add(node_type: str, key: str, position: int) -> None:
-        if key not in seen:
-            seen.add(key)
-            seeds.append({"type": node_type, "key": key, "confidence": 1.0})
-            positions.append(position)
-
-    # Exact pass — unchanged from Phase 1.
-    for match in _CODE_RE.finditer(text):
-        code = _canonical_code(match.group(1))
-        if code.startswith("F-"):
-            asset, component = FAULT_CODE_LINKS.get(code, (None, None))
-            if asset:
-                _add("Asset", asset, match.start())
-            if component:
-                _add("Component", component, match.start())
-        else:
-            _add(_node_type(code), code, match.start())
-    for name, (node_type, key) in COMPONENT_NAME_LINKS.items():
-        name_match = re.search(rf"\b{re.escape(name)}\b", text)
-        if name_match:
-            _add(node_type, key, name_match.start())
-
-    # Phase 4 variant pass on diacritics-stripped text (confidence 0.8).
-    norm_text = _strip_diacritics(text)
-    offers: list[tuple[int, str, str]] = []
-    for pattern, expand in _VARIANT_CODE_PATTERNS:
-        for match in pattern.finditer(norm_text):
-            for node_type, key in expand(match):
-                offers.append((match.start(), node_type, key))
-    for start, key in _doc_variant_matches(norm_text):
-        offers.append((start, "Document", key))
-    for name, (node_type, key) in COMPONENT_NAME_LINKS.items():
-        name_match = _variant_name_pattern(name).search(norm_text)
-        if name_match:
-            offers.append((name_match.start(), node_type, key))
-    offers.sort(key=lambda offer: offer[0])  # stable: first-mention order
-    for position, node_type, key in offers:
-        if key in seen:
-            continue  # exact twin already placed at 1.0
-        seen.add(key)
-        index = next(
-            (i for i, pos in enumerate(positions) if pos > position), len(seeds)
-        )
-        seeds.insert(
-            index,
-            {"type": node_type, "key": key, "confidence": NORMALISED_CONFIDENCE},
-        )
-        positions.insert(index, position)
-    return seeds
+    return _dynamic_gazetteer_seeds(question)
 
 
 # --- Phase 5: dynamic gazetteer (live ontology keys) ----------------
-# See the Phase 5 section in the module docstring for the two-mode
-# rule and its reasoning. Summary of the contract:
-# - ``refresh_gazetteer_codes(store=None)`` is the ONLY way into
-#   live mode; it is called explicitly by the live factory (and by
-#   hand), never on a timer, never implicitly by ``gazetteer_seeds``.
+# See the module docstring for the contract. Summary:
+# - ``refresh_gazetteer_codes(store=None)`` is the ONLY way keys
+#   enter the cache; it is called explicitly by the live factory
+#   (and by hand), never on a timer, never implicitly by
+#   ``gazetteer_seeds``.
 # - The cache is in-memory only, no TTL. ``clear_gazetteer_codes``
-#   returns to demo mode (used by tests).
+#   empties it (the gazetteer then links nothing until refreshed).
 # - A refresh fetches ALL FOUR labels first and only commits on
 #   full success: any store failure leaves the cache EMPTY and
-#   live mode linking nothing, and never raises.
+#   never raises.
 # - Fault codes are not fetched: there is no Fault entity type.
-#   In live mode a fault code links nothing (its demo expansion
-#   is a demo pattern, and demo patterns are disabled in live mode).
+#   A fault code links nothing.
 # - Dynamic matching reuses the Phase 4 normalisation: verbatim
 #   (case-insensitive whole-token) hits score 1.0, separator /
 #   diacritics variants score 0.8, and a 1.0 twin always wins the
 #   dedup. Patterns are compiled once at refresh, not per question.
 # - Scores, fusion weights, guardrails and gating are untouched:
-#   this only changes WHICH keys can become seeds, and only in
-#   live mode.
+#   this only changes WHICH keys can become seeds.
 
 _DYNAMIC_ENTITY_TYPES: tuple[tuple[str, str], ...] = (
     ("Asset", "assets"),
@@ -458,7 +194,6 @@ _DYNAMIC_ENTITY_TYPES: tuple[tuple[str, str], ...] = (
     ("Document", "documents"),
 )
 
-_DYNAMIC_MODE = False
 _DYNAMIC_CODES: dict[str, list[str]] = {}
 _DYNAMIC_PATTERNS: list[tuple[str, str, re.Pattern[str], re.Pattern[str]]] = []
 
@@ -507,7 +242,7 @@ def refresh_gazetteer_codes(store=None) -> dict:
 
     Fetches keys per label via ``ontology/knowledge/graph_query.py::
     list_entity_keys`` (Asset, Component, Building, Document),
-    stores them in the module-level cache, sets live mode, and
+    stores them in the module-level cache and
     returns ``{"assets": n, "components": n, "buildings": n,
     "documents": n, "source": "ontology"}``. Called explicitly by
     the live factory (and by hand); never on a timer.
@@ -518,11 +253,10 @@ def refresh_gazetteer_codes(store=None) -> dict:
     "documents": 0, "source": "unreachable"}``, leaves the cache
     EMPTY (clearing any earlier successful refresh: a stale cache
     could link codes the ontology no longer has, and a wrong link
-    is worse than no link), keeps live mode ON (so the gazetteer
-    links nothing rather than falling back to demo codes), and
+    is worse than no link), so the gazetteer links nothing, and
     never raises.
     """
-    global _DYNAMIC_MODE, _DYNAMIC_CODES, _DYNAMIC_PATTERNS
+    global _DYNAMIC_CODES, _DYNAMIC_PATTERNS
     try:
         from ontology.knowledge.graph_query import list_entity_keys
 
@@ -531,7 +265,6 @@ def refresh_gazetteer_codes(store=None) -> dict:
             fetched[entity_type] = list_entity_keys(entity_type, store=store)
     except Exception as exc:  # noqa: BLE001 — refresh must never raise
         logger.warning("dynamic gazetteer refresh failed: %s", exc)
-        _DYNAMIC_MODE = True
         _DYNAMIC_CODES = {}
         _DYNAMIC_PATTERNS = []
         return {
@@ -554,7 +287,6 @@ def refresh_gazetteer_codes(store=None) -> dict:
     # cache wholesale, so no stale keys survive it.
     _DYNAMIC_CODES = codes
     _DYNAMIC_PATTERNS = patterns
-    _DYNAMIC_MODE = True
     return {
         "assets": len(codes["Asset"]),
         "components": len(codes["Component"]),
@@ -565,26 +297,25 @@ def refresh_gazetteer_codes(store=None) -> dict:
 
 
 def clear_gazetteer_codes() -> None:
-    """Drop the dynamic cache and return to demo mode.
+    """Drop the dynamic cache: the gazetteer links nothing until refreshed.
 
-    Test helper (also the manual way back from live mode): after
-    this call ``gazetteer_seeds`` uses the hardcoded demo patterns
-    again, exactly as before any refresh.
+    Test helper (also the manual way to clear the cache): after
+    this call ``gazetteer_seeds`` returns [] until
+    ``refresh_gazetteer_codes`` loads keys again.
     """
-    global _DYNAMIC_MODE, _DYNAMIC_CODES, _DYNAMIC_PATTERNS
-    _DYNAMIC_MODE = False
+    global _DYNAMIC_CODES, _DYNAMIC_PATTERNS
     _DYNAMIC_CODES = {}
     _DYNAMIC_PATTERNS = []
 
 
 def _dynamic_gazetteer_seeds(question: str) -> list[dict]:
-    """Live-mode seeds: only cached dynamic keys can link.
+    """Seeds from the dynamic cache only.
 
     Verbatim hits score 1.0, normalised-variant hits 0.8; a key
-    with both keeps the 1.0 (same dedup rule as the demo pass).
-    Seeds come out in first-mention order. [] when the cache is
-    empty (ontology unreachable at refresh) or nothing listed is
-    mentioned — there is no demo fallback in live mode.
+    with both keeps the 1.0. Seeds come out in first-mention
+    order. [] when the cache is empty (never refreshed, or the
+    ontology was unreachable at refresh) or nothing listed is
+    mentioned — there is no fallback vocabulary.
     """
     text = (question or "").lower()
     norm_text = _strip_diacritics(text)
@@ -620,39 +351,6 @@ def _dynamic_gazetteer_seeds(question: str) -> list[dict]:
 # adjacency: node key -> {"type": str, "neighbors": [(rel, to_key, to_type)]}
 # Edges are stored directed as modelled, but distance/path features
 # are computed on the underlying undirected graph (report §3.2).
-
-def build_demo_adjacency() -> dict:
-    """Adjacency from RELATIONS + payload doc links (fake / eval graph).
-
-    Payload links add the doc<->entity edges the ontology seed does
-    not model for the 4 non-Document docs (e.g. doc-controller-errors
-    <-> O21 / controller-C1); without them those docs would be
-    unreachable from any seed.
-    """
-    from runtime.retrieval_linking import DOCUMENT_LINKS
-    from seeds.demo_data import RELATIONS
-
-    adjacency: dict[str, dict] = {}
-
-    def _ensure(key: str, node_type: str) -> None:
-        adjacency.setdefault(key, {"type": node_type, "neighbors": []})
-
-    def _edge(from_key: str, from_type: str, rel: str, to_key: str, to_type: str) -> None:
-        _ensure(from_key, from_type)
-        _ensure(to_key, to_type)
-        adjacency[from_key]["neighbors"].append((rel, to_key, to_type))
-        adjacency[to_key]["neighbors"].append((rel, from_key, from_type))
-
-    for from_id, from_label, rel, to_id, to_label in RELATIONS:
-        _edge(from_id, from_label, rel, to_id, to_label)
-    for doc_id, links in DOCUMENT_LINKS.items():
-        for node_key in links["node_ids"]:
-            if node_key == doc_id:
-                continue
-            # Payload link = the DOCUMENTED_BY-style doc<->entity edge.
-            _edge(doc_id, "Document", "DOCUMENTED_BY", node_key, _node_type(node_key))
-    return adjacency
-
 
 def node_degree(adjacency: dict, key: str) -> int:
     return len(adjacency.get(key, {}).get("neighbors", []))
@@ -795,7 +493,8 @@ def build_expansion_adjacency(seeds: list[dict], expansion: dict) -> dict:
     The degradation substrate for the live path (see
     ``build_live_adjacency``): real store data (the 1-hop expansion
     rows), partial — no second-hop edges, so PPR/coverage/hub see
-    only the seed fringe. Same shape as ``build_demo_adjacency``.
+    only the seed fringe. Same adjacency shape (node key ->
+    ``{"type": str, "neighbors": [(rel, to_key, to_type)]}``).
     Never the demo adjacency: on the live path a demo edge would be
     a fabricated edge about the live ontology.
     """
@@ -833,7 +532,7 @@ def build_live_adjacency(
 ) -> dict:
     """Live adjacency for PPR (G7), coverage (G6) and hub (G8).
 
-    Same shape as ``build_demo_adjacency`` (node key ->
+    Same adjacency shape (node key ->
     ``{"type": str, "neighbors": [(rel, to_key, to_type)]}``,
     stored directed but used undirected), built from REAL store
     data only: the seeds + the 1-hop expansion nodes + the 1-hop
@@ -944,12 +643,18 @@ def build_live_adjacency(
 # --- Per-candidate graph features --------------------------------------
 
 def doc_linked_nodes(doc_id: str, payload: dict | None = None) -> list[str]:
-    """Node ids a doc is linked to: payload first, linking table fallback."""
+    """Node ids a doc is linked to, from its Qdrant payload only.
+
+    ``payload["node_ids"]`` is the link (see
+    ``runtime/retrieval_linking.py``: every Qdrant point carries
+    ``node_ids[]`` in its payload). A doc with no payload node
+    ids links to nothing — there is no table fallback; an
+    unlinked doc scores ``graph_score = 0`` and the vector arm
+    carries it (guardrail 3 fallback).
+    """
     if payload and payload.get("node_ids"):
         return list(payload["node_ids"])
-    from runtime.retrieval_linking import DOCUMENT_LINKS
-
-    return list(DOCUMENT_LINKS.get(doc_id, {}).get("node_ids", []))
+    return []
 
 
 def seed_coverage(doc_id: str, seeds: list[dict], adjacency: dict, *, max_hops: int = 2) -> float:
@@ -1141,12 +846,11 @@ def _minmax_log(values: list[float]) -> list[float]:
     PPR masses are tiny and heavy-tailed (a seed-adjacent doc can
     hold 10x the mass of the next candidate); the log compresses
     the tail and the min-max puts the query's best PPR at 1.0.
-    A z-score here would be wrong: on this corpus usually exactly
-    one candidate has nonzero PPR, and a z-score would hand it
-    z = +2.0 however small its mass — prototyped, it regressed
-    blurred multi-hop nDCG@6 0.954 -> 0.908 (see
-    docs/hybrid-retrieval-phase2.md). Report §4.7 sanctions this
-    choice explicitly: "PPR via log then min-max".
+    A z-score here would be wrong: usually exactly one candidate
+    has nonzero PPR, and a z-score would hand it z = +2.0 however
+    small its mass (see docs/hybrid-retrieval-phase2.md).
+    Report §4.7 sanctions this choice explicitly: "PPR via log
+    then min-max".
     """
     logs = [math.log1p(max(v, 0.0)) for v in values]
     lo, hi = min(logs), max(logs)

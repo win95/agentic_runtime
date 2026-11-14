@@ -1,5 +1,16 @@
 # Hybrid retrieval — Phase 5: Live wiring (real Qdrant + Neo4j, no new scoring)
 
+> **UPDATED 2026-11-14 (fake removal, user option B).** The
+> factory in this doc was renamed: `build_hybrid_retriever`
+> (the old `build_live_hybrid_retriever` name does not
+> survive). The fake path is gone — doc sources default to
+> empty, there is no demo adjacency and no demo gazetteer
+> mode anymore (`gazetteer_seeds` reads only the dynamic
+> cache and returns `[]` when it is empty). The fake-setup
+> numbers cited here are HISTORICAL and NOT reproducible
+> (the phase evals are deleted); the only retrieval eval
+> left is `make eval-retrieval-live`.
+
 Report: `~/workspace/research_notes/hybrid-vector-graph-retrieval-20261114-0430/report.md`.
 Phase 0: `docs/hybrid-retrieval-phase0.md`. Phase 1:
 `docs/hybrid-retrieval-phase1.md`. Phase 2:
@@ -11,15 +22,16 @@ Phase 0: `docs/hybrid-retrieval-phase0.md`. Phase 1:
 **No live numbers exist.** There is no Qdrant/Neo4j in this VM
 and `EMBEDDING_MODEL` is set by the user in his own `.env` on
 his machine, so every metric in this doc is either a fake-setup
-number carried over from Phases 0–4 (labelled as such) or
-unverified-live. The only live-mode behaviour verified in this
-VM is the fail-fast preflight (§5, §7).
+number carried over from Phases 0–4 (labelled as such —
+HISTORICAL since the 2026-11-14 fake removal, not
+reproducible) or unverified-live. The only live-mode behaviour
+verified in this VM is the fail-fast preflight (§5, §7).
 
 ## What was built
 
 | File | What it is |
 |---|---|
-| `runtime/retrieval_hybrid.py` | `build_live_hybrid_retriever` (new factory, §1) + the three live-source kwargs on `HybridRetriever` (§2). No fusion, weight, guardrail or gating change. |
+| `runtime/retrieval_hybrid.py` | `build_hybrid_retriever` (the factory, §1 — renamed from `build_live_hybrid_retriever` in the 2026-11-14 fake removal) + the three live-source kwargs on `HybridRetriever` (§2). No fusion, weight, guardrail or gating change. |
 | `infra/qdrant_client.py` | `count_documents_per_node`, `get_document_links`, `get_document_payloads` (new, §2) over one shared `_scroll_payloads` helper. |
 | `runtime/retrieval_graph.py` | `build_live_adjacency` + `build_expansion_adjacency` (§3), `refresh_gazetteer_codes` + `clear_gazetteer_codes` and the dynamic-gazetteer live mode (§4). |
 | `ontology/knowledge/graph_query.py` | `list_entity_keys` (new, §4) — the read the dynamic gazetteer uses. No new Cypher anywhere in Phase 5. |
@@ -40,15 +52,18 @@ done** — the opt-in wiring follow-up (`execution.retrieval.hybrid`
 / `query_plan`) is still NOT done; see
 `docs/hybrid-retrieval.md` §12.
 
-## 1. Live factory — `build_live_hybrid_retriever`
+## 1. Factory — `build_hybrid_retriever`
 
-`runtime/retrieval_hybrid.py::build_live_hybrid_retriever(*,
+`runtime/retrieval_hybrid.py::build_hybrid_retriever(*,
 client=None, graph_store=None, embeddings=None, phase2: bool =
 True, w_ppr: float = W_PPR, **kwargs)` — `W_PPR` is 0.45
 (`runtime/retrieval_graph.py`), the locked Phase 2 prior, not a
-new value. It returns a `HybridRetriever` with real sources
-injected (§2) and `use_live_graph=True`; the retriever itself
-is unchanged — same fusion, same guardrails, same gating.
+new value. (Named `build_live_hybrid_retriever` when Phase 5
+landed; renamed in the 2026-11-14 fake removal — it is now THE
+factory, the old name does not survive.) It returns a
+`HybridRetriever` with real sources injected (§2) and
+`use_live_graph=True`; the retriever itself is unchanged —
+same fusion, same guardrails, same gating.
 
 What it injects, in order:
 
@@ -109,10 +124,11 @@ verified, so `.env.example` was NOT touched.
 `HybridRetriever.__init__` gains three optional kwargs —
 `doc_counts`, `doc_texts`, `doc_links` — each a precomputed
 dict or a callable, resolved **lazily (once, cached, on the
-first query that needs them)** and never at construction. The
-fake path (all three `None`) keeps the demo-table behaviour
-byte-identically and never touches Qdrant; the live factory
-supplies callables bound to the real client.
+first query that needs them)** and never at construction. There
+is no fake path anymore: when a source is not supplied it
+defaults to EMPTY (`{}` for counts / links, no texts) — no
+demo-table fallback exists. The factory supplies callables
+bound to the real client.
 
 | Kwarg | Replaces (demo) | Live source |
 |---|---|---|
@@ -171,8 +187,8 @@ came from the real Neo4j store, but PPR (G7), coverage (G6)
 and hub (G8) ran over `self.adjacency` — the demo adjacency.
 A live doc's PPR computed from demo edges would be
 meaningless. Worker E closed it with two builders in
-`runtime/retrieval_graph.py`, both the exact shape of
-`build_demo_adjacency()` (node key → `{"type": str,
+`runtime/retrieval_graph.py`, both the exact shape
+(node key → `{"type": str,
 "neighbors": [(rel, to_key, to_type)]}`):
 
 * `build_live_adjacency(seeds, expansion, *, store=None,
@@ -223,8 +239,11 @@ never calls it then — `graph_missing` applies instead).
 when `use_live_graph=True` and the expansion is non-empty,
 PPR / G6 / G8 run over the live adjacency; the trace gains
 `graph_adjacency_source` (`"live"` / `"expansion-only"`) and
-`graph_adjacency_nodes`, on the live path only. The fake path
-keeps `self.adjacency` (byte-identical behaviour).
+`graph_adjacency_nodes`, on the live path only. When
+`use_live_graph=False` the retriever uses the injected
+`adjacency` — required at construction (tests inject a canned
+one built from the seed data); there is no demo adjacency
+and no fake path anymore.
 
 **Degradation:** if the live build raises or comes back empty
 while the 1-hop expansion itself succeeded, the retriever
@@ -251,29 +270,27 @@ via `list_entity_keys`, compiles the match patterns once, and
 commits only on full success, returning e.g.
 `{"assets": n, "components": n, "buildings": n, "documents": n,
 "source": "ontology"}`. `clear_gazetteer_codes() -> None`
-drops the cache and returns to demo mode (a test helper, and
-the manual way back from live mode).
+empties the cache (the gazetteer then links nothing until
+refreshed — since the 2026-11-14 fake removal there is no
+demo mode to return to).
 
 **Cache:** in-memory only, no TTL, no beat job, no timer —
-refresh is called explicitly by the live factory (and by
-hand). Patterns are compiled once at refresh; a second
-refresh replaces the cache wholesale, so no stale keys
-survive it.
+refresh is called explicitly by the factory
+(`build_hybrid_retriever`, and by hand). Patterns are compiled
+once at refresh; a second refresh replaces the cache wholesale,
+so no stale keys survive it.
 
-**Two modes, on an explicit flag** (`_DYNAMIC_MODE`, set by
-the first refresh):
-
-* **Demo mode (default, before any refresh):**
-  `gazetteer_seeds` is byte-identical to Phases 1–4.
-* **Live mode (refresh called ≥ once): the demo patterns are
-  DISABLED — only cached dynamic keys link.** An unreachable
-  ontology → an empty cache → links nothing. There is NO
-  fallback to demo codes in live mode.
+**One mode, on the dynamic cache only** (the old demo/live
+two-mode description is gone with the fakes):
+`gazetteer_seeds` links ONLY keys in the cache. Before any
+refresh the cache is empty and it returns `[]` — it fails
+closed, never falls back to hardcoded patterns. An
+unreachable ontology → an empty cache → links nothing.
 
 **The degradation rule, and why (decision 1 of §6):** a
 failed refresh **clears any earlier good cache** and returns
 `{"assets": 0, "components": 0, "buildings": 0, "documents": 0,
-"source": "unreachable"}`, keeps live mode ON, and never
+"source": "unreachable"}`, leaves the cache empty, and never
 raises. A stale cache could link codes the ontology no longer
 has, and **a wrong link is worse than no link**: a live
 question naming O21 when the live ontology has no O21 must
@@ -285,12 +302,9 @@ false seed and poison the fusion.
 type, and `FAULT_CODE_LINKS` maps fault codes to
 asset+component from the demo table — so the dynamic list
 covers Asset / Component / Building / Document keys only.
-Fault-code expansion stays demo-grounded in demo mode and
-**does not run at all in live mode: a fault code links
-nothing** until Fault becomes an ontology entity type. A
-question that names only a fault code (e.g. "F-204") is a
-gazetteer miss live, and expands / falls back exactly as a
-seedless question does.
+A fault code links nothing, period: a question that names
+only a fault code (e.g. "F-204") is a gazetteer miss, and
+expands / falls back exactly as a seedless question does.
 
 **Matching reuses the Phase 4 normalisation:** verbatim hit
 = 1.0, separator / diacritics variant = 0.8, a 1.0 twin wins
@@ -331,7 +345,7 @@ Flow:
    `build_live_baseline_retriever(limit=20)`, a `retrieve`
    closure over the real `search_documents` + real query
    embeddings, no graph arm.
-4. **Live hybrid** — `build_live_hybrid_retriever()`.
+4. **Live hybrid** — `build_hybrid_retriever()`.
 5. Both go through the Phase 1 harness (`run_retrieval_eval`
    + `format_results_table`): the same aggregate +
    sibling-confusion tables.
@@ -402,7 +416,7 @@ sources under the formula, not the formula.
 ## 7. What was verified — fakes / mocks vs the user's machine
 
 **Verified here (54 new tests, main-feature only; full suite
-670 passed, ruff clean):**
+668 passed after the 2026-11-14 fake removal, ruff clean):**
 
 * Factory: injects the real stores, builds query-model
   embeddings only, fails fast on empty `QDRANT_URL` and on
@@ -437,8 +451,10 @@ sources under the formula, not the formula.
   fake-setup numbers in `docs/hybrid-retrieval.md` §8
   (Phase 1 blurred 0.906 → 0.942, Phase 2 0.942 → 0.958,
   Phase 3 / 4 no measurable gain) are unchanged by this
-  phase and remain fake-setup numbers.
-* The live factory against a real Qdrant collection (real
+  phase — and are now HISTORICAL: the phase evals that
+  produced them were deleted 2026-11-14 (fake removal) and
+  the numbers are not reproducible.
+* The factory against a real Qdrant collection (real
   payload `node_ids`, real point ids, real dims) and a real
   Neo4j graph (real degrees — the demo's buildings have
   degree 4–8, so the hub penalty was validated on small
@@ -504,7 +520,7 @@ The full consolidated checklist is in
    `execution.retrieval.query_plan: true` on
    `fault_analysis` only, read by the `retrieval_context`
    hook — when set, the hook calls
-   `build_live_hybrid_retriever()` (and builds a QueryPlan
+   `build_hybrid_retriever()` (and builds a QueryPlan
    with live generators for the `query_plan` flag), assembles
    context with `assemble_context`, and logs the trace to
    MLflow. When unset, the hook behaves exactly as today.

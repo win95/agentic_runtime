@@ -458,7 +458,6 @@ class ExpandedRetriever:
         if not variants:
             kind = "none"
             trace = {
-                "fake": True,
                 "phase2": self.base.phase2,
                 "seeds": [s["key"] for s in _seeds],
                 "graph_missing": graph_missing,
@@ -538,7 +537,6 @@ class ExpandedRetriever:
                 [],
             )
         trace = {
-            "fake": True,
             "phase2": self.base.phase2,
             "seeds": [s["key"] for s in _seeds],
             "graph_missing": graph_missing,
@@ -573,22 +571,26 @@ class ExpandedRetriever:
         return ranked_ids, trace
 
 
-def build_expanded_retriever(*, blurred: bool = False, **kwargs):
-    """Expanded retriever over the fake corpus, with STUB generators.
+def build_expanded_retriever(
+    *,
+    paraphrase_generator=None,
+    decomposition_generator=None,
+    **kwargs,
+):
+    """Expanded retriever over the live stores.
 
-    Fake-eval / test convenience: same fake setups as
-    ``build_hybrid_retriever`` (``blurred=True`` = code-blurred
-    embeddings, the exit-criterion setup), but the generators are
-    the deterministic stubs — no LLM. Live use must construct
-    ``ExpandedRetriever`` directly so the live generators apply.
+    Base is the live factory (``build_hybrid_retriever`` — real
+    embeddings + Qdrant + live graph); generators default to the
+    live LLM generators (lazy model build) unless explicit
+    callables are passed (tests inject the stub generators).
     """
     from runtime.retrieval_hybrid import build_hybrid_retriever
 
-    base = build_hybrid_retriever(blurred=blurred, **kwargs)
+    base = build_hybrid_retriever(**kwargs)
     retriever = ExpandedRetriever(
         base,
-        paraphrase_generator=stub_paraphrase_variants,
-        decomposition_generator=stub_decompose_question,
+        paraphrase_generator=paraphrase_generator,
+        decomposition_generator=decomposition_generator,
     )
-    retriever.__name__ = "hybrid_expanded_blurred" if blurred else "hybrid_expanded_bow"
+    retriever.__name__ = "hybrid_expanded"
     return retriever

@@ -17,7 +17,7 @@ import pytest
 from app.config import settings
 from runtime.retrieval_graph import clear_gazetteer_codes
 from runtime.retrieval_harness import run_retrieval_eval
-from runtime.retrieval_hybrid import build_live_hybrid_retriever
+from runtime.retrieval_hybrid import build_hybrid_retriever
 from scripts.eval_retrieval_live import (
     LivePreflightError,
     build_live_baseline_retriever,
@@ -158,8 +158,8 @@ def _live_settings(monkeypatch):
 
     The preflight fails fast on missing embedding config, so tests
     supply a placeholder key; the gazetteer refresh is stubbed out
-    (the real one flips global live-mode state). Demo mode is
-    restored after every test.
+    (the real one flips the global cache). The cache is cleared
+    after every test.
     """
     monkeypatch.setattr(settings, "llm_api_key", "test-key")
     monkeypatch.setattr(settings, "qdrant_url", "http://localhost:6333")
@@ -242,7 +242,7 @@ def test_hybrid_runs_vector_only_when_graph_missing():
     store = MockGraphStore(fail=True)
     inventory = preflight_live_stores(client=client, graph_store=store)
     assert inventory["graph_missing"] is True
-    hybrid = build_live_hybrid_retriever(
+    hybrid = build_hybrid_retriever(
         embeddings=StubEmbeddings(), client=client, graph_store=store
     )
     result = run_retrieval_eval(
@@ -259,7 +259,7 @@ def test_live_baseline_and_hybrid_rank_through_harness():
     client = _up_client()
     store = _up_store()
     baseline = build_live_baseline_retriever(embeddings=StubEmbeddings(), client=client)
-    hybrid = build_live_hybrid_retriever(
+    hybrid = build_hybrid_retriever(
         embeddings=StubEmbeddings(), client=client, graph_store=store
     )
     for label, retriever in (("baseline", baseline), ("hybrid", hybrid)):

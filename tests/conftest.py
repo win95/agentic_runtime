@@ -87,3 +87,18 @@ def client(db_session):
     with TestClient(app) as test_client:
         yield test_client
     app.dependency_overrides.clear()
+
+
+@pytest.fixture()
+def demo_gazetteer():
+    """Gazetteer cache loaded with the demo ontology's keys for one test.
+
+    Cleared afterwards, so a test that asserts fail-closed (empty
+    cache links nothing) is not polluted by an earlier refresh.
+    """
+    from runtime.retrieval_graph import clear_gazetteer_codes
+    from tests.retrieval_stubs import refresh_demo_gazetteer
+
+    refresh_demo_gazetteer()
+    yield
+    clear_gazetteer_codes()
