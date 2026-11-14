@@ -250,6 +250,10 @@ DOCUMENTS = [
             "Replace the sensor if faults recur within one week."
         ),
         "category": "door_system",
+        "node_ids": ["O21", "door-sensor-DS1", "building-B1", "doc-door-sensor"],
+        "asset_id": "O21",
+        "component_id": "door-sensor-DS1",
+        "building_id": "building-B1",
     },
     {
         "id": "doc-motor-overheat",
@@ -262,6 +266,10 @@ DOCUMENTS = [
             "temperature trend for one week after service."
         ),
         "category": "traction",
+        "node_ids": ["O21", "motor-M2", "building-B1", "doc-motor-overheat"],
+        "asset_id": "O21",
+        "component_id": "motor-M2",
+        "building_id": "building-B1",
     },
     {
         "id": "doc-brake-inspection",
@@ -274,6 +282,10 @@ DOCUMENTS = [
             "worn motor mounts rather than the brake itself."
         ),
         "category": "brake_system",
+        "node_ids": ["O21", "brake-BK1", "building-B1", "doc-brake-inspection"],
+        "asset_id": "O21",
+        "component_id": "brake-BK1",
+        "building_id": "building-B1",
     },
     {
         "id": "doc-controller-errors",
@@ -286,6 +298,10 @@ DOCUMENTS = [
             "means a failing safety switch — test each switch individually."
         ),
         "category": "controller",
+        "node_ids": ["O21", "controller-C1", "building-B1"],
+        "asset_id": "O21",
+        "component_id": "controller-C1",
+        "building_id": "building-B1",
     },
     {
         "id": "doc-leveling",
@@ -297,6 +313,10 @@ DOCUMENTS = [
             "indicates a worn encoder or a loose sensor bracket."
         ),
         "category": "leveling",
+        "node_ids": ["O21", "building-B1"],
+        "asset_id": "O21",
+        "component_id": None,
+        "building_id": "building-B1",
     },
     {
         "id": "doc-rope-inspection",
@@ -308,6 +328,10 @@ DOCUMENTS = [
             "by uneven wear on the sheave grooves."
         ),
         "category": "ropes",
+        "node_ids": ["O21", "building-B1"],
+        "asset_id": "O21",
+        "component_id": None,
+        "building_id": "building-B1",
     },
     {
         "id": "doc-o23-overview",
@@ -320,6 +344,10 @@ DOCUMENTS = [
             "O23 in October 2026."
         ),
         "category": "operation",
+        "node_ids": ["O23", "building-B2"],
+        "asset_id": "O23",
+        "component_id": None,
+        "building_id": "building-B2",
     },
 ]
 
@@ -443,7 +471,7 @@ def seed_postgres_demo(db) -> dict:
 
 
 def seed_qdrant_demo(embeddings=None) -> dict:
-    """Embed + upsert the 6 technical documents.
+    """Embed + upsert the 7 technical documents (with payload node links).
 
     The collection is created only if missing, with the dimension measured
     from a probe embedding of the configured model. Documents already
@@ -599,6 +627,15 @@ def validate() -> dict:
     for doc in DOCUMENTS:
         if not (doc["title"].strip() and doc["content"].strip()):
             raise ValueError(f"document {doc['id']} has empty title or content")
+    # Phase 1 payload linking: every doc carries >=1 node_id (target
+    # >=80% coverage — the demo corpus is 7/7 = 100%).
+    from runtime.retrieval_linking import linking_coverage
+
+    coverage = linking_coverage(DOCUMENTS)
+    if coverage["coverage"] < 0.8:
+        raise ValueError(
+            f"document linking coverage {coverage['coverage']:.2f} below 0.80"
+        )
     doc_ids = {doc["id"] for doc in DOCUMENTS}
     for rel in RELATIONS:
         if not (len(rel) == 5):

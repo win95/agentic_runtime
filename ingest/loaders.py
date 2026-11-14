@@ -69,10 +69,16 @@ def load_sensor_readings(db, rows: list[SensorRow]) -> tuple[int, list[dict]]:
 
 
 def load_documents(rows: list[DocumentRow], embeddings=None) -> tuple[int, list[dict]]:
-    """Embed + upsert documents into Qdrant (file-level: all or nothing)."""
-    from infra.qdrant_client import ensure_collection, probe_dimension, upsert_documents
+    """Embed + upsert documents into Qdrant (file-level: all or nothing).
 
-    docs = [row.model_dump(mode="json") for row in rows]
+    Phase 1: every doc carries payload node links. A row that omits
+    them gets the grounded links from ``runtime.retrieval_linking``
+    (demo docs); an explicit row value always wins.
+    """
+    from infra.qdrant_client import ensure_collection, probe_dimension, upsert_documents
+    from runtime.retrieval_linking import with_document_links
+
+    docs = [with_document_links(row.model_dump(mode="json")) for row in rows]
     try:
         dim = probe_dimension(embeddings)
         ensure_collection(dim)

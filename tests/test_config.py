@@ -16,6 +16,8 @@ _DEFAULTED_VARS = [
     "LLM_TEMPERATURE",
     "LLM_API_KEY",
     "EMBEDDING_MODEL",
+    "EMBEDDING_MODEL_INDEX",
+    "EMBEDDING_MODEL_QUERY",
     "EMBEDDING_API_BASE",
     "EMBEDDING_API_KEY",
     "API_KEY",
@@ -65,3 +67,30 @@ def test_settings_load_from_env(monkeypatch):
     # Embedding falls back to the LLM proxy.
     assert settings.resolved_embedding_api_base == "http://proxy.example:4000"
     assert settings.resolved_embedding_api_key == "dummy-key"
+
+
+def test_embedding_model_per_part_resolution(monkeypatch):
+    for var in ("EMBEDDING_MODEL", "EMBEDDING_MODEL_INDEX", "EMBEDDING_MODEL_QUERY"):
+        monkeypatch.delenv(var, raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.embedding_model_index == ""
+    assert settings.embedding_model_query == ""
+    # No overrides: both parts share EMBEDDING_MODEL.
+    assert settings.resolved_embedding_model_index == "text-embedding-3-small"
+    assert settings.resolved_embedding_model_query == "text-embedding-3-small"
+
+    # A custom shared model is the fallback for both parts.
+    monkeypatch.setenv("EMBEDDING_MODEL", "shared-custom")
+    settings = Settings(_env_file=None)
+    assert settings.resolved_embedding_model_index == "shared-custom"
+    assert settings.resolved_embedding_model_query == "shared-custom"
+
+    # Each override applies to its own part only.
+    monkeypatch.setenv("EMBEDDING_MODEL_INDEX", "index-model")
+    settings = Settings(_env_file=None)
+    assert settings.resolved_embedding_model_index == "index-model"
+    assert settings.resolved_embedding_model_query == "shared-custom"
+    monkeypatch.setenv("EMBEDDING_MODEL_QUERY", "query-model")
+    settings = Settings(_env_file=None)
+    assert settings.resolved_embedding_model_index == "index-model"
+    assert settings.resolved_embedding_model_query == "query-model"

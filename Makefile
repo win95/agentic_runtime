@@ -1,4 +1,4 @@
-.PHONY: install install-requirements run-api run-worker run-beat migrate migrate-users run-user-service seed-admin test lint docker-up docker-down seed seed-dry-run seed-edge ingest ingest-dry-run demo eval eval-real eval-genai eval-genai-real langgraph-dev gen-synthetic-data eval-tool-use eval-retrieval train-embedding train-llm mlflow-report
+.PHONY: install install-requirements run-api run-worker run-beat migrate migrate-users run-user-service seed-admin test lint docker-up docker-down seed seed-dry-run seed-edge ingest ingest-dry-run demo eval eval-real eval-genai eval-genai-real langgraph-dev gen-synthetic-data eval-tool-use eval-retrieval eval-retrieval-phase0 eval-retrieval-phase1 eval-retrieval-phase2 train-embedding train-llm mlflow-report eval-retrieval-phase3
 
 # Prefer the project venv when it exists (this checkout), else system python.
 PYTHON := $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python)
@@ -132,6 +132,36 @@ eval-tool-use:
 eval-retrieval:
 	@test -n "$(MODEL)" || (echo "Usage: make eval-retrieval MODEL=<model> [BASELINE=<model>]" && exit 2)
 	$(PYTHON) -m training.embedding.eval_retrieval --data training/data/synthetic_embedding.jsonl --model $(MODEL) $(if $(BASELINE),--baseline-model $(BASELINE)) --no-mlflow
+
+# Phase 0 hybrid-retrieval baseline (fakes only, no live stores).
+# Pass TRACKING_URI=<mlflow uri> to also log to MLflow.
+eval-retrieval-phase0:
+	$(PYTHON) -m scripts.eval_retrieval $(if $(TRACKING_URI),--tracking-uri $(TRACKING_URI))
+
+# Phase 1 hybrid retrieval: baseline vs hybrid on both fake setups
+# (BoW + code-blurred) + w_graph grid search. Exit code 0 = exit
+# criterion passed. Pass TRACKING_URI=<mlflow uri> to log to MLflow.
+eval-retrieval-phase1:
+	$(PYTHON) -m scripts.eval_retrieval_phase1 $(if $(TRACKING_URI),--tracking-uri $(TRACKING_URI))
+
+# Phase 2 hybrid retrieval: baseline vs Phase 1 hybrid vs Phase 2
+# hybrid (PPR + coverage + hub) on both fake setups + w_graph grid
+# search + PPR ablation (w_ppr=0 vs full). Exit code 0 = exit
+# criterion passed (blurred multi-hop improves over Phase 1 AND the
+# ablation shows a measurable delta AND no regression).
+# Pass TRACKING_URI=<mlflow uri> to log to MLflow.
+eval-retrieval-phase2:
+	$(PYTHON) -m scripts.eval_retrieval_phase2 $(if $(TRACKING_URI),--tracking-uri $(TRACKING_URI))
+
+# Phase 3 hybrid retrieval: gated expansion A/B (off vs on, stub
+# generators only — no live LLM in this VM) on both fake setups +
+# per-type + gated-subset breakdown, Precision@6, per-variant
+# overlap stats, LTR labelled-pair count. Exit code 0 = no
+# Precision@6 loss and no Recall@6 / nDCG@6 regression, overall
+# and on the gated subset. Pass TRACKING_URI=<mlflow uri> to log
+# to MLflow (the blurred ON run also logs ltr_feature_rows.json).
+eval-retrieval-phase3:
+	$(PYTHON) -m scripts.eval_retrieval_phase3 $(if $(TRACKING_URI),--tracking-uri $(TRACKING_URI))
 
 train-embedding:
 	$(PYTHON) -m training.embedding.train --config training/configs/embedding.yaml

@@ -90,8 +90,14 @@ def build_chat_model(cfg: Settings | None = None):
     )
 
 
-def build_embeddings(cfg: Settings | None = None):
-    """Build the embedding model via the LiteLLM proxy (OpenAI-compatible)."""
+def build_embeddings(cfg: Settings | None = None, *, model: str | None = None):
+    """Build the embedding model via the LiteLLM proxy (OpenAI-compatible).
+
+    `model` overrides the configured EMBEDDING_MODEL for one part of the
+    pipeline (index vs query); None means the shared configured model.
+    The base EMBEDDING_MODEL is still required — the override only
+    replaces it for that part, it never supplies the base config.
+    """
     from langchain_openai import OpenAIEmbeddings
 
     cfg = cfg or settings
@@ -103,7 +109,7 @@ def build_embeddings(cfg: Settings | None = None):
     return OpenAIEmbeddings(
         base_url=cfg.resolved_embedding_api_base,
         api_key=cfg.resolved_embedding_api_key,
-        model=cfg.embedding_model,
+        model=model or cfg.embedding_model,
         tiktoken_enabled=False,
         check_embedding_ctx_length=False,
     )

@@ -456,6 +456,7 @@ Xem đầy đủ trong `.env.example`. Các biến quan trọng:
 | `API_KEY` | *(trống)* | Trống = tắt auth (chỉ dev). Production **bắt buộc** đặt. |
 | `LLM_API_BASE` / `LLM_API_KEY` / `LLM_MODEL` / `LLM_TEMPERATURE` | `http://localhost:4000` / *(trống)* / `gpt-4o-mini` / `0.2` | LiteLLM proxy chuẩn OpenAI (bắt buộc cho run thật). |
 | `EMBEDDING_API_BASE` / `EMBEDDING_API_KEY` / `EMBEDDING_MODEL` | *(trống = dùng chung LLM)* / `text-embedding-3-small` | Model embedding trên proxy. |
+| `EMBEDDING_MODEL_INDEX` / `EMBEDDING_MODEL_QUERY` | *(trống = dùng chung `EMBEDDING_MODEL`)* | Model embedding riêng cho lúc index / lúc truy vấn; hai model phải cho vector tương thích (cùng chiều), đổi model index thì phải index lại Qdrant. |
 | `ANTHROPIC_API_KEY` | *(trống)* | Alternative provider: `pip install -e ".[anthropic]"`. Chỉ là alternative, mặc định dùng LiteLLM. |
 | `LANGSMITH_TRACING` / `LANGSMITH_API_KEY` / `LANGSMITH_PROJECT` / `LANGSMITH_ENDPOINT` | `true` / *(trống)* / `agentic-runtime` / `https://api.smith.langchain.com` | Bật trace khi có key. |
 | `QDRANT_URL` / `QDRANT_COLLECTION` | localhost:6333 / `technical_documents` | RAG retrieval |
@@ -1060,3 +1061,28 @@ gì từ `app/`, DB riêng (`user_service`), migration chain riêng
 - Chưa có ở base: refresh token, quên mật khẩu, xác minh email, OAuth,
   per-user cost cap, rate limit login, CORS. Session chưa gắn user
   (execution đã mang `user_id`).
+
+## 27. Hybrid retrieval — vector + graph (Phases 0–3)
+
+Hybrid retrieval cho mission `fault_analysis`: Qdrant top-40 dense
+∪ Neo4j 1-hop expansion (payload `node_ids[]` nối vector hit với
+graph node), RRF k=60 → top-30, rồi rerank bằng fusion xác định
+(không có cross-encoder model): `final = 0.50·z(vec) +
+0.40·z(graph_score) + 0.10·exact`, với graph_score gồm PPR
+(log→min-max), path score, coverage và hub penalty; 4 guardrail
+cứng; context budget 3.000 token. Phase 3 thêm gated expansion
+(multi-query ≤3 paraphrase khi vector thiếu tự tin hoặc không có
+exact match, decomposition khi câu hỏi nhiều phần) và log feature
+row đầy đủ cho LTR (chưa train — 252 pairs so với ~3.000 cần
+thiết). Đánh giá bằng golden set 36 case qua
+`make eval-retrieval-phase0/1/2/3` (fake setups, chưa có live
+Qdrant/Neo4j trong VM này); `search_documents` và hook
+`retrieval_context` chưa đổi — chưa wire live, xem checklist ở
+cuối doc tổng hợp.
+
+- Chi tiết: `docs/hybrid-retrieval.md` (thiết kế as-built Phases
+  0–3, toàn bộ locked decisions, checklist live-verification) và
+  các doc theo phase `docs/hybrid-retrieval-phase0.md`,
+  `docs/hybrid-retrieval-phase1.md`,
+  `docs/hybrid-retrieval-phase2.md`,
+  `docs/hybrid-retrieval-phase3.md`.

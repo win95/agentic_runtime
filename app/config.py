@@ -52,6 +52,15 @@ class Settings(BaseSettings):
     # (e.g. text-embedding-3-small). The vector dimension is detected
     # from a probe embedding at collection-creation time, never hardcoded.
     embedding_model: str = "text-embedding-3-small"
+    # Per-part embedding model overrides (optional). Each part of the
+    # retrieval pipeline may use its own embedding model later; when an
+    # override is empty/unset, that part falls back to EMBEDDING_MODEL
+    # above, so today everything still shares one model. The two models
+    # MUST produce compatible vectors (same dimension / vector space):
+    # changing the index model requires re-indexing Qdrant, and a query
+    # model with a different dimension cannot search the collection.
+    embedding_model_index: str = ""
+    embedding_model_query: str = ""
 
     # LangSmith — observability only, never the source of execution state.
     langsmith_tracing: bool = False
@@ -155,6 +164,16 @@ class Settings(BaseSettings):
     @property
     def resolved_embedding_api_key(self) -> str:
         return self.embedding_api_key or self.llm_api_key
+
+    @property
+    def resolved_embedding_model_index(self) -> str:
+        """Embedding model for index-time work (empty override = shared)."""
+        return self.embedding_model_index or self.embedding_model
+
+    @property
+    def resolved_embedding_model_query(self) -> str:
+        """Embedding model for query-time work (empty override = shared)."""
+        return self.embedding_model_query or self.embedding_model
 
 
 settings = Settings()

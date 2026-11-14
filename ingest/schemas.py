@@ -147,6 +147,15 @@ class DocumentRow(IngestRow):
     title: str
     content: str
     category: str | None = None
+    # Phase 1 payload links (report §3.1): node_ids + the asset /
+    # component / building the chunk is about. Optional at ingest —
+    # the loader fills them from the grounded linking table when
+    # absent; a doc with no known link keeps node_ids=[] (never
+    # invented) and scores graph_score = 0.
+    node_ids: list[str] | None = None
+    asset_id: str | None = None
+    component_id: str | None = None
+    building_id: str | None = None
 
     @field_validator("id")
     @classmethod

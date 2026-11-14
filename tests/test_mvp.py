@@ -46,6 +46,14 @@ def test_factory_builds_embeddings_from_env():
     assert embeddings.openai_api_base == "http://localhost:4000"
 
 
+def test_factory_build_embeddings_model_override():
+    from runtime.llm_factory import build_embeddings
+
+    embeddings = build_embeddings(_dummy_settings(), model="other-embed")
+    assert embeddings.model == "other-embed"
+    assert embeddings.openai_api_base == "http://localhost:4000"
+
+
 def test_factory_fails_fast_without_key():
     from runtime.llm_factory import build_chat_model, build_embeddings
 
@@ -88,6 +96,46 @@ def test_qdrant_helpers_with_mocked_client(monkeypatch):
     docs = qc.search_documents("query", embeddings=embeddings)
     assert docs[0]["doc_id"] == "d1"
     assert docs[0]["score"] == 0.9
+
+
+def test_qdrant_uses_per_part_embedding_models(monkeypatch):
+    import infra.qdrant_client as qc
+    import runtime.llm_factory as factory
+
+    captured = {}
+
+    class FakeEmbeddings:
+        def __init__(self, model):
+            self.model = model
+
+        def embed_query(self, text):
+            return [0.1, 0.2, 0.3]
+
+        def embed_documents(self, texts):
+            return [[0.1, 0.2, 0.3] for _ in texts]
+
+    def fake_build_embeddings(cfg=None, *, model=None):
+        captured["model"] = model
+        return FakeEmbeddings(model)
+
+    monkeypatch.setattr(factory, "build_embeddings", fake_build_embeddings)
+    monkeypatch.setattr(
+        qc,
+        "settings",
+        _dummy_settings(
+            embedding_model="shared-embed",
+            embedding_model_index="index-embed",
+            embedding_model_query="query-embed",
+        ),
+    )
+
+    qc.embed_texts(["doc"])
+    assert captured["model"] == "index-embed"
+    qc.embed_query("q")
+    assert captured["model"] == "query-embed"
+    # probe_dimension sizes the collection for index-time vectors.
+    assert qc.probe_dimension() == 3
+    assert captured["model"] == "index-embed"
 
 
 def test_qdrant_dimension_mismatch_raises(monkeypatch):

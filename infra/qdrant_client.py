@@ -5,7 +5,10 @@ Embeddings come from the user's LiteLLM proxy via `runtime.llm_factory`
 detected from a probe embedding at collection-creation time and stored on the
 collection; a mismatch between the configured embedding model and an
 existing collection raises a clear error instead of silently corrupting
-results.
+results. Index-time and query-time embedding use separate models
+(`EMBEDDING_MODEL_INDEX` / `EMBEDDING_MODEL_QUERY`, each falling back to
+the shared `EMBEDDING_MODEL`) so either part can change later without
+touching the other — but the two models must produce compatible vectors.
 
 No invented documents: every function here raises a clear RuntimeError
 when Qdrant or the embedding model is unreachable. Callers decide how to
@@ -51,20 +54,20 @@ def reset_client() -> None:
 
 
 def embed_texts(texts: list[str], embeddings=None) -> list[list[float]]:
-    """Embed texts with the configured embedding model (LiteLLM proxy)."""
+    """Embed texts with the index-time embedding model (LiteLLM proxy)."""
     if embeddings is None:
         from runtime.llm_factory import build_embeddings
 
-        embeddings = build_embeddings()
+        embeddings = build_embeddings(model=settings.resolved_embedding_model_index)
     return embeddings.embed_documents(list(texts))
 
 
 def embed_query(text: str, embeddings=None) -> list[float]:
-    """Embed one query string with the configured embedding model."""
+    """Embed one query string with the query-time embedding model."""
     if embeddings is None:
         from runtime.llm_factory import build_embeddings
 
-        embeddings = build_embeddings()
+        embeddings = build_embeddings(model=settings.resolved_embedding_model_query)
     return embeddings.embed_query(text)
 
 
@@ -73,8 +76,14 @@ def probe_dimension(embeddings=None) -> int:
 
     The dimension depends on the user's embedding model (e.g. 1536 for
     text-embedding-3-small, 3072 for text-embedding-3-large), so it is
-    measured, never assumed.
+    measured, never assumed. The probe uses the INDEX-time model: the
+    collection stores index-time vectors, so its dimension is the index
+    model's dimension.
     """
+    if embeddings is None:
+        from runtime.llm_factory import build_embeddings
+
+        embeddings = build_embeddings(model=settings.resolved_embedding_model_index)
     vector = embed_query("dimension probe", embeddings=embeddings)
     return len(vector)
 
@@ -131,8 +140,8 @@ def ensure_collection(dim: int, client=None, collection_name: str | None = None)
         if existing_dim != dim:
             raise RuntimeError(
                 f"Qdrant collection {name!r} has vector size {existing_dim} but the "
-                f"configured embedding model ({settings.embedding_model}) produces "
-                f"size {dim}. Change EMBEDDING_MODEL back, or delete the "
+                f"index-time embedding model ({settings.resolved_embedding_model_index}) produces "
+                f"size {dim}. Change EMBEDDING_MODEL_INDEX back, or delete the "
                 f"collection and re-index real documents."
             )
         return "exists"
@@ -191,6 +200,89 @@ def upsert_documents(
     ]
     client.upsert(collection_name=name, points=points, wait=True)
     return {"upserted": len(points), "skipped": len(docs) - len(points)}
+
+
+def set_document_payloads(
+    payloads_by_point_id: dict[str, dict], client=None, collection_name: str | None = None
+) -> dict:
+    """Payload-only update for existing points (no re-embedding).
+
+    ``payloads_by_point_id`` maps point id (uuid5 of the doc id, as
+    in ``upsert_documents``) to the payload fields to set. Returns
+    ``{"updated": n}``.
+    """
+    client = client or get_client()
+    if client is None:
+        raise RuntimeError("Qdrant not configured (QDRANT_URL empty)")
+    name = collection_name or settings.qdrant_collection
+    updated = 0
+    for point_id, payload in payloads_by_point_id.items():
+        client.set_payload(
+            collection_name=name, payload=dict(payload), points=[point_id], wait=True
+        )
+        updated += 1
+    return {"updated": updated}
+
+
+def backfill_document_links(client=None, collection_name: str | None = None) -> dict:
+    """Backfill ``node_ids`` (+ asset/component/building) payloads.
+
+    ``upsert_documents`` SKIPS existing points, so already-indexed
+    docs never pick up new payload fields. This scrolls every point,
+    computes its links from ``runtime.retrieval_linking`` (grounded
+    in ``seeds/demo_data.py``), and updates the payload only — no
+    re-embedding, no new points. Idempotent: a second run finds the
+    payloads already equal and updates nothing.
+
+    Returns ``{"scanned", "updated", "unchanged", "unknown"}`` where
+    ``unknown`` counts points whose doc id has no grounded link.
+    """
+    from runtime.retrieval_linking import compute_document_links
+
+    client = client or get_client()
+    if client is None:
+        raise RuntimeError("Qdrant not configured (QDRANT_URL empty)")
+    name = collection_name or settings.qdrant_collection
+    scanned = updated = unchanged = unknown = 0
+    offset = None
+    while True:
+        points, offset = client.scroll(
+            collection_name=name, limit=100, offset=offset, with_payload=True
+        )
+        for point in points:
+            payload = dict(getattr(point, "payload", {}) or {})
+            doc_id = payload.get("doc_id")
+            scanned += 1
+            if not doc_id:
+                unknown += 1
+                continue
+            links = compute_document_links({"id": doc_id})
+            if not links["node_ids"]:
+                unknown += 1
+                continue
+            wanted = {
+                "node_ids": links["node_ids"],
+                "asset_id": links["asset_id"],
+                "component_id": links["component_id"],
+                "building_id": links["building_id"],
+            }
+            if all(payload.get(k) == v for k, v in wanted.items()):
+                unchanged += 1
+                continue
+            client.set_payload(
+                collection_name=name, payload=wanted, points=[point.id], wait=True
+            )
+            updated += 1
+        if offset is None:
+            break
+    logger.info(
+        "Qdrant link backfill: scanned=%d updated=%d unchanged=%d unknown=%d",
+        scanned, updated, unchanged, unknown,
+    )
+    return {
+        "scanned": scanned, "updated": updated,
+        "unchanged": unchanged, "unknown": unknown,
+    }
 
 
 def search_documents(
