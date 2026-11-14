@@ -285,6 +285,111 @@ def backfill_document_links(client=None, collection_name: str | None = None) -> 
     }
 
 
+def _scroll_payloads(client, name):
+    """Yield every point payload in the collection (scroll, limit 100).
+
+    Shared by the Phase 5 live-retrieval helpers below; a scroll
+    failure surfaces as a RuntimeError naming Qdrant, never a raw
+    client error and never a silent empty result.
+    """
+    offset = None
+    while True:
+        try:
+            points, offset = client.scroll(
+                collection_name=name, limit=100, offset=offset, with_payload=True
+            )
+        except Exception as exc:  # noqa: BLE001 — surface Qdrant errors clearly
+            raise RuntimeError(f"Qdrant scroll failed: {exc}") from exc
+        for point in points:
+            yield dict(getattr(point, "payload", {}) or {})
+        if offset is None:
+            break
+
+
+def _live_client(client):
+    """Resolve an explicit client, or the configured one; fail fast."""
+    client = client or get_client()
+    if client is None:
+        raise RuntimeError("Qdrant not configured (QDRANT_URL empty)")
+    return client
+
+
+def count_documents_per_node(client=None, collection_name: str | None = None) -> dict[str, int]:
+    """Live corpus counts: node key -> number of docs linked to it.
+
+    Scrolls every point and counts its payload ``node_ids`` — the
+    live replacement for the demo ``DOCUMENT_LINKS`` table in the
+    hybrid retriever's seed-specificity (``runtime/retrieval_ppr.py::
+    seed_specificity`` treats a missing/empty count as maximally
+    specific, so an empty store degrades to ``{}`` here, never a
+    crash). Raises RuntimeError when Qdrant is unreachable.
+    """
+    client = _live_client(client)
+    name = collection_name or settings.qdrant_collection
+    counts: dict[str, int] = {}
+    for payload in _scroll_payloads(client, name):
+        for node_key in payload.get("node_ids") or []:
+            counts[node_key] = counts.get(node_key, 0) + 1
+    return counts
+
+
+def get_document_links(client=None, collection_name: str | None = None) -> dict[str, list[str]]:
+    """Live doc -> node ids mapping, from Qdrant payload ``node_ids``.
+
+    The live replacement for the demo ``DOCUMENT_LINKS`` table in the
+    hybrid retriever's graph arm: a doc is a graph candidate when
+    its linked nodes touch a seed or a 1-hop neighbour. Docs with no
+    payload ``node_ids`` are omitted (an unlinked doc scores
+    ``graph_score = 0`` and the vector arm carries it). An empty
+    store returns ``{}``. Raises RuntimeError when Qdrant is
+    unreachable.
+    """
+    client = _live_client(client)
+    name = collection_name or settings.qdrant_collection
+    links: dict[str, list[str]] = {}
+    for payload in _scroll_payloads(client, name):
+        doc_id = payload.get("doc_id")
+        node_ids = payload.get("node_ids") or []
+        if doc_id and node_ids:
+            links[doc_id] = list(node_ids)
+    return links
+
+
+def get_document_payloads(
+    doc_ids: list[str], client=None, collection_name: str | None = None
+) -> dict[str, dict]:
+    """Payloads (title/content/node_ids/...) for the given doc ids.
+
+    Vector-search results already carry title/content in their
+    payload; this is the fetch for graph-only candidates (docs the
+    graph arm found that the vector arm did not), so the exact
+    feature and the title/content in the candidate row come from
+    real payloads, not the demo corpus. Point ids are the same
+    uuid5 scheme as ``upsert_documents``. Unknown ids are simply
+    absent from the result (a doc with no text contributes no text
+    feature, never a crash). Raises RuntimeError when Qdrant is
+    unreachable.
+    """
+    if not doc_ids:
+        return {}
+    client = _live_client(client)
+    name = collection_name or settings.qdrant_collection
+    point_ids = [str(uuid.uuid5(uuid.NAMESPACE_URL, f"doc:{d}")) for d in doc_ids]
+    try:
+        found = client.retrieve(collection_name=name, ids=point_ids, with_payload=True)
+    except Exception as exc:  # noqa: BLE001 — surface Qdrant errors clearly
+        raise RuntimeError(f"Qdrant payload fetch failed: {exc}") from exc
+    by_point = {str(getattr(point, "id", "")): point for point in found}
+    out: dict[str, dict] = {}
+    for doc_id, point_id in zip(doc_ids, point_ids):
+        point = by_point.get(point_id)
+        if point is None:
+            continue
+        payload = dict(getattr(point, "payload", {}) or {})
+        out[payload.get("doc_id") or doc_id] = payload
+    return out
+
+
 def search_documents(
     query_text: str, limit: int = 5, embeddings=None, client=None
 ) -> list[dict]:

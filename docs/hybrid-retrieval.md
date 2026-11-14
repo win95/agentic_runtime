@@ -1,4 +1,4 @@
-# Hybrid retrieval — design AS BUILT (Phases 0–4)
+# Hybrid retrieval — design AS BUILT (Phases 0–5)
 
 Research report:
 `~/workspace/research_notes/hybrid-vector-graph-retrieval-20261114-0430/report.md`
@@ -7,8 +7,10 @@ harness + baseline), `docs/hybrid-retrieval-phase1.md` (link +
 fused rerank), `docs/hybrid-retrieval-phase2.md` (PPR + coverage +
 hub), `docs/hybrid-retrieval-phase3.md` (gated expansion,
 decomposition, LTR logging), `docs/hybrid-retrieval-phase4.md`
-(QueryPlan: link + intent + gated expansion). Pilot mission:
-`fault_analysis`.
+(QueryPlan: link + intent + gated expansion),
+`docs/hybrid-retrieval-phase5.md` (live wiring: real Qdrant +
+Neo4j, dynamic gazetteer, live eval — no new scoring). Pilot
+mission: `fault_analysis`.
 
 This document is the consolidated as-built record. Where it
 disagrees with the research report, **this document wins** — it
@@ -19,10 +21,17 @@ no BM25, the 0.50/0.40/0.10 fusion). Do not quote the report's
 the system's weights: there is no cross-encoder, so the system
 runs the adapted formula in §3 below.
 
-Status: **evaluated on fakes only, NOT wired live.**
-`search_documents` and the `retrieval_context` hook are untouched
-in all five phases — no mission's behaviour changes. The opt-in
-wiring follow-up is §12; the live checklist is §11.
+Status: **evaluated on fakes only, NOT wired live.** Phase 5
+built the live wiring — the live factory
+(`build_live_hybrid_retriever`), the real-source replacement
+in `HybridRetriever`, live adjacency, the dynamic gazetteer
+and the live eval (`make eval-retrieval-live`) — but no live
+numbers exist yet: there is no Qdrant/Neo4j in this VM and
+`EMBEDDING_MODEL` is set by the user in his own `.env` on his
+machine. `search_documents` and the `retrieval_context` hook
+are untouched in all six phases — no mission's behaviour
+changes. The opt-in wiring follow-up is §12; the live
+checklist is §11.
 
 ## 1. Pipeline (one query)
 
@@ -163,8 +172,10 @@ it is the Phase 3 gating trigger "gazetteer_miss" (§6).
   neighbors` (`expand_via_graph_query`) — no new Cypher.
 - PPR runs once per query over the candidate subgraph (≤~200
   nodes by design); seed specificity counts come from the
-  grounded linking table in the fake path and MUST be replaced
-  with real corpus counts at live wiring time (§9.3).
+  grounded linking table in the fake path and from the real
+  corpus via `count_documents_per_node` on the live path
+  (§6b). On the live path PPR / coverage / hub run over the
+  live adjacency (§6b), never the demo adjacency.
 
 ## 6. Expansion — gated multi-query + decomposition (Phase 3)
 
@@ -243,6 +254,97 @@ deliberate per-case judgements of the question's ASK (never
 copied from `query_type`; unanswerable cases are labelled by
 their ask, never `unanswerable`).
 
+## 6b. Live wiring — real sources under the same formula (Phase 5)
+
+Phase 5 changes NO scoring, weight, guardrail or gating
+threshold — it replaces the data sources under the formula so
+the same retriever can run against the real stores. Full
+detail: `docs/hybrid-retrieval-phase5.md`.
+
+* **Live factory** —
+  `runtime/retrieval_hybrid.py::build_live_hybrid_retriever`
+  builds query-only embeddings from
+  `settings.resolved_embedding_model_query`
+  (`EMBEDDING_MODEL_QUERY` falling back to `EMBEDDING_MODEL`),
+  the real Qdrant client via `get_client()`, passes
+  `use_live_graph=True` with `graph_store=None` (resolved
+  lazily from `ontology/projection/provider.py::get_graph_store`),
+  and refreshes the dynamic gazetteer best-effort. No
+  connections at construction. Fail-fast: empty `QDRANT_URL`
+  → `RuntimeError`; missing embedding config → `ValueError`
+  from `require_embedding_config`. Error contract: graph-store
+  failure → `graph_missing` → pure-vector fallback; Qdrant
+  failure → `RuntimeError` naming Qdrant, propagated, never
+  swallowed into empty results.
+* **Real-source replacement** — `HybridRetriever` gains
+  optional `doc_counts`, `doc_texts`, `doc_links` kwargs, each
+  a precomputed dict or a callable, resolved lazily (once,
+  cached, on first query). The fake path (all `None`) keeps
+  demo-table behaviour byte-identically and never touches
+  Qdrant. The live factory supplies callables over
+  `infra/qdrant_client.py::count_documents_per_node`,
+  `get_document_links`, `get_document_payloads` (one shared
+  scroll, limit 100, `with_payload=True`, payload `node_ids`;
+  batched `retrieve` with the same uuid5 point-id scheme as
+  `upsert_documents`). The third leg, `doc_links`, exists
+  because the graph arm built its doc ids directly from the
+  demo `DOCUMENT_LINKS` table — without it the live graph arm
+  could never find a non-demo doc. Empty store → counts /
+  links `{}`, missing texts → no text feature (exact 0),
+  never a crash.
+* **Live adjacency** — on the live path, PPR (G7), coverage
+  (G6) and hub (G8) run over `build_live_adjacency` (seeds +
+  1-hop expansion nodes + their 1-hop neighbours, via
+  `graph_query.neighbors` depth 1, only `ALLOWED_RELATIONS`,
+  ≤200 nodes, one shared 0.15 s wall-clock budget checked
+  before every `neighbors()` call, partial adjacency on
+  timeout, store error raises). On build failure / empty
+  build with a successful expansion, the retriever falls back
+  to `build_expansion_adjacency` (seeds + expansion nodes +
+  seed→node edges — real data, partial) — **never the demo
+  adjacency on the live path**. The trace gains
+  `graph_adjacency_source` (`"live"` / `"expansion-only"`)
+  and `graph_adjacency_nodes` on the live path only. Empty
+  expansion → the existing `graph_missing` path.
+* **Dynamic gazetteer** —
+  `ontology/knowledge/graph_query.py::list_entity_keys`
+  (`MATCH (n:Label) RETURN DISTINCT n.id`, `_label`
+  validation, 1..200 cap, sorted) feeds
+  `runtime/retrieval_graph.py::refresh_gazetteer_codes`,
+  which fetches Asset / Component / Building / Document keys,
+  commits only on full success, and returns e.g.
+  `{"assets": n, …, "source": "ontology"}`. In-memory cache
+  only, no TTL, no beat job; a second refresh replaces
+  wholesale. Once refreshed, live mode is ON: demo patterns
+  are DISABLED, only cached dynamic keys link. A failed
+  refresh clears any earlier good cache, returns
+  `{"source": "unreachable", …zero counts…}`, keeps live mode
+  on, and never raises — **a wrong link is worse than no
+  link**. Fault codes are NOT fetched (no Fault entity type;
+  `FAULT_CODE_LINKS` stays demo-grounded): in live mode a
+  fault code links nothing. Matching reuses the Phase 4
+  normalisation (verbatim 1.0, separator / diacritics variant
+  0.8, 1.0 twin wins dedup). `clear_gazetteer_codes()` returns
+  to demo mode.
+* **Live eval** — `scripts/eval_retrieval_live.py` (`make
+  eval-retrieval-live`, flags `--tracking-uri` / `--output` /
+  `--golden-set`): preflight → store-inventory preamble →
+  live plain-vector baseline → live hybrid via
+  `build_live_hybrid_retriever()`, both through
+  `run_retrieval_eval` + `format_results_table`. No grid
+  search. The verdict uses the Phase 1 exit criterion but is
+  INFORMATIONAL — exit 0 once the eval completes, even on
+  FAIL. Preflight `preflight_live_stores()` fails fast with
+  exit code 2 via `LivePreflightError` on (i) embedding config
+  (message names the `.env` step) and (ii) Qdrant unreachable
+  / collection missing / empty (message names Qdrant + the
+  seed step); (iii) Neo4j degrades to vector-only with a
+  warning, never hard-fails.
+
+No new dependencies, no new env vars (`QDRANT_URL` /
+`NEO4J_URI` / `EMBEDDING_MODEL` already exist and are already
+documented in `.env.example`).
+
 ## 7. Context assembly (Phase 1, report §5)
 
 `runtime/retrieval_context.py::assemble_context` — 3,000-token
@@ -279,6 +381,7 @@ fake saturates and the graph arm cannot beat it.
 | 3 | BoW | 0.958 → 0.965; gated 0.917 → 0.936 | Only movement: aggregate 0.838 → 0.890 |
 | 4 | blurred | 0.958 → 0.958 (plan off → on) | **No measurable gain; link recall 0.762, intent accuracy 0.500, faithfulness 100%** |
 | 4 | BoW | 0.958 → 0.962; gated 0.917 → 0.928 | Only movement: aggregate 0.838 → 0.870; below Phase 3's 0.965 because seedless A02 no longer expands (linking-failure rule) |
+| 5 | live (no numbers yet) | — | Live factory + live eval built; **no live numbers exist** — the golden set has never run against real embeddings + Qdrant + Neo4j; the only live-mode behaviour verified in this VM is the fail-fast preflight (exit 2, §11.1) |
 
 Phase 3 exit numbers (off → on): Precision@6 0.217 → 0.217,
 Recall@6 1.000 → 1.000, nDCG@6 0.958 → 0.958 on both setups;
@@ -346,13 +449,15 @@ labelled pairs (210 answerable) vs ~3,000 needed for LambdaMART
   first.
 - **No LTR training:** 252 pairs is 8% of the threshold; training
   on this golden set would overfit its quirks. Logging only.
-- **No live QueryPlan wiring, and no routing consumes intent:**
-  the plan is built and evaluated, but `search_documents`, the
-  `retrieval_context` hook, the route node and skill selection
-  are untouched. Intent accuracy is 0.500 on the fake setup
-  (§8) — nothing downstream may treat the scored intent as
-  ground truth until the live A/B in §11 passes. The opt-in
-  wiring is §12 (`execution.retrieval.query_plan`).
+- **No execution-path wiring, and no routing consumes intent:**
+  the plan is built and evaluated, and Phase 5 built the live
+  sources the wiring needs (`build_live_hybrid_retriever`,
+  §6b) — but `search_documents`, the `retrieval_context` hook,
+  the route node and skill selection are still untouched.
+  Intent accuracy is 0.500 on the fake setup (§8) — nothing
+  downstream may treat the scored intent as ground truth until
+  the live A/B in §11 passes. The opt-in wiring is §12
+  (`execution.retrieval.query_plan`).
 - **No intent-weight tuning on this golden set:** `W_VEC /
   W_GRAPH / W_EXACT` (0.50 / 0.30 / 0.20) are documented
   priors, not tuned; re-tuning them to lift 0.500 on 36 cases
@@ -389,59 +494,98 @@ in `infra/qdrant_client.py`).
 
 ## 11. Live-verification checklist (user's machine)
 
-1. **Pull** and confirm the working tree matches the pushed
-   Phase 0–3 state (no local `.git` in this VM — push from the
-   parent agent; do not push from here).
-2. **Seed / backfill:** `make seed` (re-seeds Qdrant docs with
+**Done in Phase 5** (code, verified with fakes/mocks only —
+no live numbers): the live factory
+(`build_live_hybrid_retriever`, §6b), the real-source
+replacement in `HybridRetriever` (counts / links / texts from
+Qdrant), the live adjacency for PPR / coverage / hub, the
+dynamic gazetteer (live-mode keys from the ontology), and the
+live eval target (`make eval-retrieval-live`, informational
+verdict, fail-fast preflight). The only live-mode behaviour
+verified in this VM is the preflight failing fast with exit 2
+(default env: embedding config; dummy config: Qdrant
+unreachable at `http://localhost:6333`).
+
+**Still open** — everything below needs the user's machine:
+
+1. **Set `EMBEDDING_MODEL` in `.env` to the model name your
+   LiteLLM proxy serves** (he sets it himself — never ask for
+   its value). `EMBEDDING_API_BASE` / `EMBEDDING_API_KEY`
+   default to the LLM proxy values when left empty; set
+   `EMBEDDING_MODEL_INDEX` / `EMBEDDING_MODEL_QUERY` only if
+   the index and query models differ (they must produce
+   compatible vectors — changing the index model requires
+   re-indexing Qdrant). Pull and confirm the working tree
+   matches the pushed Phase 0–5 state (no local `.git` in
+   this VM — push from the parent agent; do not push from
+   here).
+2. **Seed Qdrant:** `make seed` (re-seeds Qdrant docs with
    payload links) or `python -m scripts.backfill_qdrant_links`
-   for an existing collection; confirm with a Qdrant scroll that
-   all 7 points carry non-empty `node_ids`.
-3. **Qdrant + Neo4j live checks:** run the real vector retriever
-   through the harness, then the hybrid with
-   `use_live_graph=True` against the live Neo4j graph; replace
-   seed-specificity counts (currently from the grounded linking
-   table) with real corpus counts; confirm live adjacency node
-   degrees (a Building with degree >50 is a real hub — the demo's
-   buildings have degree 4–8, so the hub penalty was validated on
-   small degrees only); confirm PPR latency on the real candidate
-   subgraph (≤~200 nodes by design — cap the PPR node set first
-   if the live expansion is larger); confirm the 150 ms Neo4j
-   timeout and the vector-only fallback on a forced graph error.
-4. **Run the golden set live through each phase's eval script:**
-   `make eval-retrieval-phase1`, `make eval-retrieval-phase2`,
-   `make eval-retrieval-phase3`, `make eval-retrieval-phase4` (pass
-   `TRACKING_URI=<mlflow uri>` to log to the live MLflow server;
-   confirm the `agentic-runtime-retrieval` experiment shows the
-   runs, including the Phase 3 `ltr_feature_rows.json` artifact).
-   Replace every fake number in §8 with live ones. Expect the
-   live sibling-subset gain to be SMALLER than the blurred fake's
-   (real embeddings retain some code signal).
-5. **Re-run the w_graph grid live with 0.50 first** (the
+   for an existing collection; confirm with a Qdrant scroll
+   that all 7 points carry non-empty `node_ids`.
+3. **Drain Neo4j:** run the ontology L2 queue drain so the
+   live graph holds the projected entities and relationships
+   — this is the graph the live adjacency and the dynamic
+   gazetteer read. Confirm the drain landed (node count in
+   the `make eval-retrieval-live` inventory preamble).
+4. **Run the golden set live:** `make eval-retrieval-live`
+   (pass `TRACKING_URI=<mlflow uri>` to log to the live
+   MLflow server; confirm the `agentic-runtime-retrieval`
+   experiment shows the runs). Replace every fake number in
+   §8 with live ones. Read the informational verdict as what
+   it is: on a 7-doc corpus with real embeddings, a FAIL is a
+   finding about the corpus / embeddings, not a code failure.
+   Expect the live sibling-subset gain to be SMALLER than the
+   blurred fake's (real embeddings retain some code signal).
+   Also run the golden set live through each phase's eval
+   script (`make eval-retrieval-phase1/2/3/4`) if the fake
+   numbers need a live counterpart per phase.
+5. **Qdrant + Neo4j live checks:** run the real vector
+   retriever through the harness, then the hybrid with the
+   live factory against the live Neo4j graph; confirm live
+   adjacency node degrees (a Building with degree >50 is a
+   real hub — the demo's buildings have degree 4–8, so the
+   hub penalty was validated on small degrees only); confirm
+   PPR latency on the real candidate subgraph (≤~200 nodes by
+   design — the live adjacency caps at 200, §6b); confirm the
+   150 ms Neo4j timeout and the vector-only fallback on a
+   forced graph error; check the trace —
+   `graph_adjacency_source` should read `"live"` on queries
+   with a non-empty expansion (`"expansion-only"` means the
+   live build failed or timed out — check the warning log;
+   if it is the common case, the 0.15 s budget or the store
+   latency needs looking at, not the retriever). Check the
+   dynamic gazetteer refresh summary shows the real key
+   counts (`{"source": "ontology", …}`); `"unreachable"`
+   with zero counts means the gazetteer linked nothing on
+   the whole run — fix Neo4j / the store wiring, do not
+   re-enable demo codes.
+6. **Re-run the w_graph grid live with 0.50 first** (the
    first-to-recheck-live runner-up in Phases 1–2; fake grid:
    0.30 → 0.957, 0.40 → 0.958, 0.50 → 0.978 — three swaps, not a
    live prediction).
-6. **Live expansion A/B:** swap the stub generators for the live
-   ones (`ExpandedRetriever(base)` with no generator arguments),
-   re-run the Phase 3 A/B with the same exit criterion (no
-   Precision@6 loss, no Recall@6/nDCG@6 regression, gated subset
-   reported separately). Re-tune the gating thresholds live
-   (0.35 / 0.15 are fake-BoW cosine values): log the top-1/margin
-   distribution on live traffic, target ~10–30% of queries
-   expanding. Spot-check that live paraphrases never add asset
-   names/codes, and that the live decomposition splits the
-   wordings the stub cannot (C02 "Both X and Y", C04/C05
-   "Compare X with Y").
-7. **Context budget:** re-measure with the real tokenizer
+7. **Live expansion A/B:** swap the stub generators for the
+   live ones (`ExpandedRetriever(base)` with no generator
+   arguments), re-run the Phase 3 A/B with the same exit
+   criterion (no Precision@6 loss, no Recall@6/nDCG@6
+   regression, gated subset reported separately). Re-tune the
+   gating thresholds live (0.35 / 0.15 are fake-BoW cosine
+   values): log the top-1/margin distribution on live
+   traffic, target ~10–30% of queries expanding. Spot-check
+   that live paraphrases never add asset names/codes, and
+   that the live decomposition splits the wordings the stub
+   cannot (C02 "Both X and Y", C04/C05 "Compare X with Y").
+8. **Context budget:** re-measure with the real tokenizer
    (`estimate_tokens` is chars/4, an approximation).
-8. **Grow the corpus before trusting Recall@20** (saturated by
+9. **Grow the corpus before trusting Recall@20** (saturated by
    construction at 7 docs) — and before LTR (252 pairs vs ~3,000
    needed). Do NOT train a ranker on this golden set.
-9. **M08 live analogue:** a query naming an asset whose gold
-   document is linked to a *different* asset's component family
-   (the O22/C2 → controller-doc shape); confirm the hub penalty
-   demotes the building-mediated distractor rather than the gold
-   doc.
-10. **Live QueryPlan A/B:** swap the stub generators for the
+10. **M08 live analogue:** a query naming an asset whose gold
+    document is linked to a *different* asset's component family
+    (the O22/C2 → controller-doc shape); confirm the hub penalty
+    demotes the building-mediated distractor rather than the gold
+    doc.
+11. **Live QueryPlan A/B:** swap the stub generators for the
     live ones (`build_query_plan` with no generator arguments)
     and re-run the Phase 4 A/B with the same exit criterion
     (kept-variant re-check 100%, no nDCG@6 regression, gated
@@ -453,7 +597,7 @@ in `infra/qdrant_client.py`).
     on live paraphrases is itself a finding), and that the live
     decomposition splits the wordings the stub cannot (C02
     "Both X and Y", C04/C05 "Compare X with Y").
-11. **Grow the QU golden set** before trusting any QueryPlan
+12. **Grow the QU golden set** before trusting any QueryPlan
     claim or tuning intent weights / thresholds — 36 cases
     with 5 intent labels is enough to measure the plumbing,
     not to tune on.
@@ -464,27 +608,28 @@ Add an opt-in mission-config flag, e.g.
 `execution.retrieval.hybrid: true` on `fault_analysis` only,
 read by the `retrieval_context` hook (SessionStart, the existing
 pre-retrieval hook): when set, the hook calls
-`HybridRetriever(use_live_graph=True)` — or `ExpandedRetriever`
-over it, once the live A/B in §11.6 passes — with the real
-LiteLLM embeddings + Qdrant client + the live Neo4j store
-(`expand_via_graph_query`), assembles context with
+`build_live_hybrid_retriever()` (Phase 5, §6b — the factory
+now exists and does the embedding / client / store / gazetteer
+work, including the real corpus doc-counts for seed
+specificity) — or `ExpandedRetriever` over it, once the live
+A/B in §11.7 passes — assembles context with
 `runtime/retrieval_context.py::assemble_context`, and logs the
 trace (seeds, expansion, per-candidate G1–G9, guardrail flags,
 expansion kind/variants/overlap) to MLflow. When unset, the hook
-behaves exactly as today. The hook must pass real corpus
-doc-counts for seed specificity (§11.3). No change to
-`search_documents` / the tool surface is needed; the hybrid
-module already accepts injected embeddings/client/store, so the
-wiring is a call-site change, not a redesign. The Phase 4
+behaves exactly as today. No change to
+`search_documents` / the tool surface is needed; the wiring is
+a call-site change, not a redesign. The Phase 4
 variant of the same flag is `execution.retrieval.query_plan:
 true`: build the QueryPlan first (live generators), then call
-`HybridRetriever(use_live_graph=True).retrieve(question,
+`build_live_hybrid_retriever().retrieve(question,
 query_plan=plan)` and log the plan (intent, margin, seeds,
 gating, fallback reason, kept/dropped variants with reasons)
 to MLflow alongside the trace.
 
-Why not wired yet: there is no live Qdrant/Neo4j in this VM to
-verify the live path against, and wiring without a live check
-would ship an untested retrieval change into the fault mission.
-The fake-verified module + the documented call site is the right
-stopping point.
+Why not wired yet: there is still no live Qdrant/Neo4j in this
+VM to verify the live path against, and no live numbers exist —
+wiring without a live check would ship an untested retrieval
+change into the fault mission. Phase 5 built the factory and
+the live eval (§6b, §11.4) so the wiring, when it lands, is a
+call-site change onto a fake-verified module; the live numbers
+come first.

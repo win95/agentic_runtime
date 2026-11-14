@@ -34,6 +34,39 @@ full formula ``0.45 * minmax_log(PPR) + 0.30 * z(path_term)
 Timeout: expansion takes ``timeout_seconds``; a store call that
 raises (including ``TimeoutError``) degrades to an empty expansion
 and the caller falls back to vector-only (guardrail 3).
+
+Phase 5 dynamic gazetteer (``refresh_gazetteer_codes`` /
+``clear_gazetteer_codes`` / ``gazetteer_seeds`` live branch): the
+demo gazetteer above only knows the demo vocabulary, so on a live
+ontology it would link demo codes that do not exist there and miss
+live codes that do. The live factory therefore refreshes the
+gazetteer explicitly from the ontology (``list_entity_keys`` per
+label: Asset, Component, Building, Document) into an in-memory
+cache — NO TTL, NO background/beat job, refresh on seed/drain or
+by hand only, per the user's sync principle (codes change slowly;
+sync fixed things once, never duplicate the tools' fetch logic).
+
+Two modes, switched by an explicit flag set only by
+``refresh_gazetteer_codes`` (never by sniffing):
+- Demo mode (default, refresh never called): today's hardcoded
+  demo patterns, byte-identical output.
+- Live mode (refresh called at least once): the demo patterns
+  are DISABLED and only the cached dynamic keys can link. A
+  wrong link is worse than no link: a live question naming O21
+  when the live ontology has no O21 must not link, so there is
+  NO fallback to demo codes. If the ontology was unreachable at
+  refresh the cache is EMPTY (a failed refresh also clears any
+  earlier cache — a stale cache could link codes the ontology
+  no longer has) and the gazetteer links NOTHING. A failed
+  refresh never raises; it returns ``{"source": "unreachable",
+  ...zero counts...}``.
+
+Limitation: fault codes are NOT ontology entities — there is no
+Fault entity type, and FAULT_CODE_LINKS maps fault codes to
+asset+component from the demo table. The dynamic list therefore
+covers Asset/Component/Building/Document keys only; fault-code
+expansion stays demo-grounded (demo mode) and does not run at
+all in live mode, until Fault becomes an ontology entity type.
 """
 
 from __future__ import annotations
@@ -68,6 +101,13 @@ ALLOWED_RELATIONS = frozenset(RELATION_WEIGHTS)
 MAX_FANOUT_PER_TYPE = 10
 MAX_EXPANSION_NODES = 50
 DEFAULT_TIMEOUT_SECONDS = 0.15  # 150 ms Neo4j budget, report §3.2
+
+# Live-adjacency cap (Phase 5 follow-up): the PPR candidate subgraph
+# is <= ~200 nodes by design (report §11.3 PPR cap). The live builder
+# counts seeds + expansion + second-hop nodes against this cap.
+
+MAX_LIVE_ADJACENCY_NODES = 200
+
 
 # --- Phase 2 graph_score weights (locked full formula, §4.7) ----------
 # graph_score = W_PPR * ppr_norm + W_PATH * z(path_term)
@@ -325,7 +365,14 @@ def gazetteer_seeds(question: str) -> list[dict]:
     component-name exact seed lands before the code seeds but the
     name seed itself stays last, as it does today. [] when nothing
     links confidently: no LLM linker, no scored guesses.
+
+    Phase 5: when the dynamic gazetteer is live (see
+    ``refresh_gazetteer_codes``), this function returns the live
+    branch instead — demo patterns disabled, only cached dynamic
+    keys link. In demo mode (default) the body below is untouched.
     """
+    if _DYNAMIC_MODE:
+        return _dynamic_gazetteer_seeds(question)
     text = (question or "").lower()
     seeds: list[dict] = []
     seen: set[str] = set()
@@ -380,6 +427,193 @@ def gazetteer_seeds(question: str) -> list[dict]:
         )
         positions.insert(index, position)
     return seeds
+
+
+# --- Phase 5: dynamic gazetteer (live ontology keys) ----------------
+# See the Phase 5 section in the module docstring for the two-mode
+# rule and its reasoning. Summary of the contract:
+# - ``refresh_gazetteer_codes(store=None)`` is the ONLY way into
+#   live mode; it is called explicitly by the live factory (and by
+#   hand), never on a timer, never implicitly by ``gazetteer_seeds``.
+# - The cache is in-memory only, no TTL. ``clear_gazetteer_codes``
+#   returns to demo mode (used by tests).
+# - A refresh fetches ALL FOUR labels first and only commits on
+#   full success: any store failure leaves the cache EMPTY and
+#   live mode linking nothing, and never raises.
+# - Fault codes are not fetched: there is no Fault entity type.
+#   In live mode a fault code links nothing (its demo expansion
+#   is a demo pattern, and demo patterns are disabled in live mode).
+# - Dynamic matching reuses the Phase 4 normalisation: verbatim
+#   (case-insensitive whole-token) hits score 1.0, separator /
+#   diacritics variants score 0.8, and a 1.0 twin always wins the
+#   dedup. Patterns are compiled once at refresh, not per question.
+# - Scores, fusion weights, guardrails and gating are untouched:
+#   this only changes WHICH keys can become seeds, and only in
+#   live mode.
+
+_DYNAMIC_ENTITY_TYPES: tuple[tuple[str, str], ...] = (
+    ("Asset", "assets"),
+    ("Component", "components"),
+    ("Building", "buildings"),
+    ("Document", "documents"),
+)
+
+_DYNAMIC_MODE = False
+_DYNAMIC_CODES: dict[str, list[str]] = {}
+_DYNAMIC_PATTERNS: list[tuple[str, str, re.Pattern[str], re.Pattern[str]]] = []
+
+
+def _dynamic_key_parts(key: str) -> list[str]:
+    """Atomic parts of a key for the normalised-variant pattern.
+
+    Split on non-alphanumerics, then split each segment into
+    letter / digit runs (``M9`` -> ``m``, ``9``; ``O99`` -> ``o``,
+    ``99``), so separators may appear between a code's letters
+    and its digits exactly as in the Phase 4 variant pass
+    (``O-99`` / ``O 99`` -> ``O99``, ``motor M 9`` -> ``motor-M9``).
+    Diacritics are stripped so a key with a diacritic matches its
+    plain spelling. A key with no alphanumeric part has no safe
+    pattern and is skipped by the caller.
+    """
+    parts: list[str] = []
+    for segment in re.split(r"[^A-Za-z0-9]+", _strip_diacritics(key.lower())):
+        parts.extend(re.findall(r"[A-Za-z]+|[0-9]+", segment))
+    return parts
+
+
+def _dynamic_patterns_for(
+    key: str,
+) -> tuple[re.Pattern[str], re.Pattern[str]] | None:
+    """(verbatim, variant) patterns for one cached key, or None.
+
+    Verbatim: the key's exact spelling, case-insensitive, as a
+    whole token (``\b`` both ends). Variant: the key's atomic
+    parts joined by optional separators (``_SEP``), also
+    whole-token bounded, on diacritics-stripped text — the same
+    normalisation as Phase 4. Word boundaries on both patterns
+    mean a key embedded in a longer token (``XO99``, ``O99x``)
+    never matches.
+    """
+    parts = _dynamic_key_parts(key)
+    if not parts:
+        return None
+    verbatim = re.compile(r"\b" + re.escape(key.lower()) + r"\b")
+    variant = re.compile(r"\b" + _SEP.join(re.escape(part) for part in parts) + r"\b")
+    return verbatim, variant
+
+
+def refresh_gazetteer_codes(store=None) -> dict:
+    """Load the live ontology's entity keys into the gazetteer cache.
+
+    Fetches keys per label via ``ontology/knowledge/graph_query.py::
+    list_entity_keys`` (Asset, Component, Building, Document),
+    stores them in the module-level cache, sets live mode, and
+    returns ``{"assets": n, "components": n, "buildings": n,
+    "documents": n, "source": "ontology"}``. Called explicitly by
+    the live factory (and by hand); never on a timer.
+
+    On ANY store failure — including a failure halfway through
+    the four fetches, or no graph store being configured — it
+    returns ``{"assets": 0, "components": 0, "buildings": 0,
+    "documents": 0, "source": "unreachable"}``, leaves the cache
+    EMPTY (clearing any earlier successful refresh: a stale cache
+    could link codes the ontology no longer has, and a wrong link
+    is worse than no link), keeps live mode ON (so the gazetteer
+    links nothing rather than falling back to demo codes), and
+    never raises.
+    """
+    global _DYNAMIC_MODE, _DYNAMIC_CODES, _DYNAMIC_PATTERNS
+    try:
+        from ontology.knowledge.graph_query import list_entity_keys
+
+        fetched: dict[str, list[str]] = {}
+        for entity_type, _summary_key in _DYNAMIC_ENTITY_TYPES:
+            fetched[entity_type] = list_entity_keys(entity_type, store=store)
+    except Exception as exc:  # noqa: BLE001 — refresh must never raise
+        logger.warning("dynamic gazetteer refresh failed: %s", exc)
+        _DYNAMIC_MODE = True
+        _DYNAMIC_CODES = {}
+        _DYNAMIC_PATTERNS = []
+        return {
+            "assets": 0,
+            "components": 0,
+            "buildings": 0,
+            "documents": 0,
+            "source": "unreachable",
+        }
+    codes: dict[str, list[str]] = {}
+    patterns: list[tuple[str, str, re.Pattern[str], re.Pattern[str]]] = []
+    for entity_type, _summary_key in _DYNAMIC_ENTITY_TYPES:
+        keys = sorted(set(fetched[entity_type]))
+        codes[entity_type] = keys
+        for key in keys:
+            built = _dynamic_patterns_for(key)
+            if built is not None:
+                patterns.append((entity_type, key, built[0], built[1]))
+    # Commit only on full success: a second refresh replaces the
+    # cache wholesale, so no stale keys survive it.
+    _DYNAMIC_CODES = codes
+    _DYNAMIC_PATTERNS = patterns
+    _DYNAMIC_MODE = True
+    return {
+        "assets": len(codes["Asset"]),
+        "components": len(codes["Component"]),
+        "buildings": len(codes["Building"]),
+        "documents": len(codes["Document"]),
+        "source": "ontology",
+    }
+
+
+def clear_gazetteer_codes() -> None:
+    """Drop the dynamic cache and return to demo mode.
+
+    Test helper (also the manual way back from live mode): after
+    this call ``gazetteer_seeds`` uses the hardcoded demo patterns
+    again, exactly as before any refresh.
+    """
+    global _DYNAMIC_MODE, _DYNAMIC_CODES, _DYNAMIC_PATTERNS
+    _DYNAMIC_MODE = False
+    _DYNAMIC_CODES = {}
+    _DYNAMIC_PATTERNS = []
+
+
+def _dynamic_gazetteer_seeds(question: str) -> list[dict]:
+    """Live-mode seeds: only cached dynamic keys can link.
+
+    Verbatim hits score 1.0, normalised-variant hits 0.8; a key
+    with both keeps the 1.0 (same dedup rule as the demo pass).
+    Seeds come out in first-mention order. [] when the cache is
+    empty (ontology unreachable at refresh) or nothing listed is
+    mentioned — there is no demo fallback in live mode.
+    """
+    text = (question or "").lower()
+    norm_text = _strip_diacritics(text)
+    best: dict[str, dict] = {}
+    for node_type, key, verbatim_re, variant_re in _DYNAMIC_PATTERNS:
+        match = verbatim_re.search(text)
+        if match is not None:
+            current = best.get(key)
+            if current is None or current["confidence"] < 1.0:
+                best[key] = {
+                    "type": node_type,
+                    "key": key,
+                    "confidence": 1.0,
+                    "position": match.start(),
+                }
+            continue
+        match = variant_re.search(norm_text)
+        if match is not None and key not in best:
+            best[key] = {
+                "type": node_type,
+                "key": key,
+                "confidence": NORMALISED_CONFIDENCE,
+                "position": match.start(),
+            }
+    ordered = sorted(best.values(), key=lambda seed: seed["position"])
+    return [
+        {"type": seed["type"], "key": seed["key"], "confidence": seed["confidence"]}
+        for seed in ordered
+    ]
 
 
 # --- Adjacency ---------------------------------------------------------
@@ -535,6 +769,176 @@ def expand_via_graph_query(
                     "via_hub": False,
                 }
     return {"nodes": nodes, "truncated": truncated, "nodes_returned": len(nodes)}
+
+
+def _live_adjacency_edge(
+    adjacency: dict, from_key: str, rel: str, to_key: str, to_type: str
+) -> None:
+    """Add one undirected edge (both directions), deduped.
+
+    ``adjacency[from_key]`` and ``adjacency[to_key]`` must already
+    exist (``_ensure``-ed by the caller); the neighbour lists are
+    re-sorted by the caller once the build finishes.
+    """
+    forward = (rel, to_key, to_type)
+    if forward not in adjacency[from_key]["neighbors"]:
+        adjacency[from_key]["neighbors"].append(forward)
+    back_type = adjacency[from_key]["type"]
+    backward = (rel, from_key, back_type)
+    if backward not in adjacency[to_key]["neighbors"]:
+        adjacency[to_key]["neighbors"].append(backward)
+
+
+def build_expansion_adjacency(seeds: list[dict], expansion: dict) -> dict:
+    """Seeds + expansion nodes + their seed->node edges only.
+
+    The degradation substrate for the live path (see
+    ``build_live_adjacency``): real store data (the 1-hop expansion
+    rows), partial — no second-hop edges, so PPR/coverage/hub see
+    only the seed fringe. Same shape as ``build_demo_adjacency``.
+    Never the demo adjacency: on the live path a demo edge would be
+    a fabricated edge about the live ontology.
+    """
+    adjacency: dict[str, dict] = {}
+
+    def _ensure(key: str, node_type: str) -> None:
+        adjacency.setdefault(key, {"type": node_type, "neighbors": []})
+
+    seed_types = {s["key"]: s.get("type") or "Entity" for s in seeds}
+    for seed in seeds:
+        _ensure(seed["key"], seed_types[seed["key"]])
+    for to_key, node in (expansion.get("nodes") or {}).items():
+        _ensure(to_key, node.get("type") or "Entity")
+        from_seed = node.get("from_seed")
+        if from_seed in adjacency:
+            _live_adjacency_edge(
+                adjacency,
+                from_seed,
+                node.get("rel") or "RELATED_TO",
+                to_key,
+                node.get("type") or "Entity",
+            )
+    for entry in adjacency.values():
+        entry["neighbors"] = sorted(set(entry["neighbors"]), key=lambda e: (e[1], e[0]))
+    return adjacency
+
+
+def build_live_adjacency(
+    seeds: list[dict],
+    expansion: dict,
+    *,
+    store=None,
+    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    max_nodes: int = MAX_LIVE_ADJACENCY_NODES,
+) -> dict:
+    """Live adjacency for PPR (G7), coverage (G6) and hub (G8).
+
+    Same shape as ``build_demo_adjacency`` (node key ->
+    ``{"type": str, "neighbors": [(rel, to_key, to_type)]}``,
+    stored directed but used undirected), built from REAL store
+    data only: the seeds + the 1-hop expansion nodes + the 1-hop
+    neighbours of each expansion node, so PPR/coverage/hub see
+    real edges beyond the seed fringe. Without this the live path
+    scored those features over the demo adjacency — a live doc's
+    PPR would have been computed from demo edges.
+
+    Rules:
+    - Only ``ALLOWED_RELATIONS`` edges; neighbours are fetched via
+      ``ontology/knowledge/graph_query.py::neighbors`` (depth 1)
+      per node — no new Cypher.
+    - Deterministic under the caps: nodes are visited in BFS
+      order (seeds in given order, then expansion nodes sorted by
+      key, then second-hop nodes in discovery order) and each
+      node's neighbours are processed sorted by key, so the same
+      store contents always yield the same adjacency.
+    - Total nodes capped at ``max_nodes`` (default 200, the §11.3
+      PPR cap — counting seeds + expansion + second-hop nodes).
+      Seeds + expansion nodes are always present (they are the
+      query's own fringe); the cap binds on second-hop additions
+      only: an edge to a not-yet-known node past the cap is
+      dropped, edges between known nodes are still added, and the
+      truncation is reported with a warning log.
+    - One shared wall-clock budget (``timeout_seconds``, default
+      the same 0.15 s as the 1-hop expansion, §3.2): the budget is
+      checked before every ``neighbors`` call, NOT per call — a
+      per-call budget over up to ~51 calls (seeds + expansion)
+      could stretch to ~7.6 s and blow the retrieval latency
+      budget. On timeout the build stops and returns the partial
+      adjacency built so far (seeds + expansion nodes are always
+      in it, so it is never empty for a non-empty seed set).
+    - A store error RAISES (it is not swallowed here): the caller
+      (``HybridRetriever._candidate_rows``) treats a failed live
+      build as a degradation and falls back to
+      ``build_expansion_adjacency``. A partial graph after an
+      error would be indistinguishable from a complete small
+      graph, so the builder never returns one.
+
+    Returns ``{}`` only when there are no seeds (the caller never
+    calls it then — ``graph_missing`` applies instead).
+    """
+    from ontology.knowledge.graph_query import neighbors as graph_neighbors
+
+    adjacency: dict[str, dict] = {}
+
+    def _ensure(key: str, node_type: str) -> None:
+        adjacency.setdefault(key, {"type": node_type, "neighbors": []})
+
+    for seed in seeds:
+        _ensure(seed["key"], seed.get("type") or "Entity")
+    expansion_nodes = expansion.get("nodes") or {}
+    for key, node in expansion_nodes.items():
+        _ensure(key, node.get("type") or "Entity")
+
+    started = time.monotonic()
+    truncated = False
+    # Seeds may also appear as expansion nodes (the live expansion
+    # does not exclude them); dedup so each node is fetched once.
+    queue = list(dict.fromkeys([s["key"] for s in seeds] + sorted(expansion_nodes)))
+    queued = set(queue)
+    index = 0
+    while index < len(queue):
+        key = queue[index]
+        index += 1
+        if time.monotonic() - started > timeout_seconds:
+            truncated = True
+            break
+        # Limit 200 (the graph_query max): degree fidelity matters
+        # for PPR/hub — truncating a node's neighbour list at the
+        # expansion fan-out (40) would understate real hub degrees.
+        # The total-node cap above bounds the memory instead.
+        rows = graph_neighbors(
+            adjacency[key]["type"],
+            key,
+            depth=1,
+            limit=200,
+            store=store,
+        )
+        rows.sort(key=lambda r: (r.get("to") or "", r.get("type") or ""))
+        for row in rows:
+            rel = row.get("type")
+            to_key = row.get("to")
+            if rel not in ALLOWED_RELATIONS or not to_key or to_key == key:
+                continue
+            to_type = row.get("to_label") or "Entity"
+            if to_key not in adjacency:
+                if len(adjacency) >= max_nodes:
+                    truncated = True
+                    continue
+                _ensure(to_key, to_type)
+                if to_key not in queued:
+                    queued.add(to_key)
+                    queue.append(to_key)
+            _live_adjacency_edge(adjacency, key, rel, to_key, to_type)
+    for entry in adjacency.values():
+        entry["neighbors"] = sorted(set(entry["neighbors"]), key=lambda e: (e[1], e[0]))
+    if truncated:
+        logger.warning(
+            "live adjacency truncated: %d nodes (cap %d, budget %.3fs)",
+            len(adjacency),
+            max_nodes,
+            timeout_seconds,
+        )
+    return adjacency
 
 
 # --- Per-candidate graph features --------------------------------------

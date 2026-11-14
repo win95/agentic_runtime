@@ -14,7 +14,10 @@ Pipeline per question:
 3. Graph arm: 1-hop expansion over the demo adjacency (fakes) or
    ``expand_via_graph_query`` (live); every doc linked to a seed or
    a 1-hop neighbour becomes a candidate, with G1/G2/G4/G5 (Phase 1)
-   plus G6 coverage, G7 PPR and G8 hub (Phase 2, default on).
+   plus G6 coverage, G7 PPR and G8 hub (Phase 2, default on). On the
+   live path G6/G7/G8 run over ``build_live_adjacency`` (real edges
+   out to the second hop), degrading to the expansion-only adjacency
+   if the live build fails — never over the demo adjacency.
 4. Candidates = vector top-40 UNION graph-linked docs, deduped.
 5. RRF (k=60) over vector rank + graph rank -> top-30.
 6. Fusion (``runtime/retrieval_fusion.py``) -> guardrails -> top-6.
@@ -53,6 +56,8 @@ from runtime.retrieval_fusion import (
 from runtime.retrieval_graph import (
     W_PPR,
     build_demo_adjacency,
+    build_expansion_adjacency,
+    build_live_adjacency,
     expand_one_hop,
     expand_via_graph_query,
     gazetteer_seeds,
@@ -99,6 +104,9 @@ class HybridRetriever:
         *,
         use_live_graph: bool = False,
         graph_store=None,
+        doc_counts=None,
+        doc_texts=None,
+        doc_links=None,
         w_vec: float = W_VEC,
         w_graph: float = W_GRAPH,
         w_exact: float = W_EXACT,
@@ -115,18 +123,109 @@ class HybridRetriever:
         # PPR ablation flag: w_ppr=0 zeroes the PPR sub-weight
         # (no renormalising — see phase2_graph_scores).
         self.w_ppr = w_ppr
-        # Doc counts for seed specificity (PPR personalization):
-        # number of linked documents per node, from the grounded
-        # linking table. Live wiring must replace this with real
-        # corpus counts (see docs/hybrid-retrieval-phase2.md §7).
-        self._doc_counts: dict[str, int] = {}
-        for links in DOCUMENT_LINKS.values():
-            for node_key in links["node_ids"]:
-                self._doc_counts[node_key] = self._doc_counts.get(node_key, 0) + 1
-        # Doc texts for the graph arm / exact feature (fake corpus).
-        from seeds.demo_data import DOCUMENTS
+        # Live sources for the three demo tables below. Each accepts
+        # a precomputed dict or a callable; a callable is resolved
+        # LAZILY (once, cached, on the first query that needs it)
+        # and never at construction, so the fake path (all three
+        # None) never touches Qdrant. The live factory supplies
+        # callables reading the real client (see
+        # ``build_live_hybrid_retriever``).
+        # - doc_counts: {node key: n docs linked} for seed
+        #   specificity (``runtime/retrieval_ppr.py::seed_specificity``:
+        #   a missing/empty count is maximally specific, so an empty
+        #   store degrades to {} here, never a crash).
+        # - doc_links: {doc id: [node ids]} for the graph arm.
+        # - doc_texts: {doc id: payload} OR a callable taking the
+        #   doc ids to fetch (``[doc_id] -> {doc_id: payload}``) —
+        #   the batch payload fetch for graph-only candidates.
+        self._doc_counts_source = doc_counts
+        self._doc_counts_cache: dict[str, int] | None = None
+        self._doc_links_source = doc_links
+        self._doc_links_cache: dict[str, list[str]] | None = None
+        self._doc_texts_source = doc_texts
+        self._fetched_texts: dict[str, dict] = {}
+        self._missing_texts: set[str] = set()
+        if doc_texts is None:
+            # Doc texts for the graph arm / exact feature (fake corpus).
+            from seeds.demo_data import DOCUMENTS
 
-        self._docs = {d["id"]: d for d in DOCUMENTS}
+            self._docs = {d["id"]: d for d in DOCUMENTS}
+        elif isinstance(doc_texts, dict):
+            self._docs = dict(doc_texts)
+        else:  # callable: fetched per query, batched (see _fetch_doc_texts)
+            self._docs = {}
+
+    def _resolved_doc_counts(self) -> dict[str, int]:
+        """Doc counts per node, demo table unless a live source was given."""
+        if self._doc_counts_cache is not None:
+            return self._doc_counts_cache
+        source = self._doc_counts_source
+        if source is None:
+            counts: dict[str, int] = {}
+            for links in DOCUMENT_LINKS.values():
+                for node_key in links["node_ids"]:
+                    counts[node_key] = counts.get(node_key, 0) + 1
+            self._doc_counts_cache = counts
+        elif callable(source):
+            self._doc_counts_cache = dict(source() or {})
+        else:
+            self._doc_counts_cache = dict(source)
+        return self._doc_counts_cache
+
+    def _resolved_doc_links(self) -> dict[str, list[str]]:
+        """Doc -> node ids, demo table unless a live source was given."""
+        if self._doc_links_cache is not None:
+            return self._doc_links_cache
+        source = self._doc_links_source
+        if source is None:
+            self._doc_links_cache = {
+                doc_id: list(links["node_ids"])
+                for doc_id, links in DOCUMENT_LINKS.items()
+            }
+        elif callable(source):
+            self._doc_links_cache = {
+                doc_id: list(node_ids) for doc_id, node_ids in (source() or {}).items()
+            }
+        else:
+            self._doc_links_cache = {
+                doc_id: list(node_ids) for doc_id, node_ids in source.items()
+            }
+        return self._doc_links_cache
+
+    def _fetch_doc_texts(self, doc_ids: list[str]) -> dict[str, dict]:
+        """Batch-fetch payloads for doc ids missing from _docs / vector results.
+
+        Only the live callable source fetches anything; the fake path
+        (no source) and the precomputed-dict source return {} without
+        a call. Ids already fetched, or already known missing, are
+        not re-fetched. A fetch failure propagates (a Qdrant failure
+        surfaces as RuntimeError naming the store, never a silent
+        empty result); ids the store simply does not have stay
+        missing and contribute no text feature.
+        """
+        wanted = [
+            d
+            for d in dict.fromkeys(doc_ids)
+            if d not in self._docs and d not in self._fetched_texts and d not in self._missing_texts
+        ]
+        if not wanted:
+            return {}
+        source = self._doc_texts_source
+        if source is None or isinstance(source, dict):
+            return {}
+        fetched = dict(source(wanted) or {})
+        self._fetched_texts.update(fetched)
+        self._missing_texts.update(set(wanted) - set(fetched))
+        return fetched
+
+    def _doc_for(self, doc_id: str, vec_by_id: dict) -> dict:
+        """Candidate doc: demo/dict texts, vector payload, fetched payload, else stub."""
+        return (
+            self._docs.get(doc_id)
+            or vec_by_id.get(doc_id)
+            or self._fetched_texts.get(doc_id)
+            or {"doc_id": doc_id}
+        )
 
     def __call__(self, question: str):
         return self.retrieve(question)
@@ -179,6 +278,37 @@ class HybridRetriever:
             expansion = expand_one_hop(seeds, self.adjacency)
         graph_missing = not seeds or not expansion.get("nodes")
 
+        # Substrate for PPR (G7), coverage (G6) and hub (G8): on the
+        # live path these must run over REAL graph edges, not the
+        # demo adjacency — a live doc's PPR computed from demo edges
+        # would be meaningless. The fake path keeps self.adjacency
+        # (byte-identical behaviour). Degradation, live path only:
+        # if the live build raises or comes back empty while the
+        # 1-hop expansion itself succeeded, fall back to the
+        # expansion-only adjacency (seeds + expansion nodes + their
+        # seed->node edges — real data, partial), never to the demo
+        # adjacency and never a crash. If the expansion itself is
+        # empty, the existing graph_missing path applies unchanged
+        # (no live build is attempted).
+        graph_adjacency = self.adjacency
+        if self.use_live_graph and not graph_missing:
+            try:
+                live_adjacency = build_live_adjacency(seeds, expansion, store=self.graph_store)
+            except Exception as exc:  # noqa: BLE001 — live graph is advisory
+                logger.warning("live adjacency build failed: %s", exc)
+                live_adjacency = {}
+            if live_adjacency:
+                graph_adjacency = live_adjacency
+                expansion["graph_adjacency_source"] = "live"
+            else:
+                graph_adjacency = build_expansion_adjacency(seeds, expansion)
+                expansion["graph_adjacency_source"] = "expansion-only"
+                logger.warning(
+                    "live adjacency empty/failed; using expansion-only adjacency (%d nodes)",
+                    len(graph_adjacency),
+                )
+            expansion["graph_adjacency_nodes"] = len(graph_adjacency)
+
         # Phase 2 PPR (once per query, over the candidate subgraph —
         # here the whole demo adjacency, <=~200 nodes by design).
         # Seeds weigh confidence * specificity; a seed in no linked
@@ -187,36 +317,48 @@ class HybridRetriever:
         if self.phase2 and not graph_missing:
             from runtime.retrieval_ppr import personalized_pagerank, seed_specificity
 
-            spec = seed_specificity(seeds, self._doc_counts)
+            spec = seed_specificity(seeds, self._resolved_doc_counts())
             seed_weights = {
                 s["key"]: float(s.get("confidence", 1.0)) * spec[s["key"]] for s in seeds
             }
-            ppr_scores = personalized_pagerank(
-                self.adjacency, seeds, seed_weights=seed_weights
-            )
+            ppr_scores = personalized_pagerank(graph_adjacency, seeds, seed_weights=seed_weights)
 
         # Graph-linked candidate docs: docs whose linked nodes touch a
         # seed or a 1-hop neighbour, plus docs that ARE expansion nodes.
+        # Links come from the demo table on the fake path, from real
+        # Qdrant payload node_ids on the live path (see _resolved_doc_links).
         graph_doc_ids: set[str] = set()
-        for doc_id, links in DOCUMENT_LINKS.items():
-            linked = set(links["node_ids"])
+        for doc_id, node_ids in self._resolved_doc_links().items():
+            linked = set(node_ids)
             if linked & {s["key"] for s in seeds}:
                 graph_doc_ids.add(doc_id)
             elif linked & set(expansion.get("nodes", {})):
                 graph_doc_ids.add(doc_id)
+        # Payloads for graph-only candidates (not in the vector
+        # results): title/content/node_ids for the exact feature and
+        # the graph features. Fetched in one batch; on the fake path
+        # this is a no-op (no live source, _docs already has them).
+        self._fetch_doc_texts(
+            sorted(graph_doc_ids | set(expansion.get("nodes", {})))
+        )
         for node_key in expansion.get("nodes", {}):
-            if node_key in self._docs:
+            if node_key in self._docs or node_key in self._fetched_texts:
                 graph_doc_ids.add(node_key)
 
         candidate_ids = sorted(set(vec_by_id) | graph_doc_ids)
         feature_rows: list[dict] = []
         for doc_id in candidate_ids:
-            doc = self._docs.get(doc_id) or vec_by_id.get(doc_id) or {"doc_id": doc_id}
-            feature_rows.append(graph_features(
-                doc_id, seeds, expansion, self.adjacency,
-                payload=vec_by_id.get(doc_id),
-                ppr_scores=ppr_scores or None,
-            ))
+            doc = self._doc_for(doc_id, vec_by_id)
+            feature_rows.append(
+                graph_features(
+                    doc_id,
+                    seeds,
+                    expansion,
+                    graph_adjacency,
+                    payload=vec_by_id.get(doc_id) or self._fetched_texts.get(doc_id),
+                    ppr_scores=ppr_scores or None,
+                )
+            )
         if self.phase2 and not graph_missing:
             gscores = phase2_graph_scores(feature_rows, w_ppr=self.w_ppr)
         else:
@@ -226,7 +368,7 @@ class HybridRetriever:
             ]
         candidates: list[dict] = []
         for doc_id, features, gscore in zip(candidate_ids, feature_rows, gscores):
-            doc = self._docs.get(doc_id) or vec_by_id.get(doc_id) or {"doc_id": doc_id}
+            doc = self._doc_for(doc_id, vec_by_id)
             arms = []
             if doc_id in vec_by_id:
                 arms.append("vector")
@@ -345,7 +487,7 @@ class HybridRetriever:
 
     def _trace(self, candidates, final, seeds, expansion, graph_missing):
         """The standard retrieve trace (shared by both paths)."""
-        return {
+        trace = {
             "fake": True,
             "phase2": self.phase2,
             "seeds": [s["key"] for s in seeds],
@@ -375,6 +517,13 @@ class HybridRetriever:
                 for c in final
             },
         }
+        # Live path only: which adjacency PPR/coverage/hub ran over.
+        # Absent on the fake path (trace byte-identical there) and
+        # when the expansion itself was empty (graph_missing).
+        if "graph_adjacency_source" in expansion:
+            trace["graph_adjacency_source"] = expansion["graph_adjacency_source"]
+            trace["graph_adjacency_nodes"] = expansion.get("graph_adjacency_nodes", 0)
+        return trace
 
     def _retrieve_no_plan(self, question: str):
         """The Phase 1–2 retrieve path, untouched by Phase 4."""
@@ -444,6 +593,107 @@ def build_hybrid_retriever(*, blurred: bool = False, phase2: bool = True,
     retriever = HybridRetriever(embeddings=embeddings, client=client,
                                 phase2=phase2, w_ppr=w_ppr, **kwargs)
     retriever.__name__ = "hybrid_blurred" if blurred else "hybrid_bow"
+    return retriever
+
+
+def build_live_hybrid_retriever(
+    *,
+    client=None,
+    graph_store=None,
+    embeddings=None,
+    phase2: bool = True,
+    w_ppr: float = W_PPR,
+    **kwargs,
+):
+    """Live hybrid retriever: real LiteLLM query embeddings + real Qdrant + live Neo4j graph.
+
+    Reads the embedding model from settings — ``EMBEDDING_MODEL_QUERY``
+    falling back to ``EMBEDDING_MODEL`` (``app/config.py``); set
+    ``EMBEDDING_MODEL`` in ``.env`` to the model name your LiteLLM
+    proxy serves. The retriever only embeds QUERIES, so only the
+    query-time model is built here; the INDEX model governs seeding
+    via the existing ``infra.qdrant_client.embed_texts`` default
+    (index-time embedding), and the two models must produce
+    compatible vectors (same dimension / vector space — changing the
+    index model requires re-indexing Qdrant).
+
+    Construction is lazy: no Qdrant/Neo4j connection is made here —
+    ``get_client()`` only builds the client object, and the graph
+    store stays ``None`` unless passed (``expand_via_graph_query``
+    resolves the default from
+    ``ontology/projection/provider.py::get_graph_store`` on first
+    use). The dynamic gazetteer is refreshed best-effort through
+    ``runtime/retrieval_graph.py::refresh_gazetteer_codes``: on any
+    exception (including the function not existing yet) a warning is
+    logged and the factory continues with whatever gazetteer state
+    results — the refresh itself never raises, and a failed refresh
+    leaves the gazetteer in live mode with an empty cache (it links
+    nothing rather than falling back to demo codes).
+
+    Fail fast: an empty ``QDRANT_URL`` raises RuntimeError; missing
+    embedding config raises ValueError from ``require_embedding_config``.
+
+    Error contract: a graph-store failure degrades to
+    ``graph_missing`` and the pure-vector fallback (the existing
+    behaviour in ``expand_via_graph_query``); a Qdrant failure
+    surfaces as a RuntimeError naming Qdrant (``search_documents``
+    and the payload helpers raise it) and is never swallowed into
+    empty results.
+
+    NOT wired into any execution path — callers opt in explicitly.
+    No scoring/fusion formula, weight, guardrail or gating threshold
+    changes here: the live retriever is the same ``HybridRetriever``
+    with real sources injected (doc counts / doc links / doc texts
+    are read lazily from Qdrant on first use).
+    """
+    from app.config import settings
+    from infra.qdrant_client import (
+        count_documents_per_node,
+        get_client,
+        get_document_links,
+        get_document_payloads,
+    )
+    from runtime.llm_factory import build_embeddings, require_embedding_config
+
+    if not settings.qdrant_url:
+        raise RuntimeError(
+            "Qdrant is not configured: QDRANT_URL is empty. "
+            "Set QDRANT_URL in .env to your Qdrant server URL."
+        )
+    require_embedding_config()
+    live_embeddings = embeddings or build_embeddings(
+        model=settings.resolved_embedding_model_query
+    )
+    live_client = client or get_client()
+    if live_client is None:
+        raise RuntimeError(
+            "Qdrant client could not be built even though QDRANT_URL is set "
+            f"({settings.qdrant_url!r}). Check the Qdrant server is reachable."
+        )
+    try:
+        from runtime.retrieval_graph import refresh_gazetteer_codes
+    except Exception as exc:  # noqa: BLE001 — refresh is best-effort, never fatal
+        logger.warning("dynamic gazetteer refresh unavailable: %s", exc)
+    else:
+        try:
+            refreshed = refresh_gazetteer_codes(store=graph_store)
+        except Exception as exc:  # noqa: BLE001 — refresh is best-effort, never fatal
+            logger.warning("dynamic gazetteer refresh failed: %s", exc)
+        else:
+            logger.info("dynamic gazetteer refreshed: %s", refreshed)
+    retriever = HybridRetriever(
+        embeddings=live_embeddings,
+        client=live_client,
+        use_live_graph=True,
+        graph_store=graph_store,
+        doc_counts=lambda: count_documents_per_node(client=live_client),
+        doc_links=lambda: get_document_links(client=live_client),
+        doc_texts=lambda doc_ids: get_document_payloads(doc_ids, client=live_client),
+        phase2=phase2,
+        w_ppr=w_ppr,
+        **kwargs,
+    )
+    retriever.__name__ = "hybrid_live"
     return retriever
 
 

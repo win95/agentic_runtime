@@ -18,6 +18,33 @@ def _label(entity_type: str) -> str:
     return entity_type
 
 
+def list_entity_keys(
+    entity_type: str,
+    *,
+    limit: int = 200,
+    store: GraphStore | None = None,
+) -> list[str]:
+    """Distinct ``id`` values for one entity label, sorted.
+
+    The Phase 5 dynamic gazetteer reads the live ontology's key
+    vocabulary through this (``runtime/retrieval_graph.py::
+    refresh_gazetteer_codes``): one call per label (Asset,
+    Component, Building, Document). The label goes through the
+    same ``_label`` validation as the other read functions, so an
+    arbitrary caller string can never inject Cypher; ``limit``
+    uses the same 1..200 cap. Rows with a missing / non-string
+    ``id`` are skipped; the result is sorted so a refresh is
+    deterministic for the same store contents.
+    """
+    store = store or get_graph_store()
+    label = _label(entity_type)
+    limit = max(1, min(limit, 200))
+    cypher = f"MATCH (n:{label}) RETURN DISTINCT n.id AS id LIMIT $limit"
+    rows = store.run_query(cypher, {"limit": limit})
+    keys = {row.get("id") for row in rows}
+    return sorted(key for key in keys if isinstance(key, str) and key)
+
+
 def neighbors(
     entity_type: str,
     entity_key: str,

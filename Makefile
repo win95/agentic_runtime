@@ -1,4 +1,4 @@
-.PHONY: install install-requirements run-api run-worker run-beat migrate migrate-users run-user-service seed-admin test lint docker-up docker-down seed seed-dry-run seed-edge ingest ingest-dry-run demo eval eval-real eval-genai eval-genai-real langgraph-dev gen-synthetic-data eval-tool-use eval-retrieval eval-retrieval-phase0 eval-retrieval-phase1 eval-retrieval-phase2 train-embedding train-llm mlflow-report eval-retrieval-phase3 eval-retrieval-phase4
+.PHONY: install install-requirements run-api run-worker run-beat migrate migrate-users run-user-service seed-admin test lint docker-up docker-down seed seed-dry-run seed-edge ingest ingest-dry-run demo eval eval-real eval-genai eval-genai-real langgraph-dev gen-synthetic-data eval-tool-use eval-retrieval eval-retrieval-phase0 eval-retrieval-phase1 eval-retrieval-phase2 train-embedding train-llm mlflow-report eval-retrieval-phase3 eval-retrieval-phase4 eval-retrieval-live
 
 # Prefer the project venv when it exists (this checkout), else system python.
 PYTHON := $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python)
@@ -171,6 +171,17 @@ eval-retrieval-phase3:
 # 100%. Pass TRACKING_URI=<mlflow uri> to log to MLflow.
 eval-retrieval-phase4:
 	$(PYTHON) -m scripts.eval_retrieval_phase4 $(if $(TRACKING_URI),--tracking-uri $(TRACKING_URI))
+
+# Phase 5 live retrieval eval: the golden set against the REAL stores
+# (real Qdrant + real Neo4j + real LiteLLM query embeddings). Fails
+# fast with exit code 2 when the embedding config or Qdrant is
+# missing; Neo4j down degrades to a vector-only live run (guardrail
+# 3). The PASS/FAIL verdict uses the Phase 1 exit criterion but is
+# INFORMATIONAL live — exit code is 0 once the eval completes, even
+# on a FAIL. No grid search (live grid re-runs are the user's call).
+# Pass TRACKING_URI=<mlflow uri> to log to MLflow.
+eval-retrieval-live:
+	$(PYTHON) -m scripts.eval_retrieval_live $(if $(TRACKING_URI),--tracking-uri $(TRACKING_URI))
 
 train-embedding:
 	$(PYTHON) -m training.embedding.train --config training/configs/embedding.yaml
