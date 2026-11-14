@@ -35,6 +35,7 @@ and later runs see the prior turns (`docs/sessions.md`).
 | `hotel_reception.py` | Drives the `hotel_receptionist` agent end to end through the real API → worker → LLM → MCP client → mock PMS server. **Preflight** checks the pinned 14-tool contract, the `MCP_TOOL_CAPABILITIES` map, the server's tool list, and the capability gate. Scenarios: `availability`, `soldout`, `policy`, `task`, `booking` (confirmation gate: best-effort with the 3B model, direct `get_booking` cross-check, booking-code recall turn), `memory` (3-turn recall + `GET /sessions/{id}`), `journey` (full booking lifecycle incl. change dates + re-check), `task_full` (housekeeping task + status), `cancel` (free + one-night-fee cancellation), `multi_request` (availability → policy → booking in one session), `soldout_switch` (sold-out recovery to Deluxe). Graders are outcome-based (architecture Phase 1): state verifiers + semantic checks in `verifiers.py`; trajectory findings are warnings only. `--scenario` is repeatable; `--session-id`, `--timeout`, `--cleanup` as usual. |
 | `verifiers.py` | Pure outcome graders for the hotel suite (no live stack needed): state verifiers (no booking created for a sold-out window, task row correct), semantic checks (unavailability + policy facts via small paraphrase sets — interim until the LLM judge model is chosen), scenario verdicts (state AND semantic), trajectory diagnostics. Unit tests in `tests/test_manual_verifiers.py`, including the do-nothing (must fail every verdict) and gold (must pass all) negative controls. |
 | `mlflow_report.py` | Read-only analysis of the runs `hotel_reception.py` left in MLflow: discovers the experiment, joins runs↔traces on `mlflow.sourceRun`, classifies each trace (scenario, turn index, status/version/drift, latency, tokens, contract vs built-in tools, hook failures, derailed prose), then writes a Markdown report + one-row-per-trace CSV. No API/worker/MCP needed; re-run after any test run or DB cleanup. Defaults: experiment `agentic-runtime`, session prefix `sess-hotel-`, outputs in `reports/`. |
+| `verify_retrieval_live.py` | Runs real questions through the **combined** path — a QueryPlan first (`build_query_plan`), then the hybrid retriever with that plan — against the real Qdrant + Neo4j + LiteLLM embeddings. No API/worker needed; talks to the stores directly. Default: 6 sample questions from the golden set. `--question` runs one ad-hoc question, `--golden-set` runs all 36, `--no-compare` skips the without-plan comparison, `--output` writes the verdicts JSON. Preflight fails fast with exit 2 when the embedding config or Qdrant is missing (same as `make eval-retrieval-live`). See "Notes from the retrieval + QU check" below for what it touches and how to read the output. |
 
 `_api.py` is the shared helper (`.env` loading, JSON calls, poll-until-terminal).
 
@@ -102,6 +103,19 @@ make mlflow-report
 
 # MLflow report: print to stdout, no files
 .venv/bin/python scripts/manual/mlflow_report.py --out "" --csv ""
+
+# Retrieval + QU: 6 sample questions through plan + hybrid, live stores
+.venv/bin/python scripts/manual/verify_retrieval_live.py
+
+# Retrieval + QU: one ad-hoc question (no gold expectation)
+.venv/bin/python scripts/manual/verify_retrieval_live.py --question "O21 quá nhiệt?"
+
+# Retrieval + QU: all 36 golden-set cases
+.venv/bin/python scripts/manual/verify_retrieval_live.py --golden-set
+
+# Retrieval + QU: skip the without-plan comparison, save verdicts
+.venv/bin/python scripts/manual/verify_retrieval_live.py --no-compare \
+    --output reports/retrieval.json
 ```
 
 ## Notes from the manual test session (2026-11-10)
@@ -407,3 +421,57 @@ Scope and definitions worth remembering:
 - Numbers are data-derived, so a re-run after new tests changes them;
   the report prints the generation time, tracking URI, experiment and
   filters at the top so two reports can be compared honestly.
+
+## Notes from the retrieval + QU check (2026-11-14)
+
+`verify_retrieval_live.py` is the only runner that exercises the new
+retrieval **together with** Question Understanding on the live
+stores. `make eval-retrieval-live` runs the same golden set through
+the retriever WITHOUT a plan.
+
+What the new retrieval + QU touches, and what it does not:
+
+- TOUCHED (library + live seams): `runtime/retrieval_*.py` (hybrid,
+  fusion, PPR, expansion, query plan, intent, decompose, graph,
+  linking, context, metrics, harness); `infra/qdrant_client.py`
+  (the vector arm plus the live helpers `count_documents_per_node`,
+  `get_document_links`, `get_document_payloads`);
+  `ontology/knowledge/graph_query.py` (the graph arm: `neighbors`
+  for live expansion / adjacency, `list_entity_keys` for the
+  dynamic gazetteer); `scripts/eval_retrieval_live.py` (golden-set
+  eval, retriever without a plan); `scripts/golden_set_fault_analysis.json`
+  (the 36-case golden set).
+- NOT TOUCHED: no mission, agent, API route, worker task or session
+  code calls the hybrid retriever or builds a QueryPlan. The
+  `fault_analysis` capability and the `retrieval_context` hook still
+  use plain `repositories.search_documents` (vector only). The
+  opt-in wiring (`execution.retrieval.hybrid` / `query_plan` on
+  `fault_analysis`) is NOT done — see `docs/hybrid-retrieval.md`
+  section 12. Until that lands, the new retrieval changes nothing
+  in production behaviour; it is only reachable through this script
+  and the live eval.
+
+How to read the output:
+
+- Per question the script prints the gazetteer seeds, the expansion
+  size and adjacency source (`live` / `expansion-only` / `empty`),
+  the plan (intent, confidence, `gated_off`, fallback reason, linked
+  nodes, sub-questions, rewrite variants, gating), the top-6 with
+  vec / graph / exact / final scores, then the same question
+  WITHOUT a plan (`SAME` / `DIFFERS`) so the QU effect is visible.
+- With a golden-set question it also prints the gold intent
+  (`MATCH` / `MISMATCH`) and whether a gold chunk is in the top-6
+  (`HIT` / `MISS`). These are observations, not a gate: intent
+  accuracy on the 3B model was 0.500 on the old fake setup, so a
+  mismatch is a model-quality signal, not a code failure. The
+  numbers live in `make eval-retrieval-live`.
+- The script exits 0 when the run completes, 1 when a question
+  raised unexpectedly (listed at the end), 2 when the preflight
+  fails. A gated-open question may call the LLM (live paraphrase /
+  decomposition generators), so `--golden-set` costs real proxy
+  calls; the 6-question default keeps that cheap.
+- `graph_missing: True` means Neo4j was unreachable and the run
+  degraded to vector-only (guardrail 3) — fix Neo4j and re-run for
+  the full hybrid numbers. An empty adjacency with a reachable
+  graph means the question linked no gazetteer seeds, so there was
+  nothing to expand from.
