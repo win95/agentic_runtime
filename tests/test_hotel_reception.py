@@ -156,6 +156,18 @@ def test_reception_skill_map_contract():
         "route", "report-booking", "report-task", "policy-lookup",
         "booking-lookup", "booking-change", "task-status",
     }
+
+
+def test_reception_booking_lookup_falls_back_to_find_guest():
+    """The booking-061 loop (2026-11-13): on 'Booking not found' the
+    agent must not repeat get_booking with the same id — it falls back
+    to find_guest for the real id, and never invents an id."""
+    skill_map = parse_skill_map(_frontmatter(), "reception")
+    goal = skill_map.node_by_id("booking-lookup").goal
+    assert "BK-####" in goal
+    assert "không bao giờ tự bịa mã" in goal
+    assert "KHÔNG gọi lại get_booking với cùng mã" in goal
+    assert "find_guest" in goal
     rendered = render_plan(skill_map)
     assert "confirm-booking" in rendered
     assert "create_booking" in rendered

@@ -38,6 +38,13 @@ transition table.
 - A step cap (``MAX_NODE_STEPS``) ends the run with a diagnostic error
   instead of cycling forever — the map's branches allow loops by design
   (sold out -> re-pick dates -> check again).
+- A per-node tool-call budget (``MAX_TOOL_CALLS_PER_NODE``, default 5)
+  plus an exact-repeat guard (``_NodeToolCallCap``) end a node whose
+  agent keeps calling tools: the step cap counts node executions, not
+  calls inside a node, so without this a model repeating one failing
+  call loops until the LangGraph recursion limit. A repeat of the
+  immediately preceding failed call is denied; past the budget the
+  node stops with a diagnostic error and the turn ends.
 
 The gate and the subgraph are two enforcement mechanisms for the same
 map; a run uses ONE. When the subgraph runs, the plan gate is NOT
@@ -54,7 +61,8 @@ import json
 import logging
 import re
 
-from langchain_core.messages import HumanMessage
+from langchain.agents.middleware import AgentMiddleware
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
@@ -73,6 +81,125 @@ SUBGRAPH_PILOT_MISSIONS = frozenset({"hotel_reception"})
 # (e.g. sold out -> pick other dates -> check again), so the cap is the
 # backstop against a model that keeps looping.
 MAX_NODE_STEPS = 12
+
+# Tool calls per node execution. The step cap above counts node
+# executions, not tool calls inside a node — a node agent runs until
+# the model stops calling tools, so a model repeating one failing call
+# (2026-11-13: get_booking with a bad id, looped until the LangGraph
+# recursion limit) never reaches NEXT: and the step cap never sees it.
+# This budget is the per-node backstop. 5 is generous for the reception
+# map: the heaviest node (booking-lookup) legitimately needs at most
+# find_guest + get_booking; every other node needs 1–2 calls.
+MAX_TOOL_CALLS_PER_NODE = 5
+
+
+class NodeToolCallBudgetExceededError(Exception):
+    """A node agent spent its per-node tool-call budget."""
+
+
+def _call_key(name: str, args: dict) -> tuple[str, str]:
+    try:
+        args_json = json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        args_json = repr(sorted(args.items()))
+    return (name, args_json)
+
+
+def _error_in_result(result) -> str | None:
+    """Error text if a tool result is a failure, else None.
+
+    Two shapes count as failure: a ToolMessage with status="error"
+    (raised tools, hook denials) and a successful result carrying an
+    {"error": ...} dict — the mock MCP convention (get_booking returns
+    {"error": "Booking not found: ..."} as data). The second shape is
+    the one the booking-061 loop hid behind: no exception, so no
+    PostToolUseFailure feedback ever fired and the agent just saw a
+    normal-looking tool result.
+    """
+    content = result.content if isinstance(result, ToolMessage) else result
+    if isinstance(result, ToolMessage) and result.status == "error":
+        return str(content)[:500]
+    if isinstance(content, dict) and isinstance(content.get("error"), str):
+        return content["error"][:500]
+    if isinstance(content, str):
+        try:
+            parsed = json.loads(content)
+        except (TypeError, ValueError):
+            return None
+        if isinstance(parsed, dict) and isinstance(parsed.get("error"), str):
+            return parsed["error"][:500]
+    return None
+
+
+class _NodeToolCallCap(AgentMiddleware):
+    """Per-node tool-call budget + exact-repeat guard (2026-11-13).
+
+    One instance serves one node agent; ``reset()`` is called before
+    each node execution, so the budget is per execution, not per run —
+    a node the flow legitimately revisits (sold out -> re-pick dates)
+    gets a fresh budget each time.
+
+    Two rules, checked in order on every call:
+    1. Budget: past ``max_calls`` calls in this execution, raise
+       ``NodeToolCallBudgetExceededError``. Raising (not denying) ends
+       the node immediately — a denial would still cost a model turn
+       per repeat, and a small model can burn the whole recursion
+       limit on denials. The raise must escape the hook layer, so
+       this middleware goes FIRST in the node agent's middleware list
+       (first = outermost): HookMiddleware converts exceptions from
+       inner layers into error ToolMessages, which would swallow it.
+    2. Exact repeat: a call identical to the immediately preceding
+       FAILED call (same name, same args) is denied with a message
+       naming the alternative, without executing. Only the immediate
+       predecessor counts — a model that tried something else in
+       between has changed strategy, and the budget still bounds it.
+    """
+
+    def __init__(self, max_calls: int = MAX_TOOL_CALLS_PER_NODE):
+        self.max_calls = max_calls
+        self.calls = 0
+        self.exceeded = False
+        self._last_failed: tuple[str, str] | None = None
+        self._last_error: str = ""
+
+    def reset(self) -> None:
+        self.calls = 0
+        self.exceeded = False
+        self._last_failed = None
+        self._last_error = ""
+
+    def wrap_tool_call(self, request, handler):
+        tool_call = request.tool_call or {}
+        name = str(tool_call.get("name") or "")
+        args = dict(tool_call.get("args") or {})
+        tool_call_id = str(tool_call.get("id") or "")
+        self.calls += 1
+        if self.calls > self.max_calls:
+            self.exceeded = True
+            raise NodeToolCallBudgetExceededError(
+                f"tool-call budget ({self.max_calls}) exceeded at '{name}'"
+            )
+        key = _call_key(name, args)
+        if self._last_failed is not None and key == self._last_failed:
+            return ToolMessage(
+                content=(
+                    f"You already called '{name}' with these exact arguments "
+                    f"and it failed ({self._last_error}). Do not repeat it — "
+                    f"call a different tool, or use different arguments, or "
+                    f"end your reply with NEXT: WAIT if you need information "
+                    f"from the guest first."
+                ),
+                tool_call_id=tool_call_id,
+                status="error",
+            )
+        result = handler(request)
+        error = _error_in_result(result)
+        if error is not None:
+            self._last_failed = key
+            self._last_error = error
+        else:
+            self._last_failed = None
+        return result
 
 # The model declares its branch choice as a line in its final text:
 #   NEXT: <node-id>     or     NEXT: END     or     NEXT: WAIT
@@ -186,6 +313,7 @@ def build_skill_subgraph(
     resume_nodes: frozenset[str] = frozenset(),
     node_executor=None,
     max_steps: int = MAX_NODE_STEPS,
+    max_tool_calls_per_node: int = MAX_TOOL_CALLS_PER_NODE,
 ):
     """Compile a SkillMap into a LangGraph whose nodes are the map's
     nodes and whose edges are the map's transition table.
@@ -196,11 +324,18 @@ def build_skill_subgraph(
     """
     agent_cache: dict[str, object] = {}
     model_cache: dict[str, object] = {}
+    cap_cache: dict[str, _NodeToolCallCap] = {}
 
     def node_agent(node):
         if node.id not in agent_cache:
             node_tools = tools_for_node(tools, node.tools)
             tool_names = ", ".join(t for t in node.tools) or "none"
+            # The cap goes FIRST (outermost): its budget raise must
+            # escape HookMiddleware, which converts inner exceptions
+            # into error ToolMessages — a swallowed raise would leave
+            # the model looping on error messages instead of stopping.
+            cap = _NodeToolCallCap(max_calls=max_tool_calls_per_node)
+            cap_cache[node.id] = cap
             agent_cache[node.id] = build_deep_agent(
                 node_tools,
                 system_prompt=(
@@ -210,7 +345,7 @@ def build_skill_subgraph(
                 ),
                 skills=skills,
                 model_config=model_config,
-                middleware=middleware,
+                middleware=[cap, *(middleware or [])],
                 backend=backend,
             )
         return agent_cache[node.id]
@@ -286,15 +421,36 @@ def build_skill_subgraph(
                 config["metadata"] = trace_metadata
             if trace_tags:
                 config["tags"] = trace_tags
+            errors = list(state.get("errors") or [])
             if node_executor is not None:
                 new_messages = node_executor(node, state, messages)
             elif node.tools:
                 agent = node_agent(node)
+                cap_cache[node.id].reset()
                 payload: dict = {"messages": messages}
                 if files:
                     payload["files"] = files
-                result = agent.invoke(payload, config=config) if config else agent.invoke(payload)
-                new_messages = result.get("messages") or []
+                try:
+                    if config:
+                        result = agent.invoke(payload, config=config)
+                    else:
+                        result = agent.invoke(payload)
+                    new_messages = result.get("messages") or []
+                except NodeToolCallBudgetExceededError as exc:
+                    # The node agent spent its tool-call budget: stop
+                    # the node here instead of letting the model burn
+                    # the recursion limit on further calls. NEXT: WAIT
+                    # ends the turn from any node (see _route).
+                    errors.append(
+                        f"Tool-call budget ({max_tool_calls_per_node} calls) "
+                        f"exceeded at node '{node.id}': {exc}"
+                    )
+                    new_messages = messages + [
+                        AIMessage(content=(
+                            f"Step '{node.id}' stopped: the tool-call budget "
+                            f"for this step is exhausted.\nNEXT: WAIT"
+                        ))
+                    ]
             else:
                 model = plain_model()
                 reply = (
@@ -303,7 +459,6 @@ def build_skill_subgraph(
                     else model.invoke(messages)
                 )
                 new_messages = messages + [reply]
-            errors = list(state.get("errors") or [])
             if steps >= max_steps:
                 errors.append(
                     f"Plan step cap ({max_steps} nodes) reached at '{node.id}'"

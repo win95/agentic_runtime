@@ -39,6 +39,16 @@ One run uses exactly one enforcement mechanism, chosen in
   only when the session already has prior turns — so a fresh turn
   stops at the confirmation question and the guest's confirmation
   turn resumes into the booking. Step cap: 12 node executions per run.
+  A second, finer cap lives INSIDE each node: a per-node tool-call
+  budget (`MAX_TOOL_CALLS_PER_NODE`, default 5) plus an exact-repeat
+  guard (`_NodeToolCallCap`, first in the node agent's middleware
+  list so its raise escapes the hook layer). The step cap counts node
+  executions, not calls inside a node — without this, a model
+  repeating one failing call (2026-11-13: `get_booking` with a bad id,
+  looped to the recursion limit) never reaches `NEXT:`. A repeat of
+  the immediately preceding failed call is denied with a message
+  naming the alternative; past the budget the node stops with a
+  diagnostic error and the turn ends (`NEXT: WAIT`).
   The subgraph path does **not** render the prose plan block and does
   **not** attach the plan gate — the graph itself is the enforcement.
   `run_skill_subgraph` returns the same outcome shape as

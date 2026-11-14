@@ -10,15 +10,22 @@ Mission Graph takes the subgraph path for hotel_reception.
 
 import re
 
+from langchain.agents.middleware import ToolCallRequest
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import tool as langchain_tool
 
 from app.services import mission_service
 from runtime import deep_agent as deep_agent_module
 from runtime import skill_subgraph as skill_subgraph_module
+from runtime.hooks.middleware import HookMiddleware
+from runtime.hooks.registry import default_registry
 from runtime.mission_graph import run_mission
 from runtime.skill_subgraph import (
     MAX_NODE_STEPS,
+    MAX_TOOL_CALLS_PER_NODE,
+    NodeToolCallBudgetExceededError,
+    _NodeToolCallCap,
     allowed_next,
     build_skill_subgraph,
     parse_next,
@@ -433,3 +440,196 @@ def test_deep_agent_node_runs_subgraph_for_hotel(db_session, monkeypatch):
     assert "ENFORCED" not in seen["system_prompt"]
     assert seen["run_kwargs"]["skill_maps"][0].skill_name == "reception"
     assert MAX_NODE_STEPS == 12  # the loop cap, pinned here
+
+
+# --- per-node tool-call cap (the booking-061 loop, 2026-11-13) -------
+
+
+def _cap_request(name: str, args: dict | None = None,
+                 call_id: str = "call-1") -> ToolCallRequest:
+    return ToolCallRequest(
+        tool_call={"name": name, "args": args or {}, "id": call_id},
+        tool=None, state={}, runtime=None,
+    )
+
+
+def test_node_tool_call_cap_denies_exact_repeat_after_error():
+    """A call identical to the immediately preceding FAILED call is
+    denied without executing — the booking-061 loop's second call."""
+    calls: list = []
+
+    def handler(request):
+        calls.append(request.tool_call["args"])
+        return ToolMessage(
+            content='{"error": "Booking not found: BK-9999"}',
+            tool_call_id=request.tool_call["id"],
+        )
+
+    cap = _NodeToolCallCap()
+    first = cap.wrap_tool_call(
+        _cap_request("t_get_booking", {"booking_id": "BK-9999"}), handler)
+    assert "Booking not found" in str(first.content)
+    second = cap.wrap_tool_call(
+        _cap_request("t_get_booking", {"booking_id": "BK-9999"}, "call-2"),
+        handler)
+    assert isinstance(second, ToolMessage) and second.status == "error"
+    assert "already called" in str(second.content)
+    assert "Do not repeat it" in str(second.content)
+    assert len(calls) == 1  # the repeat never executed
+
+
+def test_node_tool_call_cap_allows_different_args_after_error():
+    """The guard is an exact-repeat guard, not a ban on the tool: a
+    different booking id after a not-found is allowed through."""
+    calls: list = []
+
+    def handler(request):
+        args = request.tool_call["args"]
+        calls.append(args["booking_id"])
+        if args["booking_id"] == "BK-9999":
+            return ToolMessage(
+                content='{"error": "Booking not found: BK-9999"}',
+                tool_call_id=request.tool_call["id"],
+            )
+        return ToolMessage(content="ok", tool_call_id=request.tool_call["id"])
+
+    cap = _NodeToolCallCap()
+    cap.wrap_tool_call(_cap_request("t_get_booking", {"booking_id": "BK-9999"}), handler)
+    result = cap.wrap_tool_call(
+        _cap_request("t_get_booking", {"booking_id": "BK-1001"}, "call-2"), handler)
+    assert result.content == "ok"
+    assert calls == ["BK-9999", "BK-1001"]
+
+
+def test_node_tool_call_cap_allows_repeat_after_success():
+    """A repeat is only blocked after a failure — retrying a call
+    that succeeded is a fresh call, not a loop."""
+    calls: list = []
+
+    def handler(request):
+        calls.append(1)
+        return ToolMessage(content="ok", tool_call_id=request.tool_call["id"])
+
+    cap = _NodeToolCallCap()
+    cap.wrap_tool_call(_cap_request("t_loop", {}), handler)
+    cap.wrap_tool_call(_cap_request("t_loop", {}, "call-2"), handler)
+    assert len(calls) == 2
+
+
+def test_node_tool_call_cap_raises_after_budget():
+    cap = _NodeToolCallCap(max_calls=2)
+    calls: list = []
+
+    def handler(request):
+        calls.append(1)
+        return ToolMessage(content="ok", tool_call_id=request.tool_call["id"])
+
+    cap.wrap_tool_call(_cap_request("t_loop", {}), handler)
+    cap.wrap_tool_call(_cap_request("t_loop", {}, "call-2"), handler)
+    try:
+        cap.wrap_tool_call(_cap_request("t_loop", {}, "call-3"), handler)
+    except NodeToolCallBudgetExceededError as exc:
+        assert "budget" in str(exc)
+    else:
+        raise AssertionError("expected the budget raise on the 3rd call")
+    assert len(calls) == 2
+    cap.reset()
+    cap.wrap_tool_call(_cap_request("t_loop", {}), handler)
+    assert len(calls) == 3  # a fresh execution gets a fresh budget
+
+
+_LOOP_CALLS: list = []
+_BOOKING_CALLS: list = []
+
+
+@langchain_tool
+def t_loop(booking_id: str) -> str:
+    """Loop-prone stand-in: always succeeds, so only the budget stops it."""
+    _LOOP_CALLS.append(booking_id)
+    return "ok"
+
+
+@langchain_tool
+def t_get_booking(booking_id: str) -> dict:
+    """Stand-in for the mock's get_booking: always not-found, as a
+    returned {"error": ...} dict — the shape the loop hid behind."""
+    _BOOKING_CALLS.append(booking_id)
+    return {"error": f"Booking not found: {booking_id}"}
+
+
+def _call_message(name: str, args: dict, call_id: str) -> AIMessage:
+    return AIMessage(content="", tool_calls=[
+        {"name": name, "args": args, "id": call_id, "type": "tool_call"},
+    ])
+
+
+class _LoopFakeModel(GenericFakeChatModel):
+    """Fake model that tolerates tool binding (the real deep agent
+    binds the node tools before the first model call)."""
+
+    def bind_tools(self, tools, **kwargs):
+        return self
+
+
+def _run_real_node(monkeypatch, flow, tools, model, middleware):
+    """A real node agent (no node-executor seam) driven by a fake model.
+
+    The tools are registered in the global registry first: the
+    HookMiddleware's enforce_layer denies any tool it does not find
+    there, and the conftest autouse fixture restores the registry
+    after the test.
+    """
+    from runtime.tools import registry as tool_registry
+
+    for t in tools:
+        tool_registry.register(t, capability="test")
+    monkeypatch.setattr(deep_agent_module, "get_chat_model", lambda: model)
+    monkeypatch.setattr(deep_agent_module, "build_chat_model", lambda cfg=None: model)
+    compiled = build_skill_subgraph(
+        flow, tools=tools, system_prompt="base", middleware=middleware,
+    )
+    return run_skill_subgraph(
+        compiled, {"mission_id": "test", "objective": "test"},
+        {"message": "hi"}, skill_maps=[flow],
+    )
+
+
+def test_node_tool_call_cap_stops_loop_in_real_node_agent(monkeypatch):
+    """The booking-061 loop, end to end: a node agent repeating one
+    call is stopped by the per-node budget — the tool runs at most
+    MAX_TOOL_CALLS_PER_NODE times and the run ends with a diagnostic
+    error instead of looping to the recursion limit. HookMiddleware is
+    in the stack, proving the budget raise escapes the hook layer."""
+    _LOOP_CALLS.clear()
+    model = _LoopFakeModel(messages=iter([
+        _call_message("t_loop", {"booking_id": "BK-9999"}, f"call-{i}")
+        for i in range(8)
+    ]))
+    flow = _map([{"id": "lookup", "tools": ["t_loop"], "terminal": True}],
+              start="lookup")
+    result = _run_real_node(
+        monkeypatch, flow, [t_loop], model,
+        [HookMiddleware(default_registry(), mission_id="test")],
+    )
+    assert len(_LOOP_CALLS) == MAX_TOOL_CALLS_PER_NODE
+    assert "budget" in " ".join(result["errors"])
+    assert result["visited_nodes"] == ["lookup"]
+
+
+def test_node_tool_call_cap_denies_repeat_in_real_node_agent(monkeypatch):
+    """Same wiring, error-dict tool: the second identical get_booking
+    is denied without executing — the tool runs once, not in a loop."""
+    _BOOKING_CALLS.clear()
+    model = _LoopFakeModel(messages=iter([
+        _call_message("t_get_booking", {"booking_id": "BK-9999"}, "call-1"),
+        _call_message("t_get_booking", {"booking_id": "BK-9999"}, "call-2"),
+        AIMessage(content="Không tìm thấy booking này.\nNEXT: END"),
+    ]))
+    flow = _map([{"id": "lookup", "tools": ["t_get_booking"], "terminal": True}],
+              start="lookup")
+    result = _run_real_node(
+        monkeypatch, flow, [t_get_booking], model,
+        [HookMiddleware(default_registry(), mission_id="test")],
+    )
+    assert _BOOKING_CALLS == ["BK-9999"]  # executed once
+    assert result["visited_nodes"] == ["lookup"]

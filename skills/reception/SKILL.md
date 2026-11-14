@@ -69,7 +69,7 @@ map:
       tools: [search_policy_documents, read_policy_document]
       terminal: true
     - id: booking-lookup
-      goal: Tra cứu booking của khách hiện tại theo mã, hoặc tìm khách trước rồi mới tra booking của họ; đăng ký khách mới khi chưa có.
+      goal: Tra cứu booking của khách hiện tại theo mã — mã thật có dạng BK-####, không bao giờ tự bịa mã — hoặc tìm khách trước rồi mới tra booking của họ; đăng ký khách mới khi chưa có. Nếu get_booking trả về 'Booking not found' thì KHÔNG gọi lại get_booking với cùng mã — gọi find_guest bằng tên hoặc số điện thoại của khách để lấy mã đúng rồi tra lại; nếu không có tên hay số điện thoại thì hỏi khách.
       tools: [find_guest, register_guest, get_booking]
       terminal: true
     - id: booking-change

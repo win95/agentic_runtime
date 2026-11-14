@@ -123,7 +123,16 @@ hiện chỉ có `hotel_reception`).
   router là chốt chặn.
 - **Chống lặp:** tối đa 12 node mỗi run (`MAX_NODE_STEPS`); quá thì
   run kết thúc với lỗi chẩn đoán thay vì xoay vòng (map cho phép lặp
-  theo thiết kế: hết phòng → chọn ngày khác → kiểm tra lại).
+  theo thiết kế: hết phòng → chọn ngày khác → kiểm tra lại). Trong mỗi
+  node còn có budget riêng: tối đa 5 tool call mỗi lần chạy node
+  (`MAX_TOOL_CALLS_PER_NODE`) — cap 12 node đếm số lần chạy node chứ
+  không đếm call trong node, nên model lặp một call lỗi (2026-11-13:
+  `get_booking` với mã sai, lặp tới recursion limit) không bao giờ tới
+  được `NEXT:`. Gọi lặp y hệt call vừa lỗi bị từ chối kèm hướng thay
+  thế; quá budget thì node dừng với lỗi chẩn đoán và turn kết thúc.
+  Node `booking-lookup` còn có luật fallback trong skill: get_booking
+  báo not-found thì không gọi lại cùng mã mà dùng `find_guest` lấy mã
+  đúng, và không bao giờ tự bịa mã booking (mã thật dạng `BK-####`).
 - **Kết quả giống hệt agent tự do:** `run_skill_subgraph` trả cùng
   shape outcome (`summary` / `evidence` / `actions_taken` / `errors` /
   `plan_trace`, xem `outcome_from_messages` trong
