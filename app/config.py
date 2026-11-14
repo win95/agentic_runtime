@@ -20,6 +20,11 @@ class Settings(BaseSettings):
     environment: str = "dev"
     # Empty => API-key auth disabled (DEV ONLY). Production must set API_KEY.
     api_key: str = ""
+    # JWT secret shared with the user service (services/user_service):
+    # the service signs tokens with it, this API verifies them. Empty =
+    # JWT auth is not configured (Bearer tokens are ignored). The two
+    # values MUST match wherever both services run.
+    jwt_secret: str = ""
 
     # PostgreSQL (missions, agents, tools, executions, results)
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/agentic_runtime"

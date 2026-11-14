@@ -1035,3 +1035,28 @@ session 10 turns / 4.096 token.
   `MCP_SERVER_URL` + `MCP_TOOL_CAPABILITIES` trong `.env` — xem
   `docs/hotel-reception.md`).
   Chi tiết: `docs/hotel-reception.md`.
+
+## 26. User service — quản lý User, đăng nhập bằng JWT
+
+Service độc lập quản lý User (cùng repo, thư mục `services/user_service/`
+tự chủ hoàn toàn): đăng ký, đăng nhập, admin quản lý user. Không import
+gì từ `app/`, DB riêng (`user_service`), migration chain riêng
+(`alembic_version_user_service`); nối với hệ thống chỉ bằng JWT ký chung
+`JWT_SECRET`.
+
+- API (port 8001): `POST /auth/register` (mở), `POST /auth/login` →
+  JWT HS256 24h, `GET /auth/me`, `GET /admin/users`, `PATCH
+  /admin/users/{id}` (`is_active`; admin không tự disable mình).
+- Platform API chấp nhận cùng token ở `/executions`
+  (`Authorization: Bearer`): run tạo ra mang `user_id` (migration
+  `0010`), user chỉ thấy execution của mình (lấy của người khác → 404).
+  Gọi bằng `X-API-Key` như cũ vẫn chạy, `user_id` để NULL.
+- Sau khi pull: tạo DB `user_service` (compose volume mới tự tạo;
+  volume cũ chạy `createdb user_service`), `make migrate-users` +
+  `make migrate`, set cùng `JWT_SECRET` ở cả hai service, `make
+  seed-admin` một lần, restart API + chạy user service
+  (`make run-user-service` hoặc `docker compose up -d user-service`).
+- Chi tiết: `docs/user-service.md`, `services/user_service/README.md`.
+- Chưa có ở base: refresh token, quên mật khẩu, xác minh email, OAuth,
+  per-user cost cap, rate limit login, CORS. Session chưa gắn user
+  (execution đã mang `user_id`).

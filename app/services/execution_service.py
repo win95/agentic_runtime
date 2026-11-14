@@ -47,7 +47,11 @@ def dispatch_execution(execution_id: str) -> None:
 
 
 def create_execution(
-    db: Session, mission_id: str, input_data: dict, session_id: str | None = None
+    db: Session,
+    mission_id: str,
+    input_data: dict,
+    session_id: str | None = None,
+    user_id: str | None = None,
 ) -> tuple[models.Execution | None, list[str]]:
     """Create a QUEUED execution. Returns (execution, problems).
 
@@ -91,6 +95,7 @@ def create_execution(
         mission_version=mission.version,
         agent_id=mission.agent_id,
         session_id=session_id,
+        user_id=user_id,
         input=input_data,
         status="QUEUED",
     )
@@ -114,14 +119,21 @@ def get_execution(db: Session, execution_id: str) -> models.Execution | None:
 
 
 def list_executions(
-    db: Session, limit: int = 50, session_id: str | None = None
+    db: Session,
+    limit: int = 50,
+    session_id: str | None = None,
+    user_id: str | None = None,
 ) -> list[models.Execution]:
     """Executions, newest first. ``session_id`` narrows to one session
     (a filter, not an identifier — an unknown id just matches nothing).
+    ``user_id`` narrows to one user's runs; callers pass it only for a
+    JWT user, so a user never sees another user's executions.
     """
     query = db.query(models.Execution)
     if session_id is not None:
         query = query.filter(models.Execution.session_id == session_id)
+    if user_id is not None:
+        query = query.filter(models.Execution.user_id == user_id)
     return query.order_by(models.Execution.created_at.desc()).limit(limit).all()
 
 

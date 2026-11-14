@@ -1,4 +1,4 @@
-.PHONY: install install-requirements run-api run-worker run-beat migrate test lint docker-up docker-down seed seed-dry-run seed-edge ingest ingest-dry-run demo eval eval-real eval-genai eval-genai-real langgraph-dev gen-synthetic-data eval-tool-use eval-retrieval train-embedding train-llm mlflow-report
+.PHONY: install install-requirements run-api run-worker run-beat migrate migrate-users run-user-service seed-admin test lint docker-up docker-down seed seed-dry-run seed-edge ingest ingest-dry-run demo eval eval-real eval-genai eval-genai-real langgraph-dev gen-synthetic-data eval-tool-use eval-retrieval train-embedding train-llm mlflow-report
 
 # Prefer the project venv when it exists (this checkout), else system python.
 PYTHON := $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python)
@@ -12,6 +12,10 @@ install-requirements:
 
 run-api:
 	uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+
+# User service (independent service, same repo) — port 8001.
+run-user-service:
+	uvicorn services.user_service.main:app --host 0.0.0.0 --port 8001 --reload
 
 run-worker:
 	celery -A app.worker.celery_app worker --loglevel=info
@@ -29,11 +33,21 @@ run-beat:
 migrate:
 	$(PYTHON) -m alembic upgrade head
 
+# User-service migrations (own chain, own DB — see
+# services/user_service/README.md). Run from services/user_service.
+migrate-users:
+	cd services/user_service && $(PYTHON) -m alembic upgrade head
+
+# One-off admin seed for the user service. Needs ADMIN_EMAIL and
+# ADMIN_PASSWORD in the environment. Idempotent.
+seed-admin:
+	$(PYTHON) -m services.user_service.seed_admin
+
 test:
 	$(PYTHON) -m pytest -q
 
 lint:
-	ruff check app runtime infra ingest ontology tests seeds scripts alembic
+	ruff check app runtime infra ingest ontology tests seeds scripts alembic services
 
 docker-up:
 	docker compose up -d --build

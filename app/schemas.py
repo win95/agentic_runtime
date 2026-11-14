@@ -120,6 +120,9 @@ class ExecutionRead(BaseModel):
     agent_version: int | None = None
     agent_version_drift: bool = False
     session_id: str | None = None
+    # Owner of the run (JWT "sub"); None for service-key calls and runs
+    # created before users existed.
+    user_id: str | None = None
     status: str
     error: str | None = None
     created_at: datetime | None = None

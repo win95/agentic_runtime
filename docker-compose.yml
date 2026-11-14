@@ -12,6 +12,11 @@ services:
       - "5432:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
+      # First-init only: creates the user service's own database
+      # (docker/postgres/01-create-user-service-db.sql). An existing
+      # volume needs `createdb user_service` instead — init scripts do
+      # not re-run.
+      - ./docker/postgres:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
       interval: 5s
@@ -127,6 +132,10 @@ services:
     build: .
     environment:
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-agentic_runtime}
+      # Shared with the user service — must match its JWT_SECRET, or
+      # Bearer tokens fail verification. Dev-only default, like the
+      # other ${VAR:-...} values in this file.
+      JWT_SECRET: ${JWT_SECRET:-dev-only-change-me}
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
       QDRANT_URL: http://qdrant:6333
@@ -165,6 +174,29 @@ services:
         condition: service_healthy
       minio:
         condition: service_healthy
+
+  user-service:
+    build:
+      context: .
+      dockerfile: services/user_service/Dockerfile
+    environment:
+      USER_SERVICE_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/user_service
+      # Must match the api service's JWT_SECRET — the service signs
+      # tokens with it, the API verifies them.
+      JWT_SECRET: ${JWT_SECRET:-dev-only-change-me}
+    env_file:
+      - path: .env
+        required: false  # optional: create from .env.example to inject secrets
+    ports:
+      - "8001:8001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   worker:
     build: .

@@ -75,7 +75,9 @@ postgres-checkpoint = ["langgraph-checkpoint-postgres>=2.0,<4"]
 include = ["app*", "runtime*", "infra*", "ingest*", "ontology*", "seeds*"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+# The user service carries its own tests under services/; one `pytest`
+# covers both trees.
+testpaths = ["tests", "services"]
 asyncio_mode = "auto"
 
 [tool.ruff]

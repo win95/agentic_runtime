@@ -12,11 +12,17 @@ from sqlalchemy.orm import Session
 
 from app import schemas
 from app.core.db import get_db
-from app.core.security import require_api_key
+from app.core.security import (
+    get_current_user,
+    require_api_key_or_user,
+    require_own_execution,
+)
 from app.services import execution_service
 
 router = APIRouter(
-    prefix="/executions", tags=["executions"], dependencies=[Depends(require_api_key)]
+    prefix="/executions",
+    tags=["executions"],
+    dependencies=[Depends(require_api_key_or_user)],
 )
 
 
@@ -29,6 +35,7 @@ def _to_read(execution) -> schemas.ExecutionRead:
         agent_version=execution.agent_version,
         agent_version_drift=execution.agent_version_drift,
         session_id=execution.session_id,
+        user_id=execution.user_id,
         status=execution.status,
         error=execution.error,
         created_at=execution.created_at,
@@ -38,10 +45,18 @@ def _to_read(execution) -> schemas.ExecutionRead:
 
 
 @router.post("", response_model=schemas.ExecutionRead, status_code=202)
-def create_execution(payload: schemas.ExecutionCreate, db: Session = Depends(get_db)):
+def create_execution(
+    payload: schemas.ExecutionCreate,
+    db: Session = Depends(get_db),
+    user: dict | None = Depends(get_current_user),
+):
     try:
         execution, problems = execution_service.create_execution(
-            db, payload.mission_id, payload.input, session_id=payload.session_id
+            db,
+            payload.mission_id,
+            payload.input,
+            session_id=payload.session_id,
+            user_id=user.get("sub") if user is not None else None,
         )
     except Exception as exc:  # dispatch failure (broker down, ...)
         raise HTTPException(status_code=502, detail=f"dispatch failed: {exc}") from exc
@@ -59,25 +74,42 @@ def list_executions(
     limit: int = Query(default=50, ge=1, le=100),
     session_id: str | None = Query(default=None),
     db: Session = Depends(get_db),
+    user: dict | None = Depends(get_current_user),
 ):
     return [
         _to_read(e)
         for e in execution_service.list_executions(
-            db, limit=limit, session_id=session_id
+            db,
+            limit=limit,
+            session_id=session_id,
+            user_id=user.get("sub") if user is not None else None,
         )
     ]
 
 
 @router.get("/{execution_id}", response_model=schemas.ExecutionRead)
-def get_execution(execution_id: str, db: Session = Depends(get_db)):
+def get_execution(
+    execution_id: str,
+    db: Session = Depends(get_db),
+    user: dict | None = Depends(get_current_user),
+):
     execution = execution_service.get_execution(db, execution_id)
     if execution is None:
         raise HTTPException(status_code=404, detail="Execution not found")
+    require_own_execution(execution, user)
     return _to_read(execution)
 
 
 @router.post("/{execution_id}/cancel", response_model=schemas.ExecutionRead)
-def cancel_execution(execution_id: str, db: Session = Depends(get_db)):
+def cancel_execution(
+    execution_id: str,
+    db: Session = Depends(get_db),
+    user: dict | None = Depends(get_current_user),
+):
+    execution = execution_service.get_execution(db, execution_id)
+    if execution is None:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    require_own_execution(execution, user)
     execution = execution_service.cancel_execution(db, execution_id)
     if execution is None:
         raise HTTPException(status_code=404, detail="Execution not found")

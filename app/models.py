@@ -184,6 +184,12 @@ class Execution(Base):
     session_id: Mapped[str | None] = mapped_column(
         String(128), nullable=True, index=True
     )
+    # Owner of the run: the user id (JWT "sub") when a logged-in user
+    # created it, NULL for service-key calls and runs that predate
+    # users. A user only ever sees their own executions.
+    user_id: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, index=True
+    )
     mission_version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     agent_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     # Option C: which AgentVersion ran (NULL when the run predates

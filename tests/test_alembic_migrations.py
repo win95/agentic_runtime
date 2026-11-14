@@ -53,7 +53,7 @@ def test_alembic_upgrade_head_then_downgrade_base(tmp_path):
     db_path = tmp_path / "migrate-test.db"
     result = _alembic(tmp_path, "upgrade", "head")
     assert result.returncode == 0, result.stderr
-    assert _version(db_path) == [("0009",)]
+    assert _version(db_path) == [("0010",)]
     tables = _tables(db_path)
     assert {"missions", "executions", "tools", "agent_versions"} <= tables
     assert "ontology_entities" in tables
@@ -64,6 +64,7 @@ def test_alembic_upgrade_head_then_downgrade_base(tmp_path):
         assert "read_only" in cols
         exec_cols = [row[1] for row in conn.execute("PRAGMA table_info(executions)")]
         assert "session_id" in exec_cols
+        assert "user_id" in exec_cols
         agent_cols = [row[1] for row in conn.execute("PRAGMA table_info(agents)")]
         assert "session_history" in agent_cols
         version_cols = [
@@ -109,4 +110,4 @@ def test_alembic_current_matches_head(tmp_path):
     assert result.returncode == 0, result.stderr
     result = _alembic(tmp_path, "current")
     assert result.returncode == 0, result.stderr
-    assert "0009" in result.stdout
+    assert "0010" in result.stdout
