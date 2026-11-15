@@ -62,6 +62,42 @@ def report_location(key: str) -> str:
     return f"minio://{settings.minio_reports_bucket}/{key}"
 
 
+def ensure_documents_bucket() -> None:
+    """Create the `documents` bucket (managed documents) if missing."""
+    ensure_bucket(settings.minio_documents_bucket)
+
+
+def upload_document_bytes(
+    key: str, data: bytes, content_type: str = "application/octet-stream"
+) -> str:
+    """Upload bytes to the documents bucket. Returns the object key."""
+    client = get_client()
+    if client is None:
+        raise RuntimeError("MinIO not configured (MINIO_ACCESS_KEY/SECRET_KEY empty)")
+    ensure_documents_bucket()
+    client.put_object(
+        settings.minio_documents_bucket,
+        key,
+        io.BytesIO(data),
+        len(data),
+        content_type=content_type,
+    )
+    return key
+
+
+def download_document_bytes(key: str) -> bytes:
+    """Download bytes from the documents bucket."""
+    client = get_client()
+    if client is None:
+        raise RuntimeError("MinIO not configured (MINIO_ACCESS_KEY/SECRET_KEY empty)")
+    response = client.get_object(settings.minio_documents_bucket, key)
+    try:
+        return response.read()
+    finally:
+        response.close()
+        response.release_conn()
+
+
 def upload_bytes(key: str, data: bytes, content_type: str = "application/octet-stream") -> str:
     client = get_client()
     if client is None:

@@ -36,7 +36,7 @@ from app.config import settings
 from app.core.db import SessionLocal
 from app.models import IngestQuarantine, IngestRun
 from ingest import FILE_TYPES
-from ingest.loaders import LOADERS
+from ingest.loaders import LOADERS, documented_by_relations, load_relations
 from ingest.schemas import ROW_MODELS
 from ingest.sources import LocalDirSource, MinioInboxSource
 
@@ -170,6 +170,21 @@ def process_file(db, name: str, content: bytes, *, force: bool = False,
         ok, load_failures = loader(valid)
     failures.extend(load_failures)
 
+    if row_type == "documents" and ok > 0:
+        # Base ingest fix: a document about an asset also gets its
+        # DOCUMENTED_BY edge in the canonical ontology, so the hybrid
+        # retrieval graph arm can reach it. Same batch session; the
+        # relations loader's stable source_event_id makes a re-run
+        # replay, not duplicate. A failed edge is quarantined like
+        # any other load failure (the file becomes PARTIAL); the
+        # documents themselves already loaded, so the file never
+        # FAILS on the edges alone. Derived edges do not count in
+        # rows_ok — that counts rows read from the file.
+        _, rel_failures = load_relations(
+            db, documented_by_relations(valid), source=name
+        )
+        failures.extend(rel_failures)
+
     status = "SUCCEEDED" if not failures else "PARTIAL"
     run = _record_run(db, source=name, status=status, rows_ok=ok,
                       rows_failed=len(failures), errors=[],
@@ -242,6 +257,13 @@ def retry_quarantine(db, *, limit: int = 100) -> dict:
         except Exception as exc:  # noqa: BLE001 — stays pending
             item.error = str(exc)[:2000]
             continue
+        if row_type == "documents" and ok and not failures:
+            # Same DOCUMENTED_BY derivation as process_file: a
+            # retried document about an asset gets its edge too.
+            _, rel_failures = load_relations(
+                db, documented_by_relations([row]), source=item.source
+            )
+            failures = rel_failures
         if failures:
             item.error = str(failures[0]["error"])[:2000]
             continue

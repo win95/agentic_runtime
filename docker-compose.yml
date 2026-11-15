@@ -92,6 +92,7 @@ services:
       mc mb --ignore-existing local/${MINIO_BUCKET:-agentic-runtime};
       mc mb --ignore-existing local/${MINIO_REPORTS_BUCKET:-reports};
       mc mb --ignore-existing local/${INGEST_MINIO_BUCKET:-ingest-inbox};
+      mc mb --ignore-existing local/${MINIO_DOCUMENTS_BUCKET:-documents};
       "
 
   # Optional: start with `docker compose --profile observability up`.

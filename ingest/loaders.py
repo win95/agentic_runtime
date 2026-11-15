@@ -89,6 +89,39 @@ def load_documents(rows: list[DocumentRow], embeddings=None) -> tuple[int, list[
     return ok, []
 
 
+def documented_by_relations(rows: list[DocumentRow]) -> list[RelationRow]:
+    """DOCUMENTED_BY edges for documents about an asset.
+
+    Base ingest fix: the hybrid retrieval graph arm reads Neo4j, but
+    the generic inbox ingest never wrote Asset → Document edges to
+    the canonical ontology (only the demo seed had them, in
+    ``seeds/demo_data.py``). Each doc with an asset_id — explicit on
+    the row, or filled from the grounded linking table by
+    ``with_document_links`` (same fields the Qdrant payload carries)
+    — yields one edge (Asset, asset_id) —DOCUMENTED_BY→ (Document,
+    doc id). A doc with no asset_id yields no edge (never invented).
+    Component/building links stay Qdrant-payload-only.
+    """
+    from runtime.retrieval_linking import with_document_links
+
+    relations = []
+    for row in rows:
+        linked = with_document_links(row.model_dump(mode="json"))
+        asset_id = linked.get("asset_id")
+        if not asset_id:
+            continue
+        relations.append(
+            RelationRow(
+                from_id=asset_id,
+                from_label="Asset",
+                relation="DOCUMENTED_BY",
+                to_id=row.id,
+                to_label="Document",
+            )
+        )
+    return relations
+
+
 def load_relations(
     db, rows: list[RelationRow], *, source: str = "ingest"
 ) -> tuple[int, list[dict]]:

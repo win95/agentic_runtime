@@ -24,6 +24,9 @@ ingest.run.run_batch()
   │     Qdrant (documents): upsert theo uuid5 của id, điểm đã có bị skip
   │     Ontology canonical (relations): OntologyWriteService,
   │     rồi projection → Neo4j (MERGE)
+  │     documents: ngoài Qdrant còn ghi DOCUMENTED_BY (Asset → Document,
+  │     từ asset_id) vào ontology canonical, để graph arm của hybrid
+  │     retrieval đi từ asset tới được tài liệu
   ├─ dòng lỗi → bảng ingest_quarantine (giữ nguyên row JSON + lỗi)
   └─ mỗi file → 1 dòng ingest_runs (SUCCEEDED / PARTIAL / FAILED)
 ```
@@ -40,7 +43,7 @@ Một file là một JSON array; mỗi phần tử là một dòng. Tên file qu
 | `faults.json` | id, asset_id, code, title, description?, severity (low/medium/high), occurred_at, resolved_at?, technician?, action? | Postgres `fault_history` |
 | `maintenance.json` | id, asset_id, date, action, technician?, notes? | Postgres `maintenance_records` |
 | `sensor_readings.json` | id, asset_id, metric (lower_snake_case), value, unit?, at | Postgres `sensor_readings` |
-| `documents.json` | id, title, content (≤10000 ký tự), category? | Qdrant `technical_documents` |
+| `documents.json` | id, title, content (≤10000 ký tự), category?, asset_id? | Qdrant `technical_documents` + DOCUMENTED_BY (Asset → Document) vào canonical khi có asset_id |
 | `relations.json` | from_id, from_label, relation (UPPER_SNAKE_CASE), to_id, to_label | Ontology canonical → Neo4j graph |
 
 `resolved_at` phải sau `occurred_at`. Ngày viết ISO (`2026-11-03T09:15:00`).

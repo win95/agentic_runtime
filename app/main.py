@@ -17,6 +17,7 @@ from app.core.db import init_db
 from app.routers import (
     agent_versions,
     agents,
+    documents,
     executions,
     missions,
     models,
@@ -74,6 +75,7 @@ def create_app() -> FastAPI:
     app.include_router(schedules.router)
     app.include_router(ontology.router)
     app.include_router(permissions.router)
+    app.include_router(documents.router)
     return app
 
 

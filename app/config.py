@@ -92,6 +92,7 @@ class Settings(BaseSettings):
     minio_secret_key: str = ""
     minio_bucket: str = "agentic-runtime"
     minio_reports_bucket: str = "reports"
+    minio_documents_bucket: str = "documents"
     minio_secure: bool = False
 
     # MLflow (primary observability: tracing, eval, prompt registry)

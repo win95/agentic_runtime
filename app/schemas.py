@@ -130,6 +130,25 @@ class ExecutionRead(BaseModel):
     finished_at: datetime | None = None
 
 
+# --- Document Management (docs/documents.md) ---
+class DocumentRead(BaseModel):
+    doc_id: str
+    version: int
+    title: str
+    filename: str
+    content_type: str
+    content_hash: str
+    size_bytes: int
+    owner_user_id: str | None = None
+    asset_id: str | None = None
+    created_at: datetime | None = None
+
+
+class DocumentGrantCreate(BaseModel):
+    principal_user_id: str
+    permission: str = "read"
+
+
 # --- Permission requests (Option C) ---
 class PermissionRequestRead(BaseModel):
     request_id: str

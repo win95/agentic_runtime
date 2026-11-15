@@ -293,6 +293,73 @@ class LongTermMemory(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 
+class Document(Base):
+    """One version of a managed document (docs/documents.md).
+
+    One row per version, never overwritten: a new upload of the same
+    ``doc_id`` is a new row with ``version`` + 1 and a new MinIO
+    object (``docs/{doc_id}/v{version}/{filename}``). The latest
+    version of a doc is its highest ``version``. ``owner_user_id`` is
+    the JWT ``sub`` that uploaded it, or NULL for a service-key
+    upload (service-owned). ``asset_id`` links the document to the
+    retrieval corpus when known (same meaning as the
+    ``DocumentRow.asset_id`` ingest field). Access is NOT decided
+    here — ``DocumentACL`` + ``app/services/document_service.py``
+    decide it, fail-closed.
+    """
+
+    __tablename__ = "documents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    doc_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    version: Mapped[int] = mapped_column(Integer, nullable=False)
+    title: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    filename: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    object_key: Mapped[str] = mapped_column(String(512), nullable=False, default="")
+    content_type: Mapped[str] = mapped_column(
+        String(128), nullable=False, default="application/octet-stream"
+    )
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    owner_user_id: Mapped[str | None] = mapped_column(
+        String(128), nullable=True, index=True
+    )
+    asset_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("doc_id", "version", name="uq_documents_doc_id_version"),
+    )
+
+
+class DocumentACL(Base):
+    """One ACL grant on a document (all its versions).
+
+    ``principal_user_id`` is a JWT ``sub``; ``permission`` is
+    ``read`` or ``write`` (a write grant implies read). The owner
+    needs no row. No row + not the owner = no access, for every
+    caller including service-key calls — there is no wildcard
+    principal in this table by design.
+    """
+
+    __tablename__ = "document_acls"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    doc_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    principal_user_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    permission: Mapped[str] = mapped_column(String(16), nullable=False, default="read")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "doc_id",
+            "principal_user_id",
+            "permission",
+            name="uq_document_acls_doc_principal_permission",
+        ),
+    )
+
+
 class SessionSandbox(Base):
     """One OpenSandbox sandbox per session (docs/sandbox.md).
 
