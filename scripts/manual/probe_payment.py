@@ -22,6 +22,8 @@ the real MCP protocol instead:
 Preconditions: the mock server is running
 (``python -m scripts.mock_hotel_mcp_server`` — 127.0.0.1:8081/mcp)
 and ``MCP_SERVER_URL`` points at it (``--mcp-url`` overrides the env).
+``.env`` is loaded from the repo root at import, so the documented
+invocation works without exporting the capability map by hand.
 
 Exit codes: 0 = every check passed, 1 = at least one check failed,
 2 = preflight failed (no URL, server unreachable, or a tool the probe
@@ -49,6 +51,13 @@ os.environ["no_proxy"] = "127.0.0.1,localhost"
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+# Preflight reads the capability map and the server URL straight from
+# os.environ, so the repo-root `.env` must be in it — without this the
+# documented invocation denies every tool (empty MCP_TOOL_CAPABILITIES).
+from _api import load_dotenv  # noqa: E402
+
+load_dotenv()
 
 # 17 tools in the hotel contract; the probe needs these 7.
 CONTRACT_TOOLS = {

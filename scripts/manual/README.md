@@ -36,6 +36,7 @@ and later runs see the prior turns (`docs/sessions.md`).
 | `probe_payment.py` | Probes the hotel payment tools directly over MCP — no agent, no router: loads the tools the server exposes, applies the same default-deny `MCP_TOOL_CAPABILITIES` rule the runtime adapter applies (a missing payment mapping FAILs loudly instead of silently denying), then creates bookings directly via MCP and runs record PENDING → confirm CONFIRMED → PAID, partial payment, cancel refund (paid − POL-CANCEL fee), and the rejection cases (overpay, double confirm, bad method, zero amount, pay after cancel). 22 checks; exit 0 = all passed, 1 = a check failed, 2 = preflight (no URL / server unreachable / a needed tool not exposed). Needs the mock server running; `--mcp-url` overrides `$MCP_SERVER_URL`. Use it while the payment scenario is still blocked by the router — it proves the payment tools themselves work over the live MCP chain. |
 | `verifiers.py` | Pure outcome graders for the hotel suite (no live stack needed): state verifiers (no booking created for a sold-out window, task row correct), semantic checks (unavailability + policy facts via small paraphrase sets — interim until the LLM judge model is chosen), scenario verdicts (state AND semantic), trajectory diagnostics. Unit tests in `tests/test_manual_verifiers.py`, including the do-nothing (must fail every verdict) and gold (must pass all) negative controls. |
 | `mlflow_report.py` | Read-only analysis of the runs `hotel_reception.py` left in MLflow: discovers the experiment, joins runs↔traces on `mlflow.sourceRun`, classifies each trace (scenario, turn index, status/version/drift, latency, tokens, contract vs built-in tools, hook failures, derailed prose), then writes a Markdown report + one-row-per-trace CSV. No API/worker/MCP needed; re-run after any test run or DB cleanup. Defaults: experiment `agentic-runtime`, session prefix `sess-hotel-`, outputs in `reports/`. |
+| `documents_ingest.py` | Covers the two features added in `0da4e6a`. **Document Management** through the real API: multipart upload (v1), metadata/list/download, immutable v2/v3 in MinIO, filename sanitisation, and the fail-closed ACL rules (owner vs grant, write implies read, service key sees only service-owned docs, every denial is a leak-free 404 — never 403). **Ingest + `DOCUMENTED_BY`**: one batch from a temp inbox with one document linked to `O21` and one unlinked; asserts both rows land in the four stores, the Qdrant payload carries `asset_id`, the canonical `(Asset, O21) —DOCUMENTED_BY→ (Document, id)` edge exists (L1), the projection queue drains, `neighbors(O21)` / `linked_documents(O21)` see it in Neo4j, and a forced re-run replays instead of duplicating. `--documents-only` / `--ingest-only` split the halves; `--keep` leaves the rows/objects/points. Needs the live stack (API, Postgres, MinIO, Qdrant, Neo4j, embeddings); the JWT half is SKIPped when `JWT_SECRET` is empty. |
 | `verify_retrieval_live.py` | Runs real questions through the **combined** path — a QueryPlan first (`build_query_plan`), then the hybrid retriever with that plan — against the real Qdrant + Neo4j + LiteLLM embeddings. No API/worker needed; talks to the stores directly. Default: 6 sample questions from the golden set. `--question` runs one ad-hoc question, `--golden-set` runs all 36, `--no-compare` skips the without-plan comparison, `--output` writes the verdicts JSON. Preflight fails fast with exit 2 when the embedding config or Qdrant is missing (same as `make eval-retrieval-live`). See "Notes from the retrieval + QU check" below for what it touches and how to read the output. |
 
 `_api.py` is the shared helper (`.env` loading, JSON calls, poll-until-terminal).
@@ -121,6 +122,13 @@ make mlflow-report
 # Retrieval + QU: skip the without-plan comparison, save verdicts
 .venv/bin/python scripts/manual/verify_retrieval_live.py --no-compare \
     --output reports/retrieval.json
+
+# Documents + ingest: full run (API ACL checks + ingest DOCUMENTED_BY + drain)
+.venv/bin/python scripts/manual/documents_ingest.py
+
+# Documents + ingest: one half only, or keep the rows for inspection
+.venv/bin/python scripts/manual/documents_ingest.py --documents-only
+.venv/bin/python scripts/manual/documents_ingest.py --ingest-only --keep
 ```
 
 ## Notes from the manual test session (2026-11-10)
@@ -481,3 +489,62 @@ How to read the output:
   the full hybrid numbers. An empty adjacency with a reachable
   graph means the question linked no gazetteer seeds, so there was
   nothing to expand from.
+
+## Notes from the Document Management + ingest check (2026-11-15)
+
+`documents_ingest.py` is the first runner for the two features in
+`0da4e6a` (migration `0012`). It talks to the live API for Document
+Management and to the stores directly for the ingest half — the same
+split as `verify_retrieval_live.py`, because neither feature is wired
+into a mission yet.
+
+What the run needs:
+
+- `alembic upgrade head` (→ `0012`) so `documents` / `document_acls`
+  exist; the script fails the preflight when they do not.
+- The `documents` bucket. Compose creates it in `minio-setup`
+  (`MINIO_DOCUMENTS_BUCKET`, default `documents`) — rerun that one-shot
+  service after changing buckets: `docker compose up -d --force-recreate
+  minio-setup`.
+- An API image built from a commit that mounts the `/documents` router;
+  the preflight reads `/openapi.json` and fails "documents router is
+  mounted" against an older image.
+- Real embeddings for the ingest half (`INGEST_USE_MINIO=false` +
+  `INGEST_INBOX_DIR` on the host come from `.env`).
+
+How the checks read:
+
+- **Storage is per version.** `docs/{doc_id}/v{n}/{filename}`; a new
+  upload is a new object, so the test re-downloads v1 after writing v2
+  and asserts the bytes are still v1's. `GET /documents/{id}` and
+  `/download` always follow the highest version.
+- **ACL is fail-closed and leak-free.** A JWT user reads a doc when they
+  own it or hold a grant (`write` implies `read`); a service-key call
+  sees only `owner_user_id IS NULL`. Denied and missing are the same
+  404 for every method — the script asserts 404 (never 403) on another
+  user's doc, on the service key against a user-owned doc, and on a
+  missing id, and that the denied doc is absent from `GET /documents`.
+- **`DOCUMENTED_BY` direction is Asset → Document** (`rel:DOCUMENTED_BY:
+  Asset:O21:Document:<doc_id>`), matching `seeds/demo_data.py` and the
+  retrieval graph arm. A doc without `asset_id` gets no edge and no
+  `asset_id` payload — the loader never invents a link; a doc whose
+  `asset_id` is filled from the grounded linking table does get one.
+- **Drain first, then read Neo4j.** Ingest writes canonical rows and a
+  `pending` row in `ontology_projection_state`; beat drains every
+  `PROJECTION_DRAIN_INTERVAL_SECONDS` (60s) or `python -m
+  scripts.project_ontology_queue`. The script drains in-process and
+  expects `status="synced"` with `projected_version ==
+  canonical_version` before it reads `neighbors(O21)` /
+  `linked_documents(O21)`. `neighbors` is undirected, so the edge shows
+  up on both endpoints.
+- **Replay is idempotent.** A forced re-run re-merges the canonical rows
+  (one edge, not two) and skips the existing Qdrant point ids (uuid5 of
+  `doc:<id>`), so the doc count does not grow. The ingest watermark
+  normally skips the file entirely; `force=True` is what makes the
+  repeat run exercise the loaders.
+- Cleanup deletes this run's MinIO objects, `documents` +
+  `document_acls` rows, Qdrant points, canonical Document endpoints /
+  edges / versions / projection rows, ingest runs and quarantine rows.
+  It never touches `O21` or the seeded corpus. Killed runs can leave
+  `manual-doc-*` residue behind; `--keep` is for inspecting it on
+  purpose.

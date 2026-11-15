@@ -1071,7 +1071,7 @@ def _book_confirmed_deluxe(report: Report, mcp: Mcp, session_id: str,
         else:
             reason = "model did not quote this run's room/dates from the PMS tools"
         report.warn(
-            f"{label} turn 1: quote attempt {attempt} was clean and coherent",
+            f"{label} turn 1: quote attempt {attempt} was not usable",
             f"{reason}; retrying in a fresh conversation",
         )
         turn1 = None
@@ -1462,7 +1462,7 @@ def scenario_booking(report: Report, mcp: Mcp, session_id: str,
         else:
             reason = "model did not quote this run's room/dates from the PMS tools"
         report.warn(
-            f"booking turn 1: quote attempt {attempt} was clean and coherent",
+            f"booking turn 1: quote attempt {attempt} was not usable",
             f"{reason}; retrying in a fresh conversation",
         )
         turn1 = None
@@ -2347,6 +2347,11 @@ def scenario_payment(report: Report, mcp: Mcp, session_id: str,
         report, mcp, session_id, version, timeout, "payment"
     )
     if not booking:
+        report.warn(
+            "payment not reached: no confirmed booking to pay",
+            "the booking helper produced no booking, so the booking-payment "
+            "flow was never exercised",
+        )
         return
     total = booking["total_price"]
 
@@ -2361,11 +2366,34 @@ def scenario_payment(report: Report, mcp: Mcp, session_id: str,
     payments = mcp.call("list_payments", booking_id=code)
     recorded = payments.get("payments") or []
     if not recorded:
-        report.warn(
-            "payment turn 1: agent recorded the payment",
-            "no payment in the store — the model asked instead of "
-            "calling record_payment",
+        called = sorted(
+            tool_names(turn1) & {"record_payment", "confirm_payment", "list_payments"}
         )
+        if "record_payment" in success_names(turn1):
+            # A successful record with no row is a tool/store bug, not a
+            # model-quality issue — fail instead of warning.
+            report.check(
+                False,
+                "payment turn 1: a successful record_payment leaves a payment row",
+                "record_payment reported success but list_payments is empty",
+            )
+        elif called:
+            report.warn(
+                "payment turn 1: agent recorded the payment",
+                f"called {', '.join(called)} without storing a payment — "
+                "the model asked instead of completing the record",
+            )
+        else:
+            # v8-v10 detail: the payment scenario could PASS while the
+            # booking-payment flow was never entered. Say so explicitly
+            # instead of leaving only a generic "no payment" warning.
+            report.warn(
+                "payment not reached: the agent never called a payment tool",
+                "the turn answered without record_payment/confirm_payment — "
+                "the booking-payment flow was not entered, so the payment "
+                "path is unverified (router/model failure, not a store "
+                "failure)",
+            )
         return
     report.check(
         len(recorded) == 1
