@@ -295,6 +295,21 @@ so blurring changes nothing).
 | **Overall** | **36** | **0.500** | |
 | Gated subset | 14 (BoW) / 12 (blurred) | 0.500 / 0.417 | |
 
+**Live measurement (2026-11-15 — the first ever):** the same 36
+cases through `scripts/manual/verify_retrieval_live.py
+--golden-set` on the real stores (Qdrant `technical_documents`,
+7 points, `qwen3-embedding-0.6b` query embeddings; Neo4j
+reachable, 16 nodes) score **10/36 = 0.278** intent accuracy.
+The confusion pattern is not the fake one: diagnosis→lookup 5,
+lookup→diagnosis 4, procedure→lookup 3, aggregate→lookup /
+diagnosis 4. The fake BoW "diagnosis swallows lookup" pattern
+does not survive real embeddings; live produces a
+lookup/diagnosis near-tie in both directions, and 0.278 is
+*worse* than the fake 0.500 on this set. That is a measurement
+on 36 cases, not a tuning signal — do not tune intent weights
+or thresholds on it (§8 item 12; `docs/hybrid-retrieval.md`
+§11 item 12).
+
 **The unanswerable confusion, stated plainly:** only 2 of 6
 unanswerable cases are scored as their ask (U03 lookup, U04
 aggregate). The other four are exactly the confusion Worker B
@@ -425,7 +440,10 @@ the full consolidated checklist is in
 
 1. Run the golden set live via `make eval-retrieval-live`
    (live baseline + live hybrid through the same harness) and
-   replace every fake number above with live ones. Expect link
+   replace every fake number above with live ones. *(2026-11-15:
+   the full set has run through the manual QU+retrieval runner —
+   live intent is 10/36 = 0.278, see §6.2; the metric-table run
+   is still open.)* Expect link
    recall to be HIGHER live (real questions name codes in more
    spellings than the golden set's) and intent accuracy to move
    — the BoW prototype overlap that drives the diagnosis-swallow

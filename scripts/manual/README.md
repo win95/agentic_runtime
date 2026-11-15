@@ -467,28 +467,59 @@ What the new retrieval + QU touches, and what it does not:
 
 How to read the output:
 
-- Per question the script prints the gazetteer seeds, the expansion
-  size and adjacency source (`live` / `expansion-only` / `empty`),
-  the plan (intent, confidence, `gated_off`, fallback reason, linked
+- Preflight checks: Qdrant collection readable and non-empty, the
+  embedding query model resolved, Neo4j reachable (a WARN, never a
+  hard fail — graph-missing is a legitimate live state), and a
+  non-empty gazetteer.
+- Per question the script prints the gazetteer seeds (plus the
+  plan's seeds when they differ), the graph-arm state (`ok` /
+  `no_seed` / `no_expansion` / `unreachable`), the expansion size
+  and adjacency source (`live` / `expansion-only` / `empty`), the
+  plan (intent, confidence, `gated_off`, fallback reason, linked
   nodes, sub-questions, rewrite variants, gating), the top-6 with
   vec / graph / exact / final scores, then the same question
   WITHOUT a plan (`SAME` / `DIFFERS`) so the QU effect is visible.
 - With a golden-set question it also prints the gold intent
   (`MATCH` / `MISMATCH`) and whether a gold chunk is in the top-6
-  (`HIT` / `MISS`). These are observations, not a gate: intent
-  accuracy on the 3B model was 0.500 on the old fake setup, so a
-  mismatch is a model-quality signal, not a code failure. The
-  numbers live in `make eval-retrieval-live`.
-- The script exits 0 when the run completes, 1 when a question
-  raised unexpectedly (listed at the end), 2 when the preflight
-  fails. A gated-open question may call the LLM (live paraphrase /
-  decomposition generators), so `--golden-set` costs real proxy
-  calls; the 6-question default keeps that cheap.
-- `graph_missing: True` means Neo4j was unreachable and the run
-  degraded to vector-only (guardrail 3) — fix Neo4j and re-run for
-  the full hybrid numbers. An empty adjacency with a reachable
-  graph means the question linked no gazetteer seeds, so there was
-  nothing to expand from.
+  (`HIT` / `MISS`), then the verdict checks.
+
+What FAILs the run (exit 1):
+
+- an ANSWERABLE question (non-empty `gold_chunk_ids`) missed every
+  gold chunk in the top-6;
+- the plan lost a gold hit that the no-plan path found (a QU
+  regression);
+- retrieval returned zero documents for a question;
+- `trace["graph_missing"]` disagrees with the seeds / expansion the
+  retrieval actually used (a trace/reporting bug);
+- a question raised (listed at the end);
+- an empty gazetteer while Neo4j is reachable (linking is dead);
+- intent accuracy below `--min-intent-accuracy`, only when that
+  flag is passed.
+
+What only WARNs (does not fail the run):
+
+- an UNANSWERABLE question (empty `gold_chunk_ids`) returned
+  documents — the retriever has no abstention layer;
+- a seeded question expanded to 0 graph nodes (`no_expansion`);
+- questions that linked no gazetteer seed at all (`no_seed`,
+  reported as one aggregate linking-coverage WARN);
+- intent accuracy as an observation (unless gated by the flag).
+
+Exit codes: 0 = all checks passed (WARNs allowed), 1 = at least one
+FAIL (labels listed at the end), 2 = preflight failed (missing
+embedding config or Qdrant). A gated-open question may call the LLM
+(live paraphrase / decomposition generators), so `--golden-set`
+costs real proxy calls; the 6-question default keeps that cheap.
+
+- `graph_missing` in the per-question output is the RETRIEVAL flag
+  (`not seeds or not expansion["nodes"]`,
+  `runtime/retrieval_hybrid.py`) — it does NOT mean Neo4j is down.
+  Use the `graph:` line's `state=` to tell them apart: `no_seed`
+  (linking found nothing), `no_expansion` (seeds have no usable
+  neighbours), `unreachable` (Neo4j down; preflight also warns).
+  Only preflight's `inventory["graph_missing"]` means "Neo4j
+  unreachable".
 
 ## Notes from the Document Management + ingest check (2026-11-15)
 

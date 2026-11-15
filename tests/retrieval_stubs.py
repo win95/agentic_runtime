@@ -275,18 +275,20 @@ class CannedQdrantClient:
 
 # --- Canned retriever builders -------------------------------------------------
 
-def make_hybrid_retriever(*, vector_scores=None, phase2: bool = True, w_ppr=None, **kwargs):
+def make_hybrid_retriever(*, vector_scores=None, w_ppr=None, **kwargs):
     """HybridRetriever over canned data (no live store, no LiteLLM).
 
     Injected: stub embeddings, canned Qdrant client, canned
     adjacency, canned doc counts/links/texts. ``vector_scores``
     controls the vector arm's fixed ranking (see
     ``CannedQdrantClient``); ``**kwargs`` pass through to
-    ``HybridRetriever``.
+    ``HybridRetriever``. There is no ``phase2`` switch any more:
+    4acb7a5 hard-coded the Phase 2 graph formula, so the retriever
+    always uses it (``w_ppr=0`` remains the PPR ablation).
     """
     from runtime.retrieval_hybrid import HybridRetriever
 
-    build_kwargs: dict = {"phase2": phase2}
+    build_kwargs: dict = {}
     if w_ppr is not None:
         build_kwargs["w_ppr"] = w_ppr
     build_kwargs.update(kwargs)
@@ -301,7 +303,7 @@ def make_hybrid_retriever(*, vector_scores=None, phase2: bool = True, w_ppr=None
     )
 
 
-def make_expanded_retriever(*, vector_scores=None, phase2: bool = True, **kwargs):
+def make_expanded_retriever(*, vector_scores=None, **kwargs):
     """ExpandedRetriever over canned data, with the stub generators."""
     from runtime.retrieval_expansion import (
         ExpandedRetriever,
@@ -310,7 +312,7 @@ def make_expanded_retriever(*, vector_scores=None, phase2: bool = True, **kwargs
     )
 
     return ExpandedRetriever(
-        make_hybrid_retriever(vector_scores=vector_scores, phase2=phase2, **kwargs),
+        make_hybrid_retriever(vector_scores=vector_scores, **kwargs),
         paraphrase_generator=stub_paraphrase_variants,
         decomposition_generator=stub_decompose_question,
     )

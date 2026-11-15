@@ -428,7 +428,7 @@ fake saturates and the graph arm cannot beat it.
 | 3 | BoW | 0.958 → 0.965; gated 0.917 → 0.936 | Only movement: aggregate 0.838 → 0.890 |
 | 4 | blurred | 0.958 → 0.958 (plan off → on) | **No measurable gain; link recall 0.762, intent accuracy 0.500, faithfulness 100%** |
 | 4 | BoW | 0.958 → 0.962; gated 0.917 → 0.928 | Only movement: aggregate 0.838 → 0.870; below Phase 3's 0.965 because seedless A02 no longer expands (linking-failure rule) |
-| 5 | live (no numbers yet) | — | Live factory + live eval built; **no live numbers exist** — the golden set has never run against real embeddings + Qdrant + Neo4j; the only live-mode behaviour verified in this VM is the fail-fast preflight (exit 2, §11.1) |
+| 5 | live (manual, 2026-11-15) | top-6: 30/30 answerable gold hit; intent 10/36 (0.278) | **First live numbers: retrieval finds every answerable case; QU intent is the weak link.** 14/36 ran vector-only (no gazetteer seed or empty expansion), 12/36 gated off; 6/6 unanswerable still returned documents (no abstention) |
 
 Phase 3 exit numbers (off → on): Precision@6 0.217 → 0.217,
 Recall@6 1.000 → 1.000, nDCG@6 0.958 → 0.958 on both setups;
@@ -556,6 +556,26 @@ is the preflight failing fast with exit 2 (default env:
 embedding config; dummy config: Qdrant unreachable at
 `http://localhost:6333`).
 
+**First live run (2026-11-15).** The golden set has now run
+against the real stores through `scripts/manual/
+verify_retrieval_live.py --golden-set` (QU + retrieval, plan
+path): Qdrant `technical_documents`, 7 points,
+`qwen3-embedding-0.6b` query embeddings; Neo4j reachable
+(16 nodes); gazetteer 4 assets / 7 components / 2 buildings /
+3 documents. Result: **30/30 answerable questions had a gold
+chunk in the top-6**; **intent 10/36 = 0.278**; graph states
+`ok=22`, `no_seed=14`, `no_expansion=0`; 12/36 gated off
+(14 questions "no confident link", 12 "confident — no
+expansion", 1 "all rewrite variants dropped by guardrails").
+The 6 misses are exactly the 6 unanswerable cases
+(`gold_chunk_ids: []`), and all 6 returned documents —
+retrieval has no abstention. `graph_missing` was True on
+14/36 while Neo4j was reachable: that flag means "no seed /
+empty expansion", not "Neo4j down" (see the manual README).
+These are top-6 hit numbers; nDCG / MRR / Precision live
+numbers are still open — `make eval-retrieval-live` remains
+the runner for the §8 metric table.
+
 **Still open** — everything below needs the user's machine:
 
 1. **Set `EMBEDDING_MODEL` in `.env` to the model name your
@@ -582,7 +602,10 @@ embedding config; dummy config: Qdrant unreachable at
    (pass `TRACKING_URI=<mlflow uri>` to log to the live
    MLflow server; confirm the `agentic-runtime-retrieval`
    experiment shows the runs). Replace every fake number in
-   §8 with live ones. Read the informational verdict as what
+   §8 with live ones. *(2026-11-15: the full set has run
+   through the manual QU+retrieval runner — top-6 hits and
+   intent above; the `make eval-retrieval-live` run that
+   produces the §8 nDCG/MRR/Precision table is still open.)* Read the informational verdict as what
    it is: on a 7-doc corpus with real embeddings, a FAIL is a
    finding about the corpus / embeddings, not a code failure.
    Expect the live sibling-subset gain to be SMALLER than the
