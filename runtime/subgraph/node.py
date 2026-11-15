@@ -250,20 +250,22 @@ def build_skill_subgraph(
         )
         if node.terminal:
             ending = (
-                "or NEXT: END when the guest's request is fully handled in "
-                "this turn, or NEXT: WAIT when you need more information "
-                "from the guest before continuing."
+                "or the word END when the guest's request is fully "
+                "handled in this turn, or the word WAIT when you need "
+                "more information from the guest before continuing."
             )
         else:
             ending = (
-                "or NEXT: WAIT when you need more information from the "
-                "guest before continuing. Do not end the turn with "
-                "NEXT: END here — the request is not fully handled until "
-                "a later step."
+                "or the word WAIT when you need more information from "
+                "the guest before continuing. Do not use END here — the "
+                "request is not fully handled until a later step."
             )
         parts.append(
-            "End your reply with exactly one line: NEXT: <node-id> — choose "
-            f"from: {choices} — {ending}"
+            "Finish with exactly one final line that names your single next "
+            "step. Write the word NEXT, a colon and a space, then your "
+            f"choice: one of {choices}; {ending} Put that line once at the "
+            "very end — never repeat this format and never offer two "
+            "choices."
         )
         return "\n\n".join(parts)
 

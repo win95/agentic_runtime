@@ -135,14 +135,28 @@ MAX_TOOL_CALLS_PER_FLOW = 10
 FLOW_RE = re.compile(r"(?m)^[ \t]*(?:\*\*)?FLOW\s*:\s*(?:\*\*)?\s*([A-Za-z0-9_-]+)")
 _FLOW_COUNT_RE = re.compile(r"\bFLOW\s*:", re.IGNORECASE)
 _OR_FLOW_RE = re.compile(r"\bor\s+FLOW\s*:", re.IGNORECASE)
+# The instruction's format template, echoed back as a declaration
+# ("FLOW: <choice>", "FLOW: <flow-id>"). A placeholder is not a vote:
+# the 3B model appends it after its real declaration, and counting it
+# made a single real choice look ambiguous. Drop those lines first.
+_PLACEHOLDER_FLOW_LINE_RE = re.compile(
+    r"(?m)^[ \t]*(?:\*\*)?FLOW\s*:\s*(?:\*\*)?\s*<[^>\n]*>\s*$"
+)
+
+
+def _without_template_echo(text: str | None) -> str:
+    """The reply with placeholder declarations removed."""
+    return _PLACEHOLDER_FLOW_LINE_RE.sub("", text or "")
 
 
 def _is_ambiguous_flow_declaration(text: str | None) -> bool:
     """True when the reply declares more than one flow, or offers a
     FLOW: as an alternative ("... or FLOW: b") — either way the model
-    did not make one choice."""
+    did not make one choice. A placeholder echo of the instruction's
+    own template does not count."""
     if not text:
         return False
+    text = _without_template_echo(text)
     if _OR_FLOW_RE.search(text):
         return True
     return len(_FLOW_COUNT_RE.findall(text)) > 1
@@ -477,9 +491,13 @@ def build_flow_subgraph(
             + " — do not pick a visited flow again."
         )
         parts.append(
-            "End your reply with exactly one line: FLOW: <flow-id> — or "
-            "FLOW: END when nothing remains to do, or FLOW: WAIT when "
-            "you need more information from the guest before routing."
+            "Finish with exactly one final line that names your single "
+            "choice. Write the word FLOW, a colon and a space, then your "
+            "choice: one flow id from the list above, or the word END when "
+            "nothing remains to do, or the word WAIT when you need more "
+            "information from the guest before routing. Put that line once "
+            "at the very end — never repeat this format and never offer "
+            "two choices."
         )
         return "\n\n".join(parts)
 

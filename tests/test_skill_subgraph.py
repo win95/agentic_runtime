@@ -17,23 +17,25 @@ from langchain_core.tools import tool as langchain_tool
 
 from app.services import mission_service
 from runtime import deep_agent as deep_agent_module
-from runtime import skill_subgraph as skill_subgraph_module
 from runtime.hooks.middleware import HookMiddleware
 from runtime.hooks.registry import default_registry
 from runtime.mission_graph import run_mission
-from runtime.skill_subgraph import (
+from runtime.skills.map_plan import MapBranch, MapNode, SkillMap
+from runtime.subgraph import node as skill_subgraph_module
+from runtime.subgraph.common import (
+    ToolCallBudgetExceededError,
+    ToolCallCap,
+    tools_for_node,
+)
+from runtime.subgraph.node import (
     MAX_NODE_STEPS,
     MAX_TOOL_CALLS_PER_NODE,
-    NodeToolCallBudgetExceededError,
-    _NodeToolCallCap,
     allowed_next,
     build_skill_subgraph,
     parse_next,
     run_skill_subgraph,
-    tools_for_node,
     use_skill_subgraph,
 )
-from runtime.skills.map_plan import MapBranch, MapNode, SkillMap
 from seeds import load_missions
 
 
@@ -261,8 +263,15 @@ def test_node_instruction_lists_branch_conditions():
     assert "check (book)" in route_instruction
     assert "find (task)" in route_instruction
     # route is not terminal: END is not offered, WAIT is.
-    assert "NEXT: WAIT" in route_instruction
-    assert "Do not end the turn with NEXT: END here" in route_instruction
+    assert "the word WAIT" in route_instruction
+    assert "Do not use END here" in route_instruction
+    # Prompt hygiene (v10/v11): the instruction used to spell the choice
+    # as "NEXT: <id> — or NEXT: END — or NEXT: WAIT", and the 3B model
+    # copied that template, which the strict parser reads as ambiguous.
+    # The instruction now carries no literal NEXT: token at all.
+    assert route_instruction.count("NEXT:") == 0
+    assert "the word NEXT" in route_instruction
+    assert "or NEXT:" not in route_instruction
 
 
 def test_step_cap_ends_a_loop():
@@ -389,26 +398,29 @@ def test_use_skill_subgraph():
 
 # --- Mission Graph wiring --------------------------------------------
 
-def test_deep_agent_node_runs_subgraph_for_hotel(db_session, monkeypatch):
-    """hotel_reception compiles its map instead of running one free-form
-    agent: the builder gets the reception map, the node middleware
-    carries the hook middleware + built-in exclusion (and no plan gate
-    — the subgraph IS the enforcement), and the confirmation-turn
-    resume node is create-booking."""
+def test_deep_agent_node_runs_flow_subgraph_for_hotel(db_session, monkeypatch):
+    """hotel_reception compiles its map into the flow subgraph
+    (Direction C), not the legacy node subgraph: the builder gets the
+    reception map, the router/flow agents carry the hook middleware +
+    built-in exclusion (and no plan gate — the compiler IS the
+    enforcement), and the confirmation-turn resume flow is
+    create-booking."""
+    from runtime.subgraph import flow as flow_module
+
     load_missions.main()
     mission = mission_service.get_mission(db_session, "hotel_reception")
     mission_dict = mission_service.mission_to_dict(mission)
 
     seen: dict = {}
 
-    def fake_build_subgraph(skill_map, tools, system_prompt=None, **kwargs):
+    def fake_build_flow(skill_map, tools, system_prompt=None, **kwargs):
         seen["skill_map"] = skill_map
         seen["middleware"] = list(kwargs.get("middleware") or [])
         seen["resume_nodes"] = kwargs.get("resume_nodes")
         seen["system_prompt"] = system_prompt or ""
         return object()
 
-    def fake_run_subgraph(compiled, mission_arg, input_data, **kwargs):
+    def fake_run_flow(compiled, mission_arg, input_data, **kwargs):
         seen["run_kwargs"] = kwargs
         return {
             "summary": "ok",
@@ -420,10 +432,8 @@ def test_deep_agent_node_runs_subgraph_for_hotel(db_session, monkeypatch):
             "errors": [],
         }
 
-    monkeypatch.setattr(
-        skill_subgraph_module, "build_skill_subgraph", fake_build_subgraph)
-    monkeypatch.setattr(
-        skill_subgraph_module, "run_skill_subgraph", fake_run_subgraph)
+    monkeypatch.setattr(flow_module, "build_flow_subgraph", fake_build_flow)
+    monkeypatch.setattr(flow_module, "run_flow_subgraph", fake_run_flow)
 
     final = run_mission(mission_dict, {"message": "hi"}, "exec_hotel_subgraph")
     assert final["status"] == "SUCCEEDED", f"errors: {final.get('errors')}"
@@ -435,7 +445,7 @@ def test_deep_agent_node_runs_subgraph_for_hotel(db_session, monkeypatch):
     assert len(exclusions) == 1
     assert exclusions[0]._excluded == deep_agent_module.BUILTIN_TOOL_NAMES
     assert not any(type(m).__name__ == "PlanGate" for m in middleware)
-    assert seen["resume_nodes"] == {"create-booking"}
+    assert seen["resume_nodes"] == frozenset({"create-booking"})
     # The map is compiled, not rendered as prose: no ENFORCED header.
     assert "ENFORCED" not in seen["system_prompt"]
     assert seen["run_kwargs"]["skill_maps"][0].skill_name == "reception"
@@ -465,7 +475,7 @@ def test_node_tool_call_cap_denies_exact_repeat_after_error():
             tool_call_id=request.tool_call["id"],
         )
 
-    cap = _NodeToolCallCap()
+    cap = ToolCallCap()
     first = cap.wrap_tool_call(
         _cap_request("t_get_booking", {"booking_id": "BK-9999"}), handler)
     assert "Booking not found" in str(first.content)
@@ -493,7 +503,7 @@ def test_node_tool_call_cap_allows_different_args_after_error():
             )
         return ToolMessage(content="ok", tool_call_id=request.tool_call["id"])
 
-    cap = _NodeToolCallCap()
+    cap = ToolCallCap()
     cap.wrap_tool_call(_cap_request("t_get_booking", {"booking_id": "BK-9999"}), handler)
     result = cap.wrap_tool_call(
         _cap_request("t_get_booking", {"booking_id": "BK-1001"}, "call-2"), handler)
@@ -510,14 +520,14 @@ def test_node_tool_call_cap_allows_repeat_after_success():
         calls.append(1)
         return ToolMessage(content="ok", tool_call_id=request.tool_call["id"])
 
-    cap = _NodeToolCallCap()
+    cap = ToolCallCap()
     cap.wrap_tool_call(_cap_request("t_loop", {}), handler)
     cap.wrap_tool_call(_cap_request("t_loop", {}, "call-2"), handler)
     assert len(calls) == 2
 
 
 def test_node_tool_call_cap_raises_after_budget():
-    cap = _NodeToolCallCap(max_calls=2)
+    cap = ToolCallCap(max_calls=2)
     calls: list = []
 
     def handler(request):
@@ -528,7 +538,7 @@ def test_node_tool_call_cap_raises_after_budget():
     cap.wrap_tool_call(_cap_request("t_loop", {}, "call-2"), handler)
     try:
         cap.wrap_tool_call(_cap_request("t_loop", {}, "call-3"), handler)
-    except NodeToolCallBudgetExceededError as exc:
+    except ToolCallBudgetExceededError as exc:
         assert "budget" in str(exc)
     else:
         raise AssertionError("expected the budget raise on the 3rd call")
