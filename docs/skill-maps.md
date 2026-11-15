@@ -14,46 +14,73 @@ never stuffed in upfront.
 > order at the tool-call boundary. See [Enforcement](#enforcement-subgraph--plan-gate)
 > below. Option C's "deviate with reason" now applies only to missions
 > not yet on the subgraph.
+>
+> **2026-11-15 — Direction C: the pilot moved from one agent per map
+> node to one agent per flow** (see the flow bullet below). The node
+> compiler stays as the fallback; the v4b live run showed its failure
+> mode is structural (a `NEXT:` line inside the guest's answer, one
+> routing decision per node, a silent walk across flow boundaries on a
+> bad parse), not a parse bug to patch.
 
 ## Enforcement: subgraph + plan gate
 
 One run uses exactly one enforcement mechanism, chosen in
 `deep_agent_node` (`runtime/mission_graph.py`):
 
-- **Skill subgraph** (`runtime/skill_subgraph.py`, pilot:
-  `hotel_reception`). `build_skill_subgraph` compiles a `SkillMap`
-  into a LangGraph: one node per map node, each running its own Deep
-  Agent with **only that node's tools** (tool-less nodes run a plain
-  model call). The model ends each step with a `NEXT: <node-id>` line
-  and a **code router** validates it against the map (branch targets
-  of the current node + next node in list order + resume nodes); an
-  absent or invalid declaration falls back to next-in-order, never an
-  arbitrary jump. The node's instruction lists each branch choice with
-  its `when` condition, so the model decides on the condition, not a
-  bare id. `NEXT: END` is honored only at a flow-terminal node
-  (`terminal: true` in the map); anywhere else it falls back to
-  next-in-order — the model judging a request "handled" mid-flow must
-  not end the run. `NEXT: WAIT` ends the turn from any node: the node
-  needs more information from the guest before the flow can continue.
-  Resume nodes (e.g. `create-booking`) are enterable
-  only when the session already has prior turns — so a fresh turn
-  stops at the confirmation question and the guest's confirmation
-  turn resumes into the booking. Step cap: 12 node executions per run.
-  A second, finer cap lives INSIDE each node: a per-node tool-call
-  budget (`MAX_TOOL_CALLS_PER_NODE`, default 5) plus an exact-repeat
-  guard (`_NodeToolCallCap`, first in the node agent's middleware
+- **Flow subgraph** (`runtime/subgraph/flow.py`, pilot:
+  `hotel_reception`, Direction C, 2026-11-15). `build_flow_subgraph`
+  compiles a `SkillMap` into a LangGraph of **flow agents + one
+  router**: flows are derived from the map (each branch target of the
+  start node starts a flow; the flow walks the map in list order until
+  a terminal node or a resume node, which starts its own flow; the
+  start node itself is the router, never a flow member). Each flow
+  runs ONE Deep Agent with the **union of its flow's tools** and its
+  steps as a checklist — no `NEXT:` inside a flow. The router is a
+  plain model call that declares `FLOW: <flow-id>` (tolerant parse:
+  bold markers, indentation, trailing text after the token are all
+  accepted) once per flow boundary; after a flow ends it runs again so
+  a multi-request turn can enter a second flow, and a flow already
+  visited this turn is never re-entered. An invalid or missing
+  declaration ENDS the turn with an error recorded — there is no
+  "next in order" fallback, because in a flat list of independent
+  flows there is no meaningful next. The answer channel is separate
+  from the control channel: each flow writes its reply text to a
+  dedicated `answer` state key, and the outcome summary comes from
+  that key, never from the message list — so no control line can leak
+  into the guest's answer. Resume nodes (e.g. `create-booking`) are
+  flow boundaries: the booking-create flow is enterable only when the
+  session already has prior turns, and its tools are only
+  `create_booking` + the report step — the booking-quote flow does not
+  HAVE `create_booking`, so the agent cannot call it before the guest
+  confirms. Step cap: 12 node executions per run (route calls + flow
+  executions). A second, finer cap lives INSIDE each flow: a per-flow
+  tool-call budget (`MAX_TOOL_CALLS_PER_FLOW`, default 10 — a flow
+  covers several map nodes, so the old flat 5 is too small) plus a
+  repeat guard (`_ToolCallCap`, first in the flow agent's middleware
   list so its raise escapes the hook layer). The step cap counts node
-  executions, not calls inside a node — without this, a model
+  executions, not calls inside a flow — without this, a model
   repeating one failing call (2026-11-13: `get_booking` with a bad id,
-  looped to the recursion limit) never reaches `NEXT:`. A repeat of
-  the immediately preceding failed call is denied with a message
-  naming the alternative; past the budget the node stops with a
-  diagnostic error and the turn ends (`NEXT: WAIT`).
-  The subgraph path does **not** render the prose plan block and does
-  **not** attach the plan gate — the graph itself is the enforcement.
-  `run_skill_subgraph` returns the same outcome shape as
-  `run_deep_agent`, plus `visited_nodes` (the graph's full path;
-  `plan_trace` only sees nodes with tool calls).
+  looped to the recursion limit) never finishes. A repeat of ANY
+  earlier failed call in the execution is denied (the set, not just
+  the immediate predecessor — interleaved repeats evaded the old
+  guard); past the budget the flow stops with a diagnostic error and
+  the turn ends. After each flow, `flow_trace` records which of the
+  flow's steps ran and which are missing (checklist audit for the v5
+  acceptance check, not a second router). `stop_completion` is scoped
+  OUT of flow agents (the mission graph builds a flow middleware whose
+  registry excludes it — a flow agent that stops without tools is
+  usually asking the guest a question). The flow path does **not**
+  render the prose plan block and does **not** attach the plan gate —
+  the graph itself is the enforcement. `run_flow_subgraph` returns the
+  same outcome shape as `run_deep_agent`, plus `visited_nodes` (flow
+  ids) and `flow_trace`.
+- **Node subgraph** (`runtime/subgraph/node.py`) — LEGACY, superseded
+  by the flow compiler for the pilot; kept for its tests and as the
+  fallback path. Same shape (one Deep Agent per map node, code router
+  over `NEXT:` lines, fallback to next-in-order, `NEXT: END` honored
+  only at terminal nodes). Both compilers live in `runtime/subgraph/`
+  with their shared pieces (`ToolCallCap`, `tools_for_node`,
+  `next_in_order`, `last_text`) in `common.py`.
 - **Plan gate** (`runtime/plan_gate.py`, `PLAN_GATE_MISSIONS =
   {"hotel_reception"}` — currently no production mission attaches it,
   since hotel moved to the subgraph). An `AgentMiddleware` built from

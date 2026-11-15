@@ -16,6 +16,7 @@ directly — a Deep Agent is not required for fixed workflows.
 from __future__ import annotations
 
 import contextlib
+import copy
 import json
 import logging
 import re
@@ -46,15 +47,14 @@ setup_mlflow_tracing()
 # investigate the outage itself.
 MIN_EVIDENCE_FOR_HYBRID = 3
 
-_SUBSTANTIVE_EVIDENCE_KINDS = frozenset(
-    {"fault", "maintenance", "document", "relation"}
-)
+_SUBSTANTIVE_EVIDENCE_KINDS = frozenset({"fault", "maintenance", "document", "relation"})
 
 
 def _substantive_evidence_count(evidence: list | None) -> int:
     return sum(
         1 for item in (evidence or []) if (item or {}).get("kind") in _SUBSTANTIVE_EVIDENCE_KINDS
     )
+
 
 CAPABILITY_BUILDERS = {
     "fault_analysis": build_fault_analysis_graph,
@@ -176,7 +176,8 @@ def _resolve_agent_version(agent_id: str) -> tuple[object | None, bool]:
         if drift:
             logger.warning(
                 "Agent %s v%d: live tool manifest drifted from the pinned one",
-                agent_id, agent_version.version,
+                agent_id,
+                agent_version.version,
             )
     except Exception as exc:  # noqa: BLE001 — drift is advisory
         logger.debug("Could not compute live tool manifest: %s", exc)
@@ -296,15 +297,15 @@ def deep_agent_node(state: MissionState) -> dict:
 
                 _db = SessionLocal()
                 try:
-                    agent_version = agent_version_service.get_version(
-                        _db, agent_id, state_version
-                    )
+                    agent_version = agent_version_service.get_version(_db, agent_id, state_version)
                 finally:
                     _db.close()
             except Exception as exc:  # noqa: BLE001 — versioning never breaks a run
                 logger.debug(
                     "Could not load agent version %s v%s: %s",
-                    agent_id, state_version, exc,
+                    agent_id,
+                    state_version,
+                    exc,
                 )
                 agent_version = None
         if agent_version is None:
@@ -351,9 +352,7 @@ def deep_agent_node(state: MissionState) -> dict:
         # prompt, admin prompt, or default). The plan is skill-derived
         # runtime context, like the skill files themselves, not part of
         # the pinned prompt text. Skills without a map are unaffected.
-        mapped_skills = [
-            s for s in (selected_skills or []) if getattr(s, "map", None) is not None
-        ]
+        mapped_skills = [s for s in (selected_skills or []) if getattr(s, "map", None) is not None]
         # Phase 3 — the skill subgraph is the new architecture's core:
         # for pilot missions the map is COMPILED into a LangGraph (one
         # agent per map node, code-owned routing) instead of running one
@@ -361,11 +360,13 @@ def deep_agent_node(state: MissionState) -> dict:
         # 3a) is the enforcement mechanism for missions still on the
         # free-form path — a run uses ONE of the two, never both, so the
         # gate is built only when the subgraph does not run.
-        from runtime.skill_subgraph import use_skill_subgraph
+        from runtime.subgraph.flow import use_flow_subgraph
+        from runtime.subgraph.node import use_skill_subgraph
 
+        use_flow = use_flow_subgraph(state.get("mission_id"), mapped_skills)
         use_subgraph = use_skill_subgraph(state.get("mission_id"), mapped_skills)
         plan_gate_mw = None
-        if not use_subgraph:
+        if not use_subgraph and not use_flow:
             from runtime.plan_gate import plan_gate
 
             plan_gate_mw = plan_gate(
@@ -375,8 +376,7 @@ def deep_agent_node(state: MissionState) -> dict:
             )
         plan_block = (
             "\n\n".join(
-                render_plan(s.map, enforced=plan_gate_mw is not None)
-                for s in mapped_skills
+                render_plan(s.map, enforced=plan_gate_mw is not None) for s in mapped_skills
             )
             if mapped_skills
             else ""
@@ -405,19 +405,13 @@ def deep_agent_node(state: MissionState) -> dict:
 
         _history = state.get("session_history") or {}
         _version_limits = (
-            getattr(agent_version, "session_history", None)
-            if agent_version is not None
-            else None
+            getattr(agent_version, "session_history", None) if agent_version is not None else None
         )
         _limits = resolve_session_limits(
             version_limits=_version_limits,
-            agent_limits=(
-                _load_agent_session_limits(agent_id) if not _version_limits else None
-            ),
+            agent_limits=(_load_agent_session_limits(agent_id) if not _version_limits else None),
         )
-        _shown_turns, _render_omitted = cap_turns(
-            _history.get("turns") or [], limits=_limits
-        )
+        _shown_turns, _render_omitted = cap_turns(_history.get("turns") or [], limits=_limits)
         _shown_omitted = (_history.get("omitted") or 0) + _render_omitted
         history_block = render_session_history(
             _shown_turns,
@@ -441,9 +435,7 @@ def deep_agent_node(state: MissionState) -> dict:
             mission=mission,
             input_data=input_data,
             evidence_count=len(state.get("evidence") or []),
-            max_continues=int(
-                (mission.get("execution") or {}).get("stop_max_continues", 3)
-            ),
+            max_continues=int((mission.get("execution") or {}).get("stop_max_continues", 3)),
             session_id=state.get("session_id") or "",
             allowed_tools=list(context.get("allowed_tools") or []),
             capabilities=list(context.get("capabilities") or []),
@@ -465,6 +457,26 @@ def deep_agent_node(state: MissionState) -> dict:
         # then sees only the tools the model may actually call.
         if plan_gate_mw is not None:
             middleware.append(plan_gate_mw)
+        # Direction C: flow agents get their own hook middleware whose
+        # registry excludes stop_completion — a flow agent that stops
+        # without tools is usually asking the guest a question (dates
+        # missing at booking), not failing to gather evidence, so
+        # forcing extra turns wastes calls and risks forced tool use.
+        # A shallow copy shares the events list (flow hook events still
+        # appear in the run's hook_events) but keeps its own counters;
+        # the original instance is unused on the flow path, so its
+        # `continues` stays 0 truthfully. The plan gate is not attached
+        # — the flow compiler IS the enforcement, as with the node
+        # subgraph.
+        flow_middleware = middleware
+        if use_flow:
+            flow_hook_middleware = copy.copy(hook_middleware)
+            flow_hook_middleware.registry = hook_registry.with_only(
+                [n for n in hook_registry.handler_names() if n != "stop_completion"]
+            )
+            flow_middleware = [flow_hook_middleware]
+            if exclusion is not None:
+                flow_middleware.append(exclusion)
         # Sandbox backend (docs/sandbox.md): when the mission opts in
         # (execution.sandbox: true) and this run has a session, the
         # agent's file tools + `execute` run inside that session's
@@ -513,10 +525,12 @@ def deep_agent_node(state: MissionState) -> dict:
             # is constructed inside build_deep_agent, where test doubles
             # replace it — the node itself never needs live LLM config
             # just to resolve a version.
-            version_cfg = settings.model_copy(update={
-                "llm_model": agent_version.model,
-                "llm_temperature": agent_version.temperature,
-            })
+            version_cfg = settings.model_copy(
+                update={
+                    "llm_model": agent_version.model,
+                    "llm_temperature": agent_version.temperature,
+                }
+            )
             base_prompt_text = agent_version.prompt_text
         elif (mission.get("agent_id") or "") == "admin_bot":
             from runtime.deep_agent import ADMIN_SYSTEM_PROMPT
@@ -548,7 +562,47 @@ def deep_agent_node(state: MissionState) -> dict:
             mission.get("agent_id") or None,
             state.get("session_id"),
         )
-        if use_subgraph:
+        if use_flow:
+            # Direction C: compile the first mapped skill's map into
+            # flow agents + one router and run it instead of one
+            # free-form agent. The flow agents carry the hook
+            # middleware (minus stop_completion) + built-in exclusion
+            # (the plan gate is not attached — the flow compiler IS
+            # the enforcement). The context-budget prefix check is
+            # skipped here: the per-flow prompts are smaller than the
+            # free-form prefix it measures, and the check is advisory.
+            from runtime.subgraph.flow import build_flow_subgraph, run_flow_subgraph
+
+            prompt_for_budget = base_prompt_text
+            prefix_overruns = []
+            subgraph = build_flow_subgraph(
+                mapped_skills[0].map,
+                tools,
+                base_prompt_text,
+                model_config=version_cfg,
+                middleware=flow_middleware,
+                backend=sandbox_backend,
+                skills=skill_sources,
+                files=skill_files,
+                callbacks=[handler],
+                trace_metadata=trace_metadata,
+                trace_tags=trace_tags,
+                # Confirmation-turn rule: the booking-create flow is
+                # enterable only when the session has prior turns (see
+                # runtime/subgraph/flow.py).
+                resume_nodes=frozenset({"create-booking"}),
+            )
+            outcome = run_flow_subgraph(
+                subgraph,
+                mission,
+                input_data,
+                session_history=_history,
+                history_block=history_block,
+                skill_maps=[s.map for s in mapped_skills],
+                trace_metadata=trace_metadata,
+                trace_tags=trace_tags,
+            )
+        elif use_subgraph:
             # Phase 3: compile the first mapped skill's map into a
             # subgraph and run it instead of one free-form agent. The
             # node agents carry the hook middleware + built-in exclusion
@@ -556,7 +610,7 @@ def deep_agent_node(state: MissionState) -> dict:
             # enforcement). The context-budget prefix check is skipped
             # here: the per-node prompts are smaller than the free-form
             # prefix it measures, and the check is advisory.
-            from runtime.skill_subgraph import build_skill_subgraph, run_skill_subgraph
+            from runtime.subgraph.node import build_skill_subgraph, run_skill_subgraph
 
             prompt_for_budget = base_prompt_text
             prefix_overruns = []
@@ -575,12 +629,15 @@ def deep_agent_node(state: MissionState) -> dict:
                 # Confirmation-turn rule: from the start node, the
                 # guest's confirmation may resume straight at
                 # create-booking when the session has prior turns
-                # (see runtime/skill_subgraph.py).
+                # (see runtime/subgraph/node.py).
                 resume_nodes=frozenset({"create-booking"}),
             )
             outcome = run_skill_subgraph(
-                subgraph, mission, input_data,
-                session_history=_history, history_block=history_block,
+                subgraph,
+                mission,
+                input_data,
+                session_history=_history,
+                history_block=history_block,
                 skill_maps=[s.map for s in mapped_skills],
                 trace_metadata=trace_metadata,
                 trace_tags=trace_tags,
@@ -645,9 +702,7 @@ def deep_agent_node(state: MissionState) -> dict:
                 for t in tools
             )
             skills_text = "".join(s.raw for s in (selected_skills or []))
-            prefix_overruns = check_prefix_budgets(
-                prompt_for_budget, tools_text, skills_text
-            )
+            prefix_overruns = check_prefix_budgets(prompt_for_budget, tools_text, skills_text)
             for overrun in prefix_overruns:
                 logger.warning("Context budget overrun: %s", overrun)
             run_kwargs: dict = {"callbacks": [handler], "files": skill_files}
@@ -680,10 +735,7 @@ def deep_agent_node(state: MissionState) -> dict:
         # a run that had to be corrected is explainable from the result
         # alone (the denial messages themselves are in the trace).
         if plan_gate_mw is not None and plan_gate_mw.denied_count:
-            notes.append(
-                f"Plan gate: {plan_gate_mw.denied_count} out-of-plan tool "
-                "call(s) denied"
-            )
+            notes.append(f"Plan gate: {plan_gate_mw.denied_count} out-of-plan tool call(s) denied")
         # Sandbox backend (docs/sandbox.md): one line saying which
         # backend ran — the sandbox id, or that the run fell back to
         # the in-memory backend because no sandbox was available.
@@ -708,12 +760,8 @@ def deep_agent_node(state: MissionState) -> dict:
         # run that was denied/feedbacked/continued is explainable from
         # the execution result alone (no DB lookup needed).
         hook_events = hook_middleware.events
-        denied = sum(
-            1 for e in hook_events for a in e["decisions"] if a == "deny"
-        )
-        feedbacks = sum(
-            1 for e in hook_events for a in e["decisions"] if a == "feedback"
-        )
+        denied = sum(1 for e in hook_events for a in e["decisions"] if a == "deny")
+        feedbacks = sum(1 for e in hook_events for a in e["decisions"] if a == "feedback")
         continued = hook_middleware.continues
         if denied or feedbacks or continued:
             notes.append(
@@ -762,9 +810,7 @@ def deep_agent_node(state: MissionState) -> dict:
             result["evidence"] = list(state.get("evidence") or []) or (
                 outcome.get("evidence") or []
             )
-        all_evidence = list(state.get("evidence") or []) + list(
-            outcome.get("evidence") or []
-        )
+        all_evidence = list(state.get("evidence") or []) + list(outcome.get("evidence") or [])
         if "root_causes" in required_keys and not result.get("root_causes"):
             result["root_causes"] = _root_causes_from_evidence(all_evidence)
         if "recommendations" in required_keys and not result.get("recommendations"):
@@ -819,8 +865,17 @@ def _root_causes_from_evidence(evidence: list | None) -> list[str]:
 # proposed (used only to quote the agent's own words — never to
 # invent a specific action).
 _ACTIONABLE_WORDS = (
-    "recommend", "should", "must", "need to", "replace", "repair",
-    "schedule", "inspect", "monitor", "investigate", "fix",
+    "recommend",
+    "should",
+    "must",
+    "need to",
+    "replace",
+    "repair",
+    "schedule",
+    "inspect",
+    "monitor",
+    "investigate",
+    "fix",
 )
 
 
@@ -880,9 +935,7 @@ def _allowed_tool_names(mission: dict) -> set[str] | None:
         return None
     allowed = {
         e.name
-        for e in registry.list_for_context(
-            {"capabilities": mission.get("capabilities") or []}
-        )
+        for e in registry.list_for_context({"capabilities": mission.get("capabilities") or []})
     }
     return allowed or None
 
@@ -931,22 +984,20 @@ def validate_results(state: MissionState) -> dict:
             result["root_causes"] = grounded
             result["ungrounded_root_causes"] = ungrounded
             for cause in ungrounded:
-                flags.append(
-                    {"type": "ungrounded_root_cause", "cause": str(cause)[:200]}
-                )
+                flags.append({"type": "ungrounded_root_cause", "cause": str(cause)[:200]})
     actions = result.get("actions_taken")
     if isinstance(actions, list) and actions:
         allowed = _allowed_tool_names(mission)
         if allowed is not None:
             for name in actions:
                 if name not in allowed:
-                    flags.append(
-                        {"type": "tool_outside_allowed_list", "tool": str(name)}
-                    )
+                    flags.append({"type": "tool_outside_allowed_list", "tool": str(name)})
     for item in evidence:
-        text = str((item or {}).get("summary") or "") + "\n" + json.dumps(
-            (item or {}).get("data") or {}, ensure_ascii=False, default=str
-        )[:8000]
+        text = (
+            str((item or {}).get("summary") or "")
+            + "\n"
+            + json.dumps((item or {}).get("data") or {}, ensure_ascii=False, default=str)[:8000]
+        )
         for signal in detect_injection_signals(text):
             flag = {
                 "type": "injection_signal",
@@ -955,9 +1006,7 @@ def validate_results(state: MissionState) -> dict:
             }
             if flag not in flags:
                 flags.append(flag)
-    for cause in (result.get("root_causes") or []) + (
-        result.get("ungrounded_root_causes") or []
-    ):
+    for cause in (result.get("root_causes") or []) + (result.get("ungrounded_root_causes") or []):
         for signal in detect_injection_signals(str(cause)):
             flag = {
                 "type": "injection_signal",
@@ -1062,9 +1111,7 @@ def _to_libpq_dsn(url: str) -> str:
 
         parsed = make_url(url)
         if parsed.drivername.startswith("postgresql+"):
-            return parsed.set(drivername="postgresql").render_as_string(
-                hide_password=False
-            )
+            return parsed.set(drivername="postgresql").render_as_string(hide_password=False)
     except Exception:  # noqa: BLE001 — fall back to the original URL
         logger.debug("Could not convert database URL to a libpq DSN: %r", url)
     return url
@@ -1102,9 +1149,7 @@ def get_checkpointer():
             yield None
             return
     try:
-        with PostgresSaver.from_conn_string(
-            _to_libpq_dsn(settings.database_url)
-        ) as checkpointer:
+        with PostgresSaver.from_conn_string(_to_libpq_dsn(settings.database_url)) as checkpointer:
             # setup() runs CREATE INDEX CONCURRENTLY, which waits for
             # every older transaction and cannot run concurrently with
             # itself. Set the schema up once per process (under a lock)
@@ -1156,9 +1201,7 @@ def run_mission(
     # only inside deep_agent_node, so capability-only runs kept
     # agent_version NULL). Best-effort: a DB failure leaves it NULL
     # and the run continues as before.
-    agent_version, agent_version_drift = _resolve_agent_version(
-        mission.get("agent_id") or ""
-    )
+    agent_version, agent_version_drift = _resolve_agent_version(mission.get("agent_id") or "")
     initial_state: MissionState = {
         "execution_id": execution_id,
         "mission_id": mission.get("mission_id", ""),
@@ -1191,9 +1234,7 @@ def run_mission(
     trace_metadata = build_run_metadata(
         execution_id, mission.get("mission_id", ""), agent_id or None, session_id
     )
-    trace_tags = build_run_tags(
-        mission.get("mission_id", ""), agent_id or None, session_id
-    )
+    trace_tags = build_run_tags(mission.get("mission_id", ""), agent_id or None, session_id)
     # The checkpointer context must stay open for the whole invoke: the
     # saver borrows the connection from PostgresSaver.from_conn_string.
     with mlflow_execution_run(
@@ -1201,9 +1242,7 @@ def run_mission(
     ):
         with get_checkpointer() as checkpointer:
             graph = (
-                build_mission_graph(checkpointer=checkpointer)
-                if checkpointer
-                else mission_graph
+                build_mission_graph(checkpointer=checkpointer) if checkpointer else mission_graph
             )
             config: dict = {"metadata": trace_metadata, "tags": trace_tags}
             if checkpointer:

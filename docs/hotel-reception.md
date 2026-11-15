@@ -90,64 +90,94 @@ map (tool chưa biết) nhưng giữ nguyên cấu trúc node — plan vẫn ren
 được. Khi server đã connect và process restart, tool được giữ lại và
 `plan_trace` tính đúng.
 
-## Skill subgraph — biên dịch map thành đồ thị (Phase 3)
+## Flow subgraph — biên dịch map thành flow-agent (Direction C, 2026-11-15)
 
-`runtime/skill_subgraph.py` biên dịch map của hotel thành một LangGraph
+`runtime/subgraph/flow.py` biên dịch map của hotel thành một LangGraph
 con, chạy thay cho một agent tự do duy nhất (`deep_agent_node` chọn
-đường này khi mission thuộc `SUBGRAPH_PILOT_MISSIONS` và có skill map;
-hiện chỉ có `hotel_reception`).
+đường này khi mission thuộc `FLOW_PILOT_MISSIONS` và có skill map;
+hiện chỉ có `hotel_reception`). Đây là hướng C thay cho node compiler
+cũ (`runtime/subgraph/node.py`, nay là legacy): run live v4b
+(109 pass / 32 fail) cho thấy lỗi của node compiler là cấu trúc — một
+dòng `NEXT:` nằm trong cùng message trả lời khách, một quyết định
+routing cho mỗi node, và một lần parse lỗi đi bộ xuyên flow — chứ không
+phải lỗi parse để vá.
 
-- **Một node map = một agent riêng.** Node có tool chạy một Deep Agent
-  chỉ có tool của node đó; node không có tool (`route`, `booking-dates`,
-  `confirm-booking`, `report-booking`, `task-details`) chạy một model
-  call thuần túy. Gọi tool ngoài thứ tự không phải bị từ chối — mà
-  không thể xảy ra, vì agent của node đó không có tool đó.
-- **Router là code, không phải model.** Sau mỗi node, router chọn node
-  tiếp theo từ bảng chuyển đổi của map: dòng `NEXT: <node-id>` do node
-  khai báo, kiểm chứng trong tập cho phép (đích rẽ nhánh của node hiện
-  tại + node tiếp theo theo thứ tự); khai báo sai hoặc thiếu thì về node
-  tiếp theo theo thứ tự. Mỗi lựa chọn trong instruction kèm điều kiện
-  `when` của nhánh đó, để model quyết định bằng điều kiện chứ không đoán
-  từ id. `NEXT: END` chỉ được chấp nhận ở node kết thúc flow
-  (`terminal: true` trong map: `route`, `report-booking`, `report-task`,
-  `policy-lookup`, `booking-lookup`, `booking-change`, `task-status`); ở
-  node khác thì END bị bỏ qua và đi tiếp node sau — model tưởng request
-  đã xong giữa flow không được kết thúc run. `NEXT: WAIT` dừng turn ở
-  bất kỳ node nào khi cần thêm thông tin từ khách. Nhánh rẽ của
-  node `route` luôn mở (phân loại lại).
-- **Luật resume (turn xác nhận):** từ node `route`, nhảy thẳng tới
-  `create-booking` chỉ được phép khi session đã có turn trước — turn
-  khách xác nhận tiếp nối turn trước đã dừng ở `confirm-booking`. Map
-  không có nhánh này, nên gate (và mọi run tự do) vẫn từ chối
-  `create_booking` gọi đầu tiên. Chỉ dẫn của node `route` nêu luật;
-  router là chốt chặn.
-- **Chống lặp:** tối đa 12 node mỗi run (`MAX_NODE_STEPS`); quá thì
-  run kết thúc với lỗi chẩn đoán thay vì xoay vòng (map cho phép lặp
-  theo thiết kế: hết phòng → chọn ngày khác → kiểm tra lại). Trong mỗi
-  node còn có budget riêng: tối đa 5 tool call mỗi lần chạy node
-  (`MAX_TOOL_CALLS_PER_NODE`) — cap 12 node đếm số lần chạy node chứ
-  không đếm call trong node, nên model lặp một call lỗi (2026-11-13:
-  `get_booking` với mã sai, lặp tới recursion limit) không bao giờ tới
-  được `NEXT:`. Gọi lặp y hệt call vừa lỗi bị từ chối kèm hướng thay
-  thế; quá budget thì node dừng với lỗi chẩn đoán và turn kết thúc.
-  Node `booking-lookup` còn có luật fallback trong skill: get_booking
-  báo not-found thì không gọi lại cùng mã mà dùng `find_guest` lấy mã
-  đúng, và không bao giờ tự bịa mã booking (mã thật dạng `BK-####`).
-- **Kết quả giống hệt agent tự do:** `run_skill_subgraph` trả cùng
+Map 16 node suy ra 7 flow:
+
+| Flow | Node | Tool |
+| --- | --- | --- |
+| `booking-dates` | booking-dates, check-availability, quote-price, confirm-booking | check_room_availability, get_room_rates |
+| `create-booking` | create-booking, report-booking | create_booking |
+| `task-details` | task-details, find-staff, create-task, assign-task, report-task | list_staff, create_task, assign_task |
+| `policy-lookup` | policy-lookup | search_policy_documents, read_policy_document |
+| `booking-lookup` | booking-lookup | find_guest, register_guest, get_booking |
+| `booking-change` | booking-change | cancel_booking, change_booking_dates |
+| `task-status` | task-status | get_task |
+
+- **Một flow = một agent riêng.** Flow chạy một Deep Agent duy nhất
+  với hợp tool của cả flow và các bước của flow làm checklist trong
+  system prompt; không có `NEXT:` trong flow. Gọi tool ngoài flow
+  không phải bị từ chối — mà không thể xảy ra, vì agent của flow đó
+  không có tool đó.
+- **Router chạy một lần mỗi lần chuyển flow, không phải mỗi node.**
+  Một model call thuần túy (node `route` của map) khai báo
+  `FLOW: <flow-id>` — parse khoan dung (bold, thụt đầu dòng, chữ giải
+  thích sau token đều chấp nhận) — hoặc `FLOW: END` / `FLOW: WAIT`.
+  Tập lựa chọn chỉ còn 7 flow kèm điều kiện `when` của nhánh, không
+  phải 16 node. Sau một flow, router chạy lại để turn nhiều yêu cầu
+  có thể vào flow thứ hai; flow đã đi qua trong turn không bao giờ
+  vào lại. Khai báo sai hoặc thiếu thì turn DỪNG với lỗi ghi lại —
+  không còn fallback "node tiếp theo theo thứ tự", vì trong một list
+  phẳng các flow độc lập thì không có "tiếp theo" có nghĩa.
+- **Kênh trả lời tách khỏi kênh điều khiển.** Mỗi flow ghi câu trả lời
+  cho khách vào key `answer` riêng trong state; summary của outcome
+  lấy từ key đó, không suy ra từ message list — nên không dòng control
+  nào rò vào câu trả lời. Message của node router không nằm trong
+  `flow_messages` nên `outcome_from_messages` không bao giờ thấy dòng
+  `FLOW: END`.
+- **Luật resume (turn xác nhận) nay là biên flow:** flow
+  `create-booking` chỉ được vào khi session đã có turn trước — và
+  tool của nó chỉ có `create_booking` + bước báo cáo; flow
+  `booking-dates` KHÔNG CÓ `create_booking` nên agent không thể gọi
+  nó trước khi khách xác nhận. Router ép điều kiện turn trước; tool
+  allowlist ép phần còn lại.
+- **Chống lặp:** tối đa 12 node mỗi run (`MAX_FLOW_STEPS`, tính cả
+  lần gọi router); quá thì run kết thúc với lỗi chẩn đoán thay vì xoay
+  vòng (map cho phép lặp theo thiết kế: hết phòng → chọn ngày khác →
+  kiểm tra lại). Trong mỗi flow còn có budget riêng: tối đa 10 tool
+  call mỗi lần chạy flow (`MAX_TOOL_CALLS_PER_FLOW`) — flow bao nhiều
+  node nên 5 phẳng của node compiler là quá ít (v4b: riêng
+  `policy-lookup` đã tốn 5 call search/read). Gọi lặp y hệt call lỗi
+  bất kỳ trước đó trong cùng lần chạy bị từ chối kèm hướng thay thế
+  (dạng set, không chỉ call kề trước — xen kẽ `find_guest` /
+  `get_booking` từng lách qua guard cũ); quá budget thì flow dừng với
+  lỗi chẩn đoán và turn kết thúc. `stop_completion` bị loại khỏi
+  middleware của flow agent: flow agent dừng mà không gọi tool thường
+  là đang hỏi khách (thiếu ngày ở booking), không phải không thu thập
+  evidence. Node `booking-lookup` còn có luật fallback trong skill:
+  get_booking báo not-found thì không gọi lại cùng mã mà dùng
+  `find_guest` lấy mã đúng, và không bao giờ tự bịa mã booking (mã
+  thật dạng `BK-####`).
+- **Checklist kiểm bằng code (audit):** sau mỗi flow, `flow_trace`
+  ghi bước nào đã chạy (bước có tool khi tool của nó được gọi; bước
+  không tool khi flow có câu trả lời) và bước nào còn thiếu — để đối
+  chiếu v5, không phải để lái model giữa turn.
+- **Kết quả giống hệt agent tự do:** `run_flow_subgraph` trả cùng
   shape outcome (`summary` / `evidence` / `actions_taken` / `errors` /
   `plan_trace`, xem `outcome_from_messages` trong
-  `runtime/deep_agent.py`) cộng thêm `visited_nodes` (đường đi đầy đủ
-  của đồ thị — `plan_trace` chỉ thấy node có tool call).
-- **State là TypedDict** (`SubgraphState`): LangGraph chỉ giữ các key
+  `runtime/deep_agent.py`) cộng thêm `visited_nodes` (danh sách flow
+  id) và `flow_trace`.
+- **State là TypedDict** (`FlowState`): LangGraph chỉ giữ các key
   schema khai báo — dùng `StateGraph(dict)` trần đã làm mất lặng lẽ
   `session_history` sau node đầu tiên, khiến luật resume không bao giờ
-  kích hoạt (lỗi đã bắt được bằng test).
-- **Gate và subgraph không chạy cùng nhau:** khi subgraph chạy, plan
-  gate không gắn vào (không còn gì để nó từ chối) và plan block không
-  append vào prompt (map đã biên dịch, không còn là prose). Gate còn
-  lại làm cơ chế ép cho mission chưa lên subgraph.
+  kích hoạt (lỗi đã bắt được bằng test ở node compiler cũ).
+- **Gate và flow subgraph không chạy cùng nhau:** khi flow subgraph
+  chạy, plan gate không gắn vào (không còn gì để nó từ chối) và plan
+  block không append vào prompt (map đã biên dịch, không còn là
+  prose). Gate còn lại làm cơ chế ép cho mission chưa lên subgraph.
 - **Chưa có:** trace 7 layer cho pilot (Phase 3 tiếp theo), judge LLM
   (chưa chọn model), tách eval temp 0 / production 0.5 (Phase 4).
+  Chưa live-verify: chạy lại suite hotel manual (v5) trên máy tran.
 
 ## Plan gate — ép thứ tự map ở runtime (Phase 3a)
 

@@ -16,8 +16,8 @@ tự hành, **Capability Graphs / Tools** cung cấp năng lực nghiệp vụ,
 | --- | ---------- | ------- |
 | 1 | **Platform API — FastAPI** (`app/`) | Quản lý Mission, Agent, Tool, Model, Policy và Execution API. Mission là **cấu hình**, không phải graph. |
 | 2 | **Execution Dispatcher — Celery + Redis** (`app/worker/`) | Nhận yêu cầu chạy Mission, đưa vào queue, worker chạy LangGraph. Tách vòng đời HTTP khỏi vòng đời Agent. |
-| 3 | **Agent Runtime — LangGraph** (`runtime/mission_graph.py`) | Một Mission Graph cho mỗi nhóm workflow: understand → router → capability / deep agent → validate → END. Hỗ trợ checkpoint Postgres (tùy chọn). Với mission thí điểm có skill map, bước Deep Agent được thay bằng **skill subgraph** biên dịch từ map (xem mục 2): một agent riêng cho mỗi node, router là code. |
-| 4 | **Autonomous Agent — Deep Agents** (`runtime/deep_agent.py`) | Lập kế hoạch, phân rã công việc, dùng subagents và tools. Nằm **bên trong** Mission Graph (Deep Agents build trên LangGraph, trả về compiled graph). Với mission có skill map, agent chạy dưới dạng subgraph (mỗi node một agent chỉ có tool của node đó); với mission chưa lên subgraph, một agent tự do chạy với map làm plan prose + **plan gate** ép thứ tự tool ở runtime (`runtime/plan_gate.py`). |
+| 3 | **Agent Runtime — LangGraph** (`runtime/mission_graph.py`) | Một Mission Graph cho mỗi nhóm workflow: understand → router → capability / deep agent → validate → END. Hỗ trợ checkpoint Postgres (tùy chọn). Với mission thí điểm có skill map, bước Deep Agent được thay bằng **flow subgraph** biên dịch từ map (xem mục 2): một agent riêng cho mỗi flow, router chọn flow. |
+| 4 | **Autonomous Agent — Deep Agents** (`runtime/deep_agent.py`) | Lập kế hoạch, phân rã công việc, dùng subagents và tools. Nằm **bên trong** Mission Graph (Deep Agents build trên LangGraph, trả về compiled graph). Với mission có skill map, agent chạy dưới dạng flow subgraph (mỗi flow một agent chỉ có tool của flow đó); với mission chưa lên subgraph, một agent tự do chạy với map làm plan prose + **plan gate** ép thứ tự tool ở runtime (`runtime/plan_gate.py`). |
 | 5 | **Capability & Tool Layer** (`runtime/capabilities/`, `runtime/tools/`) | Capability = LangGraph subgraph tái sử dụng (vd: `fault_analysis`). Tool = hành động nhỏ Agent có thể gọi. Quyền thực tế kiểm tra ở runtime theo mission/tenant/execution. |
 | 6 | **Data & Observability** (`infra/`) | PostgreSQL, Redis, Qdrant, Neo4j, MinIO, MLflow, LangSmith (chỉ quan sát, không phải nơi lưu trạng thái). |
 
@@ -51,13 +51,14 @@ Ví dụ: *“Phân tích nguyên nhân các lỗi của thang máy O21 trong th
    (Neo4j), rồi tổng hợp evidence.
 5. **Deep Agent (nếu evidence chưa đủ)** — lập kế hoạch điều tra thêm, tự quyết
    định gọi tools cho đến khi đủ evidence. Với mission có skill map
-   (thí điểm: `hotel_reception`), bước này chạy dưới dạng **skill
+   (thí điểm: `hotel_reception`), bước này chạy dưới dạng **flow
    subgraph**: map được biên dịch thành LangGraph con — một agent riêng
-   cho mỗi node (chỉ có tool của node đó), router code quyết định node
-   tiếp theo từ dòng `NEXT:` do node khai báo; turn xác nhận resume
-   thẳng vào `create-booking` khi session đã có turn trước. Với mission
-   chưa lên subgraph, một agent tự do chạy với map làm plan prose và
-   **plan gate** (`runtime/plan_gate.py`) từ chối tool gọi ngoài thứ tự.
+   cho mỗi flow (chỉ có tool của flow đó), router chọn flow một lần
+   mỗi lần chuyển flow từ dòng `FLOW:` do router khai báo; turn xác
+   nhận resume thẳng vào flow `create-booking` khi session đã có turn
+   trước. Với mission chưa lên subgraph, một agent tự do chạy với map
+   làm plan prose và **plan gate** (`runtime/plan_gate.py`) từ chối tool
+   gọi ngoài thứ tự.
 6. **Validate kết quả** — kiểm tra đủ evidence, đúng output schema
    (`root_causes`, `evidence`, `recommendations`) và success criteria.
    Suite manual (vd: hotel) chấm bằng **state verifier** trước
@@ -481,7 +482,7 @@ Xem đầy đủ trong `.env.example`. Các biến quan trọng:
 | Execution có cần state riêng không? | Có, mỗi execution có state riêng |
 | Có dùng Celery không? | Có, cho async dispatch |
 | Có cần conversation memory không? | Có, theo session (Option B, 2026-11-11): `session_id` tùy chọn, agent đọc lại các turn trước của cùng agent + mission; không có session thì mỗi execution độc lập như trước |
-| Skill map được thực thi thế nào? | Hai cơ chế, một run chỉ dùng một: **subgraph** — biên dịch map thành LangGraph con, một agent riêng mỗi node (thí điểm: `hotel_reception`); **plan gate** — middleware từ chối tool gọi ngoài thứ tự, cho mission còn chạy agent tự do |
+| Skill map được thực thi thế nào? | Hai cơ chế, một run chỉ dùng một: **flow subgraph** — biên dịch map thành LangGraph con, một agent riêng mỗi flow, router chọn flow từ dòng `FLOW:` (thí điểm: `hotel_reception`); **plan gate** — middleware từ chối tool gọi ngoài thứ tự, cho mission còn chạy agent tự do |
 | Eval chấm thế nào? | State verifier trước (trạng thái cuối + ý nghĩa), trajectory chỉ chẩn đoán, LLM judge chỉ cho phần code không chấm được (judge chưa chọn model) |
 | Chặn truy cập dữ liệu thế nào? | Chặn theo tầng, không chặn theo tool (2026-11-13): đọc mở (tool đọc chỉ cần capability), ghi chặn (hook `enforce_layer` lúc gọi tool + human approval cho ghi phá hoại của admin), dữ liệu chặn theo phạm vi (asset wrapper; guest = session, bảng `session_guest_scopes`), output ngoài phạm vi thì `validate_results` FAIL run |
 
@@ -493,7 +494,9 @@ app/                  FastAPI platform (main, config, models, schemas, routers,
 runtime/              LangGraph runtime: state, mission_graph, deep_agent,
                       llm_factory (LiteLLM), report (Markdown), prompts
                       (MLflow Prompt Registry), plan_gate (ép thứ tự map),
-                      skill_subgraph (biên dịch map thành đồ thị),
+                      subgraph/ (biên dịch map thành đồ thị: flow.py là
+                      flow compiler, node.py là node compiler legacy,
+                      common.py là phần chung),
                       capabilities/
                       fault_analysis, tools/registry + fault_tools + admin_tools
                       + mcp_adapter, scope (phạm vi execution), middleware/ (token + audit callbacks),
@@ -640,8 +643,8 @@ khai một `map:` trong frontmatter (chi tiết:
 [`docs/skill-maps.md`](docs/skill-maps.md)). Map từng là kế hoạch
 dạng prose (Phương án C: agent được lệch khi có lý do); nay map được
 **thực thi bằng code** theo hai cơ chế, một run chỉ dùng một:
-**subgraph** — biên dịch map thành LangGraph con, một agent riêng cho
-mỗi node, router code quyết định node tiếp theo (thí điểm:
+**flow subgraph** — biên dịch map thành LangGraph con, một agent riêng
+cho mỗi flow, router chọn flow một lần mỗi lần chuyển flow (thí điểm:
 `hotel_reception`); **plan gate** — middleware từ chối tool gọi ngoài
 thứ tự, cho mission còn chạy agent tự do (`fault_analysis` giữ map tư
 vấn cho tới khi map của nó được kiểm chứng với subgraph). Map càng
