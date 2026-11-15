@@ -629,3 +629,147 @@ def test_fault_analysis_yaml_declares_retrieval():
     assert "max_chars" not in retrieval
     assert retrieval_max_chars() == 12_288
     assert "retrieval_context" in select_hooks(fault)
+    # Hybrid wiring (Seams A + B): on for fault_analysis; QueryPlan
+    # stays off until the hybrid-only numbers are in.
+    assert retrieval["hybrid"] is True
+    assert retrieval["query_plan"] is False
+
+
+# --- retrieval_context with hybrid retrieval (Seam A) ------------------
+
+HYBRID_MISSION = {
+    **FAULT_MISSION,
+    "execution": {
+        "mode": "autonomous",
+        "retrieval": {
+            "sources": ["faults", "documents", "relations"],
+            "max_chars": 3000,
+            "hybrid": True,
+        },
+    },
+}
+
+_HYBRID_DOCS = [
+    {"doc_id": "doc-a", "title": "Motor overheating guide",
+     "content": "Check winding temperature."},
+    {"doc_id": "doc-b", "title": "Door sensor guide",
+     "content": "Clean the sensor gap."},
+]
+
+
+def _hybrid_result(**overrides):
+    result = {
+        "docs": _HYBRID_DOCS,
+        "ranked": ["doc-a", "doc-b"],
+        "trace": {"graph_missing": False},
+        "plan": None,
+        "triples": [],
+    }
+    result.update(overrides)
+    return result
+
+
+def test_retrieval_context_hybrid_documents(monkeypatch, db_session):
+    _seed_demo(db_session)
+    monkeypatch.setattr(
+        "runtime.retrieval_live.hybrid_documents",
+        lambda question, query_plan=False: _hybrid_result(),
+    )
+
+    def _no_vector(*a, **k):
+        raise AssertionError("vector search must not run when hybrid is on")
+
+    monkeypatch.setattr("infra.repositories.search_documents", _no_vector)
+    decision = builtin.retrieval_context(
+        _ctx(mission=HYBRID_MISSION, input=RETRIEVAL_INPUT)
+    )
+    assert decision is not None
+    block = decision.additional_context
+    assert "[documents — hybrid:qdrant+neo4j]" in block
+    assert "Motor overheating guide" in block
+    assert "Check winding temperature." in block
+    assert "(hybrid: 2 docs, 0 triples, graph_missing=False)" in block
+    # The other sources still load from their own stores.
+    assert "F-204" in block
+
+
+def test_retrieval_context_hybrid_falls_back_to_vector(monkeypatch, db_session):
+    _seed_demo(db_session)
+
+    def _boom(question, query_plan=False):
+        raise RuntimeError("Qdrant is down")
+
+    monkeypatch.setattr("runtime.retrieval_live.hybrid_documents", _boom)
+    monkeypatch.setattr(
+        "infra.repositories.search_documents",
+        lambda query, limit=5: (
+            [{"doc_id": "doc-v", "title": "Vector doc",
+              "content": "plain vector"}], False),
+    )
+    decision = builtin.retrieval_context(
+        _ctx(mission=HYBRID_MISSION, input=RETRIEVAL_INPUT)
+    )
+    assert decision is not None
+    block = decision.additional_context
+    assert "hybrid failed, vector fallback" in block
+    assert "Vector doc" in block
+
+
+def test_retrieval_context_hybrid_off_uses_vector(monkeypatch, db_session):
+    _seed_demo(db_session)
+    seen = {}
+    mission = {
+        **FAULT_MISSION,
+        "execution": {
+            "mode": "autonomous",
+            "retrieval": {
+                "sources": ["faults", "documents", "relations"],
+                "max_chars": 3000,
+            },
+        },
+    }
+
+    def _vector(query, limit=5):
+        seen["query"] = query
+        seen["limit"] = limit
+        return ([{"doc_id": "doc-v", "title": "Vector doc",
+                  "content": "plain vector"}], False)
+
+    monkeypatch.setattr("infra.repositories.search_documents", _vector)
+    decision = builtin.retrieval_context(
+        _ctx(mission=mission, input=RETRIEVAL_INPUT)
+    )
+    assert decision is not None
+    block = decision.additional_context
+    assert seen["query"].startswith("O21 ")
+    assert seen["limit"] == 5
+    assert "[documents — qdrant:technical_documents]" in block
+    assert "Vector doc" in block
+
+
+def test_retrieval_context_hybrid_query_plan_flag(monkeypatch, db_session):
+    _seed_demo(db_session)
+    seen = {}
+    mission = {
+        **FAULT_MISSION,
+        "execution": {
+            "mode": "autonomous",
+            "retrieval": {
+                "sources": ["faults", "documents", "relations"],
+                "max_chars": 3000,
+                "hybrid": True,
+                "query_plan": True,
+            },
+        },
+    }
+
+    def _capture(question, query_plan=False):
+        seen["query_plan"] = query_plan
+        return _hybrid_result()
+
+    monkeypatch.setattr("runtime.retrieval_live.hybrid_documents", _capture)
+    decision = builtin.retrieval_context(
+        _ctx(mission=mission, input=RETRIEVAL_INPUT)
+    )
+    assert decision is not None
+    assert seen["query_plan"] is True

@@ -18,10 +18,14 @@ escalation threshold (see runtime/mission_graph.py).
 
 from __future__ import annotations
 
+import logging
+
 from langgraph.graph import END, START, StateGraph
 
 from infra import repositories
 from runtime.state import MissionState
+
+logger = logging.getLogger(__name__)
 
 
 def _evidence(source: str, kind: str, asset_id: str, summary: str, data=None, stub=False) -> dict:
@@ -103,13 +107,39 @@ def maintenance_node(state: MissionState) -> dict:
     return {"evidence": items}
 
 
+def _load_knowledge_documents(retrieval: dict, asset_id: str):
+    """Document rows for the knowledge_retrieval node.
+
+    Hybrid first when the mission opts in (Seam B, never a plan —
+    the deterministic spine holds no LLM call). On any hybrid failure
+    falls back to plain vector search, so the node keeps working
+    without live stores and the ``repositories`` mock seam in the
+    eval harness / manual scripts keeps working. Raises only when
+    both arms fail.
+    """
+    question = f"faults maintenance {asset_id}"
+    if retrieval.get("hybrid"):
+        from runtime.retrieval_live import hybrid_documents
+
+        try:
+            return hybrid_documents(question)["docs"], False
+        except Exception as exc:  # noqa: BLE001 — fallback, never fatal
+            logger.warning(
+                "knowledge_retrieval: hybrid documents failed (%s); "
+                "falling back to vector search",
+                exc,
+            )
+    return repositories.search_documents(question, limit=5)
+
+
 def knowledge_retrieval_node(state: MissionState) -> dict:
     inp = state.get("input") or {}
     asset_id = inp.get("asset_id", "")
+    retrieval = (
+        (state.get("mission") or {}).get("execution") or {}
+    ).get("retrieval") or {}
     try:
-        docs, is_stub = repositories.search_documents(
-            f"faults maintenance {asset_id}", limit=5
-        )
+        docs, is_stub = _load_knowledge_documents(retrieval, asset_id)
     except Exception as exc:  # noqa: BLE001 — any store failure is error evidence
         # No invented documents: record the failure as evidence.
         return {

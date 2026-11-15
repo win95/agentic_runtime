@@ -36,9 +36,12 @@ kept as a record, clearly marked, and NOT reproducible in this
 tree — the evals that produced them no longer exist. No live
 numbers exist yet: there is no Qdrant/Neo4j in this VM and
 `EMBEDDING_MODEL` is set by the user in his own `.env` on his
-machine. `search_documents` and the `retrieval_context` hook
-are untouched in all six phases — no mission's behaviour
-changes. The opt-in wiring follow-up is §12; the live
+machine. `search_documents` is untouched in all six phases. The
+`retrieval_context` hook and the `knowledge_retrieval` capability
+node gained the opt-in hybrid wiring in §12 (2026-11-14,
+`fault_analysis` only, `hybrid: true`, `query_plan: false` by
+default) — without the flag, no mission's behaviour changes.
+The opt-in wiring follow-up is §12; the live
 checklist is §11.
 
 ## 1. Pipeline (one query)
@@ -651,7 +654,7 @@ embedding config; dummy config: Qdrant unreachable at
     with 5 intent labels is enough to measure the plumbing,
     not to tune on.
 
-## 12. Opt-in wiring follow-up (from Phase 1 §6, still NOT done)
+## 12. Opt-in wiring follow-up (from Phase 1 §6, DONE 2026-11-14)
 
 Add an opt-in mission-config flag, e.g.
 `execution.retrieval.hybrid: true` on `fault_analysis` only,
@@ -675,12 +678,30 @@ query_plan=plan)` and log the plan (intent, margin, seeds,
 gating, fallback reason, kept/dropped variants with reasons)
 to MLflow alongside the trace.
 
-Why not wired yet: there is still no live Qdrant/Neo4j in this
-VM to verify the live path against, and no live numbers exist —
-wiring without a live check would ship an untested retrieval
-change into the fault mission. Phase 5 built the factory and
-the live eval (§6b, §11.4) so the wiring, when it lands, is a
-call-site change onto a module verified in tests via
-test-local doubles (the fake-setup regression numbers in §8
-are historical and not reproducible); the live numbers
-come first.
+DONE 2026-11-14 (commit pending — not pushed yet): the wiring
+landed as analyzed, with one shared call-site helper
+(`runtime/retrieval_live.py::hybrid_documents`) used by both
+seams. Seam A — the `retrieval_context` hook reads
+`execution.retrieval.hybrid` / `query_plan` on `fault_analysis`
+(`seeds/missions/fault_analysis.yaml`: `hybrid: true`,
+`query_plan: false`); the documents section becomes the assembled
+hybrid context (docs + triples on the plan path) with honest
+provenance headers, and any hybrid failure falls back to plain
+vector search. Seam B — the `knowledge_retrieval` capability node
+reads the same `hybrid` flag and returns fused top-6 document
+evidence instead of top-5 vector; it never builds a plan. Two
+deviations from the sketch above, both deliberate: (1) the
+capability node falls back to vector search when hybrid fails
+instead of recording error evidence — the error-evidence contract
+would have broken the mock-mode eval (`test_eval_mock_mode_logs_to_mlflow`)
+and every run without live stores, since the eval/manual seams mock
+`repositories`; only when both arms fail is error evidence recorded.
+(2) The trace is logged with the standard logger (docs, triples,
+tokens, `graph_missing`, plan intent), not to MLflow — the MLflow
+trace logging from the sketch is still open. The tool
+`search_technical_documents` stays vector-only (highest scope risk).
+Live verification is still open: no live Qdrant/Neo4j numbers exist
+in this VM; run `make eval-retrieval-live` and
+`scripts/manual/verify_retrieval_live.py` on the machine with the
+real stores. After pulling: `make seed` (the YAML flags reach the
+DB mission row) + restart the worker.

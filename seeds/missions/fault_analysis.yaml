@@ -39,6 +39,17 @@ execution:
   # context budget — 3,072 retrieval tokens).
   retrieval:
     sources: [faults, documents, relations]
+    # Hybrid retrieval (Seams A + B, docs/hybrid-retrieval.md section 12):
+    # the documents section of the retrieval_context hook and the
+    # knowledge_retrieval evidence come from the hybrid retriever
+    # (vector + graph, fused, top-6) instead of plain vector search
+    # (top-5). Absent/false restores vector-only everywhere.
+    hybrid: true
+    # Question Understanding on the hook path only: build a QueryPlan
+    # (intent + linking + gated rewrites) before the hybrid retrieve.
+    # Off by default — flip after the hybrid-only numbers are in.
+    # The capability node never builds a plan (deterministic spine).
+    query_plan: false
   # Sandbox backend (docs/sandbox.md): the agent's file tools +
   # `execute` run inside one OpenSandbox sandbox per session (reused
   # across the session's executions, reaped when idle). Needs
