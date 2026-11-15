@@ -38,16 +38,23 @@ One run uses exactly one enforcement mechanism, chosen in
   steps as a checklist — no `NEXT:` inside a flow. The router is a
   plain model call that declares `FLOW: <flow-id>` (tolerant parse:
   bold markers, indentation, trailing text after the token are all
-  accepted) once per flow boundary; after a flow ends it runs again so
-  a multi-request turn can enter a second flow, and a flow already
-  visited this turn is never re-entered. An invalid or missing
-  declaration ENDS the turn with an error recorded — there is no
-  "next in order" fallback, because in a flat list of independent
-  flows there is no meaningful next. The answer channel is separate
-  from the control channel: each flow writes its reply text to a
-  dedicated `answer` state key, and the outcome summary comes from
-  that key, never from the message list — so no control line can leak
-  into the guest's answer. Resume nodes (e.g. `create-booking`) are
+  accepted) once per flow boundary — but tolerant is not ambiguous:
+  a reply with two `FLOW:` declarations, or an `or FLOW:`
+  alternative, is rejected, not read as a vote for the first token.
+  After a flow ends it runs again so a multi-request turn can enter a
+  second flow, and a flow already visited this turn is never
+  re-entered. An invalid or missing declaration ENDS the turn with an
+  error recorded — there is no "next in order" fallback, because in a
+  flat list of independent flows there is no meaningful next. The
+  answer channel is separate from the control channel: each flow
+  writes its reply text to a dedicated `answer` state key, and the
+  outcome summary comes from that key, never from the message list —
+  so no control line can leak into the guest's answer; when no flow
+  produced an answer, the summary stays empty instead of falling back
+  to the raw message list. Each flow agent's input is isolated: it
+  sees only the mission prompt, earlier flows' answer texts, and its
+  own flow instruction — never the router's instruction or its `FLOW:`
+  declarations, which the model would otherwise copy into its reply. Resume nodes (e.g. `create-booking`) are
   flow boundaries: the booking-create flow is enterable only when the
   session already has prior turns, and its tools are only
   `create_booking` + the report step — the booking-quote flow does not

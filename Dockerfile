@@ -3,7 +3,14 @@ FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    # Pins the /app checkout as the import source. The image also
+    # pip-installs the code (pyproject packages.find includes
+    # runtime*), and skills discovery derives DEFAULT_SKILLS_DIR from
+    # __file__ — the site-packages copy has no skills/ next to it,
+    # so without this load_skills() silently returns zero skills
+    # (v5 review, point 5).
+    PYTHONPATH=/app
 
 WORKDIR /app
 

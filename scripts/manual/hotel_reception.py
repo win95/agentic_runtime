@@ -1035,6 +1035,7 @@ def _book_confirmed_deluxe(report: Report, mcp: Mcp, session_id: str,
     turn1 = None
     fallback = None
     check_in = check_out = ""
+    any_wrote = False
     for attempt in range(1, 5):
         attempt_session = session_id if attempt == 1 else f"{session_id}-q{attempt}"
         check_in, check_out = window or _future_window()
@@ -1065,6 +1066,7 @@ def _book_confirmed_deluxe(report: Report, mcp: Mcp, session_id: str,
             fallback = (turn1, attempt_session, check_in, check_out)
             reason = "tool calls were clean but the reply was only hook feedback"
         elif attempted & write_tools:
+            any_wrote = True
             reason = "model booked without confirmation"
         else:
             reason = "model did not quote this run's room/dates from the PMS tools"
@@ -1075,11 +1077,22 @@ def _book_confirmed_deluxe(report: Report, mcp: Mcp, session_id: str,
         turn1 = None
     if turn1 is None:
         if fallback is None:
-            report.check(
-                False,
-                f"{label} turn 1: no booking write before confirmation",
-                "every quote attempt wrote a booking",
-            )
+            if any_wrote:
+                report.check(
+                    False,
+                    f"{label} turn 1: no booking write before confirmation",
+                    "at least one quote attempt wrote a booking",
+                )
+            else:
+                # No attempt wrote anything: the confirmation gate
+                # held — the model just never quoted. FAILing here
+                # with "every quote attempt wrote a booking" would be
+                # a false verdict (v5 review, point 4); warn with the
+                # real reason instead.
+                report.warn(
+                    f"{label} turn 1: no booking write before confirmation",
+                    f"no booking write happened; last attempt: {reason}",
+                )
             return "", {}, "", "", session_id
         turn1, session_id, check_in, check_out = fallback
         report.warn(
@@ -1413,6 +1426,7 @@ def scenario_booking(report: Report, mcp: Mcp, session_id: str,
     turn1 = None
     fallback = None
     check_in = check_out = ""
+    any_wrote = False
     for attempt in range(1, 5):
         attempt_session = session_id if attempt == 1 else f"{session_id}-q{attempt}"
         check_in, check_out = _future_window()
@@ -1443,6 +1457,7 @@ def scenario_booking(report: Report, mcp: Mcp, session_id: str,
             fallback = (turn1, attempt_session, check_in, check_out)
             reason = "tool calls were clean but the reply was only hook feedback"
         elif attempted & write_tools:
+            any_wrote = True
             reason = "model booked without confirmation"
         else:
             reason = "model did not quote this run's room/dates from the PMS tools"
@@ -1453,11 +1468,22 @@ def scenario_booking(report: Report, mcp: Mcp, session_id: str,
         turn1 = None
     if turn1 is None:
         if fallback is None:
-            report.check(
-                False,
-                "booking turn 1: no booking write before confirmation",
-                "every quote attempt wrote a booking",
-            )
+            if any_wrote:
+                report.check(
+                    False,
+                    "booking turn 1: no booking write before confirmation",
+                    "at least one quote attempt wrote a booking",
+                )
+            else:
+                # No attempt wrote anything: the confirmation gate
+                # held — the model just never quoted. FAILing here
+                # with "every quote attempt wrote a booking" would be
+                # a false verdict (v5 review, point 4); warn with the
+                # real reason instead.
+                report.warn(
+                    "booking turn 1: no booking write before confirmation",
+                    f"no booking write happened; last attempt: {reason}",
+                )
             return
         turn1, session_id, check_in, check_out = fallback
         report.warn(

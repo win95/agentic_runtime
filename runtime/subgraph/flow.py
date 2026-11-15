@@ -39,12 +39,21 @@ Direction C: one agent per FLOW, not per node.
   state key, and the outcome summary comes from that key — never from
   the message list, so no control line can leak into the guest's
   answer. (The route node's replies are not in ``flow_messages`` at
-  all, so ``outcome_from_messages`` never sees them.)
+  all, so ``outcome_from_messages`` never sees them; and when no flow
+  produced an answer the summary stays empty instead of falling back
+  to the raw message list.) Each flow agent's input is isolated: it
+  sees only the mission prompt, earlier flows' answer texts, and its
+  own flow instruction — never the router's instruction or its
+  ``FLOW:`` declarations, which the model would otherwise copy into
+  its reply.
 - An invalid or missing flow declaration ENDS the turn with an error
   recorded — there is no "next in order" fallback, because in a flat
   list of independent flows there is no meaningful next. This is the
   deliberate contract change: a routing failure is a stopped turn,
-  not a walk into another flow.
+  not a walk into another flow. "Invalid" includes ambiguous: a reply
+  with two ``FLOW:`` declarations, or an "or ``FLOW:``" alternative,
+  is no choice at all — the parser does not silently take the first
+  token.
 - The write gate is structural, not prompt-only. ``resume_nodes``
   (``create-booking``) are flow boundaries: the booking-create flow is
   enterable only when the session has prior turns, and its tools are
@@ -118,8 +127,25 @@ MAX_TOOL_CALLS_PER_FLOW = 10
 # cause): the first token after FLOW: is the choice — bold markers
 # (the model writes **FLOW:**, colon inside the bold), indentation
 # and trailing explanation after the token are all accepted, because
-# the model writes prose around its declaration.
+# the model writes prose around its declaration. Tolerant is NOT
+# ambiguous: a reply that declares two flows ("FLOW: a or FLOW: b")
+# or hedges with an alternative ("... or FLOW: b") is not a vote for
+# the first token — it is no choice at all, and the router ends the
+# turn instead of misrouting on it (v5 review, point 1).
 FLOW_RE = re.compile(r"(?m)^[ \t]*(?:\*\*)?FLOW\s*:\s*(?:\*\*)?\s*([A-Za-z0-9_-]+)")
+_FLOW_COUNT_RE = re.compile(r"\bFLOW\s*:", re.IGNORECASE)
+_OR_FLOW_RE = re.compile(r"\bor\s+FLOW\s*:", re.IGNORECASE)
+
+
+def _is_ambiguous_flow_declaration(text: str | None) -> bool:
+    """True when the reply declares more than one flow, or offers a
+    FLOW: as an alternative ("... or FLOW: b") — either way the model
+    did not make one choice."""
+    if not text:
+        return False
+    if _OR_FLOW_RE.search(text):
+        return True
+    return len(_FLOW_COUNT_RE.findall(text)) > 1
 
 
 @dataclass
@@ -234,8 +260,12 @@ def derive_flows(
 
 
 def parse_flow(text: str | None) -> str | None:
-    """The flow id the route node declared, or None (no FLOW: line)."""
+    """The flow id the route node declared, or None — no FLOW: line,
+    or an ambiguous one (two declarations, or an "or FLOW:"
+    alternative: the model did not make one choice)."""
     if not text:
+        return None
+    if _is_ambiguous_flow_declaration(text):
         return None
     match = FLOW_RE.search(text)
     return match.group(1) if match else None
@@ -310,7 +340,9 @@ class FlowState(TypedDict, total=False):
     separate from ``messages``, so no control line can leak into it.
     ``flow_messages`` holds only flow-agent output (never the route
     node's replies), so the outcome never derives a summary from a
-    routing message."""
+    routing message. ``flow_answers`` holds each flow's guest-facing
+    reply text in order — the only thing a later flow in the same turn
+    sees of an earlier flow (see the isolation in ``_run_flow``)."""
 
     messages: list
     current: str | None
@@ -325,6 +357,7 @@ class FlowState(TypedDict, total=False):
     answer: str
     flow_messages: list
     flow_trace: list[dict]
+    flow_answers: list[str]
 
 
 def build_flow_subgraph(
@@ -483,7 +516,8 @@ def build_flow_subgraph(
             model = route_model()
             reply = model.invoke(messages, config=config) if config else model.invoke(messages)
             new_messages = messages + [reply]
-            declared = parse_flow(last_text(new_messages))
+            reply_text = last_text(new_messages)
+            declared = parse_flow(reply_text)
             errors = list(state.get("errors") or [])
             # The router decides here; the edge function only reads
             # route_next. Every invalid case ends the turn with an
@@ -493,7 +527,13 @@ def build_flow_subgraph(
             # report-booking created a task the guest never asked for.
             route_next: str | None = None
             if declared is None:
-                errors.append("Router declared no flow (no FLOW: line); ending turn")
+                if _is_ambiguous_flow_declaration(reply_text):
+                    errors.append(
+                        "Router declared an ambiguous flow (more than "
+                        "one FLOW: line, or 'or FLOW:'); ending turn"
+                    )
+                else:
+                    errors.append("Router declared no flow (no FLOW: line); ending turn")
             elif declared in ("END", "WAIT"):
                 route_next = "END"
             elif declared not in by_id:
@@ -531,17 +571,37 @@ def build_flow_subgraph(
     def make_flow_fn(flow: Flow):
         def _run_flow(state: dict) -> dict:
             steps = int(state.get("steps") or 0) + 1
-            messages = list(state.get("messages") or []) + [
-                HumanMessage(content=flow_instruction(state, flow))
-            ]
+            # Context isolation (v5 review, point 3): the flow agent
+            # must NOT see the router's instruction or its FLOW:
+            # declarations — the model copies them into its own reply
+            # ("FLOW: check" as the whole answer). It gets only the
+            # mission prompt, what earlier flows already told the
+            # guest this turn (their answer texts, never their raw
+            # messages), and its own flow instruction. The full
+            # history stays in state["messages"] for the router and
+            # the trace — only the agent's INPUT is isolated.
+            history = list(state.get("messages") or [])
+            instruction = HumanMessage(content=flow_instruction(state, flow))
+            prior_answers = list(state.get("flow_answers") or [])
+            isolated: list = history[:1]
+            if prior_answers:
+                isolated.append(
+                    HumanMessage(
+                        content=(
+                            "Earlier flows this turn already told the "
+                            "guest:\n" + "\n---\n".join(prior_answers)
+                        )
+                    )
+                )
+            isolated.append(instruction)
             config = _config()
             errors = list(state.get("errors") or [])
             if flow_executor is not None:
-                new_messages = flow_executor(flow, state, messages)
+                new_messages = flow_executor(flow, state, isolated)
             else:
                 agent = flow_agent(flow)
                 cap_cache[flow.id].reset()
-                payload: dict = {"messages": messages}
+                payload: dict = {"messages": isolated}
                 if files:
                     payload["files"] = files
                 try:
@@ -559,7 +619,7 @@ def build_flow_subgraph(
                         f"Tool-call budget ({max_tool_calls_per_flow} calls) "
                         f"exceeded at flow '{flow.id}': {exc}"
                     )
-                    new_messages = messages + [
+                    new_messages = isolated + [
                         AIMessage(
                             content=(
                                 f"Flow '{flow.id}' stopped: the tool-call "
@@ -567,12 +627,12 @@ def build_flow_subgraph(
                             )
                         )
                     ]
-            added = new_messages[len(messages) :] if len(new_messages) >= len(messages) else []
+            added = new_messages[len(isolated) :] if len(new_messages) >= len(isolated) else []
             answer = _flow_answer(added)
             if steps >= max_steps:
                 errors.append(f"Plan step cap ({max_steps} nodes) reached at flow '{flow.id}'")
             return {
-                "messages": new_messages,
+                "messages": history + [instruction] + added,
                 "current": flow.id,
                 "visited": list(state.get("visited") or []) + [flow.id],
                 "declared_flow": None,
@@ -583,6 +643,7 @@ def build_flow_subgraph(
                 "flow_messages": list(state.get("flow_messages") or []) + added,
                 "flow_trace": list(state.get("flow_trace") or [])
                 + [_trace_flow(flow, new_messages, answer)],
+                "flow_answers": prior_answers + ([answer] if answer else []),
             }
 
         return _run_flow
@@ -653,6 +714,7 @@ def run_flow_subgraph(
         "answer": "",
         "flow_messages": [],
         "flow_trace": [],
+        "flow_answers": [],
     }
     config: dict = {}
     if callbacks:
@@ -670,6 +732,14 @@ def run_flow_subgraph(
     answer = (result.get("answer") or "").strip()
     if answer:
         outcome["summary"] = answer
+    else:
+        # No flow produced a guest-facing reply: never fall back to
+        # the raw message list — a flow agent's reply can be a bare
+        # control line ("FLOW: check"), and that line must not become
+        # the guest's answer (v5 review, point 2). An empty summary
+        # plus the recorded errors says honestly that nothing was
+        # answered.
+        outcome["summary"] = ""
     # The graph's own visited path (flow ids) — plan_trace only sees
     # flows with tool calls, so the path is reported separately.
     outcome["visited_nodes"] = list(result.get("visited") or [])

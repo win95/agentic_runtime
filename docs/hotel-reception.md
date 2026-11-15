@@ -142,6 +142,8 @@ Map 20 node suy ra 8 flow:
   Một model call thuần túy (node `route` của map) khai báo
   `FLOW: <flow-id>` — parse khoan dung (bold, thụt đầu dòng, chữ giải
   thích sau token đều chấp nhận) — hoặc `FLOW: END` / `FLOW: WAIT`.
+  Khoan dung không có nghĩa là mơ hồ: reply có ≥2 `FLOW:` hoặc chứa
+  `or FLOW:` bị từ chối (không lấy token đầu tiên làm lựa chọn).
   Tập lựa chọn chỉ còn 8 flow kèm điều kiện `when` của nhánh, không
   phải 20 node. Sau một flow, router chạy lại để turn nhiều yêu cầu
   có thể vào flow thứ hai; flow đã đi qua trong turn không bao giờ
@@ -151,9 +153,15 @@ Map 20 node suy ra 8 flow:
 - **Kênh trả lời tách khỏi kênh điều khiển.** Mỗi flow ghi câu trả lời
   cho khách vào key `answer` riêng trong state; summary của outcome
   lấy từ key đó, không suy ra từ message list — nên không dòng control
-  nào rò vào câu trả lời. Message của node router không nằm trong
+  nào rò vào câu trả lời. Khi không flow nào trả lời (agent chỉ trả
+  đúng một dòng `FLOW:`), summary để trống thay vì lấy text thô từ
+  message list. Message của node router không nằm trong
   `flow_messages` nên `outcome_from_messages` không bao giờ thấy dòng
   `FLOW: END`.
+- **Context của từng flow được cô lập.** Flow agent chỉ nhận mission
+  prompt, câu trả lời (prose) của các flow trước trong cùng turn, và
+  instruction của chính nó — không thấy instruction của router hay
+  câu `FLOW:` của router, nên model không copy lại dòng control đó.
 - **Luật resume (turn xác nhận) nay là biên flow:** flow
   `create-booking` chỉ được vào khi session đã có turn trước — và
   tool của nó chỉ có `create_booking` + bước báo cáo; flow
