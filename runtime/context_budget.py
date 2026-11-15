@@ -1,22 +1,33 @@
 """Context window budget — Phương án A (32,000 tokens).
 
-One source of truth for how the window is split (approved 2026-11-10).
-All numbers are tokens unless a name says ``chars``.
+One source of truth for how the window is split (approved 2026-11-10;
+revised 2026-11-15: retrieval and skills up, history down, plus a
+long-term-memory block carved out of history).
 
 ========================  =========  ======
 Component                 Tokens     Share
 ========================  =========  ======
 System prompt             1,024      3.2%
 Tool definitions          2,048      6.4%
-Skills                    1,024      3.2%
-Retrieved context         3,072      9.6%
+Skills                    2,048      6.4%
+Retrieved context         8,024     25.1%
 Execution input           2,048      6.4%
-Conversation + tool out   15,616     48.8%
-Output reserve            5,120      16.0%
+Conversation + tool out   9,640     30.1%
+Output reserve            5,120     16.0%
 KV cache / agent          2,048      6.4%
 ------------------------  ---------  ------
 TOTAL                     32,000     100%
 ========================  =========  ======
+
+The history slice (9,640) is shared three ways: the session-history
+block (4,096 — prior turns, ``runtime/session_history.py``), the
+long-term-memory block (1,024 — keyword-retrieved trimmed turns,
+``runtime/long_term_memory.py``), and the current run's own
+conversation + tool output (4,520 nominal). The trim enforces the
+slice dynamically: ``HookMiddleware.before_model`` trims turns to
+``HISTORY_TOKENS`` minus the history/LTM blocks actually rendered
+for the run (``reserved_history_tokens``), so a fresh session with no
+history keeps the full 9,640 for its own turns.
 
 Enforcement (best-effort where noted, never crash a run):
 
@@ -25,15 +36,18 @@ Enforcement (best-effort where noted, never crash a run):
   execution — the run still proceeds (these are pinned config, failing
   the run would hide the real work).
 - Retrieved context: ``retrieval_max_chars()`` derives the hook's char
-  cap from RETRIEVAL_TOKENS (3,072 tok x 4 chars). The mission YAML
+  cap from RETRIEVAL_TOKENS (8,024 tok x 4 chars). The mission YAML
   may still override ``max_chars`` per mission.
 - Execution input: already capped upstream at 8,192 bytes
   (``MAX_INPUT_JSON_BYTES``) = 2,048 tokens — this table just names
   that cap as the input bucket.
 - History: ``HookMiddleware.before_model`` trims the oldest complete
-  turns (AIMessage + its ToolMessages) until the turn total fits
-  HISTORY_TOKENS. System/human messages are never removed and are not
-  counted against the history bucket (they have their own buckets).
+  turns (AIMessage + its ToolMessages) until the turn total fits the
+  effective history budget. System/human messages are never removed
+  and are not counted against the history bucket (they have their own
+  buckets). A trimmed turn is NOT lost: it is encoded into
+  long-term memory first (``runtime/long_term_memory.py``), so a
+  later execution can retrieve it by keyword.
 - Output reserve: passed as ``max_tokens`` when the chat model is
   built (``runtime/llm_factory.py``) — one response can never eat more
   than the reserve.
@@ -59,10 +73,14 @@ import math
 MAX_CONTEXT_TOKENS = 32_000
 SYSTEM_PROMPT_TOKENS = 1_024
 TOOL_DEFINITIONS_TOKENS = 2_048
-SKILLS_TOKENS = 1_024
-RETRIEVAL_TOKENS = 3_072
+SKILLS_TOKENS = 2_048
+RETRIEVAL_TOKENS = 8_024
 EXECUTION_INPUT_TOKENS = 2_048
-HISTORY_TOKENS = 15_616
+HISTORY_TOKENS = 9_640
+# The long-term-memory block (keyword-retrieved trimmed turns) is
+# carved out of the history slice, not added on top of it:
+# 9,640 = 4,096 session history + 1,024 LTM + 4,520 live turns.
+LTM_TOKENS = 1_024
 OUTPUT_RESERVE_TOKENS = 5_120
 KV_CACHE_TOKENS_PER_AGENT = 2_048
 
@@ -129,12 +147,14 @@ def message_tokens(message) -> int:
     return estimate_tokens(_message_text(message))
 
 
-def _turns(messages: list) -> list[list]:
+def group_turns(messages: list) -> list[list]:
     """Group ai/tool messages into turns (ai + its following tools).
 
     System/human messages are not part of any turn. A tool message with
     no preceding ai message forms a singleton turn (defensive — should
-    not happen in a well-formed history).
+    not happen in a well-formed history). Shared by ``trim_history``
+    and the long-term-memory encoder, so a trimmed turn is stored as
+    the same unit it was removed as.
     """
     turns: list[list] = []
     for message in messages:
@@ -147,6 +167,11 @@ def _turns(messages: list) -> list[list]:
             else:
                 turns.append([message])
     return turns
+
+
+def _turns(messages: list) -> list[list]:
+    """Backwards-compatible alias for ``group_turns``."""
+    return group_turns(messages)
 
 
 def trim_history(messages: list, budget_tokens: int = HISTORY_TOKENS) -> list:
@@ -163,7 +188,7 @@ def trim_history(messages: list, budget_tokens: int = HISTORY_TOKENS) -> list:
     ``id=None`` until they enter the graph, so the caller maps them to
     ``RemoveMessage`` from the state, where ids exist.
     """
-    turns = _turns(messages)
+    turns = group_turns(messages)
     if not turns:
         return []
     totals = [sum(message_tokens(m) for m in turn) for turn in turns]

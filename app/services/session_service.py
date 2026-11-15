@@ -115,4 +115,16 @@ def load_session_history(
         for execution in priors
     ]
     kept, omitted = cap_turns(turns)
+    if omitted:
+        # The load-time cap drops the oldest turns; encode them into
+        # long-term memory before they are forgotten (best-effort —
+        # encode_session_turns never raises, and it dedupes on
+        # (session, execution, content hash), so the same dropped
+        # turns are not re-stored on every later execution).
+        kept_ids = {t["execution_id"] for t in kept}
+        dropped = [t for t in turns if t["execution_id"] not in kept_ids]
+        if dropped:
+            from runtime.long_term_memory import encode_session_turns
+
+            encode_session_turns(session_id, exclude_execution_id, dropped)
     return {"turns": kept, "omitted": omitted, "total_prior": len(turns)}

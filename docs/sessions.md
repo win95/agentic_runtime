@@ -70,7 +70,7 @@ never bloats the context of an agent whose turns are big.
 | Cap | Global default | Why |
 | --- | --- | --- |
 | Prior turns kept | 10 (`MAX_SESSION_TURNS`) | A conversation stays readable. |
-| Rendered history block | 4,096 tokens (`SESSION_HISTORY_TOKENS`, `estimate_tokens` = chars/4) | Charged to the HISTORY slice of the context budget (15,616 tokens), leaving 11,520 for the current run's own conversation + tool output. NOT charged to the system-prompt bucket. |
+| Rendered history block | 4,096 tokens (`SESSION_HISTORY_TOKENS`, `estimate_tokens` = chars/4) | Charged to the HISTORY slice of the context budget (9,640 tokens), leaving 4,520 for the current run's own conversation + tool output after the 1,024-token long-term-memory block. NOT charged to the system-prompt bucket. |
 | Per-turn input | 1,000 chars | |
 | Per-turn answer | 1,500 chars | |
 | Per-turn root causes | 5 × 200 chars | |
@@ -116,6 +116,39 @@ state with fresh tool calls) — the YAML text is mirrored in
 by both missions) teaches the agent when to consult history, what to
 trust, and what not to do. **The skill is guidance only** — the
 enforcement is the renderer caps above, not the skill text.
+
+## Long-term memory (trimmed turns, keyword retrieval)
+
+Session history above is prose summaries of prior executions. The
+turns it *drops* — and the turns the in-run history trim drops —
+used to be lost entirely. Long-term memory (`runtime/long_term_memory.py`,
+table `long_term_memories`, migration 0011) keeps them:
+
+- **Write, trim path:** `HookMiddleware.before_model` encodes each
+  turn it trims into a row (session, execution, turn index,
+  keywords, rendered text) *before* the `RemoveMessage` goes out.
+- **Write, session-cap path:** the load-time cap in
+  `session_service.load_session_history` and the per-agent re-cap in
+  `deep_agent_node` encode the turns they drop (already prose
+  summaries). Rows dedupe on (session, execution, content hash), so
+  the same dropped turns are not re-stored on every later execution.
+- **Read:** at the start of an execution, `deep_agent_node`
+  keyword-matches the current input against the session's stored
+  turns and injects the best matches as one block (at most 1,024
+  tokens, `LTM_TOKENS`) after the session-history block. Structured
+  tokens (booking codes `BK-####`, payment ids, ISO dates) are kept
+  whole and weigh double — they are the facts a later turn needs
+  back. Matching is keyword-only, no embedding call; retention is
+  100 turns per session (oldest pruned on insert). No cross-session
+  recall.
+
+Budget: the LTM block is charged to the HISTORY slice (9,640
+tokens), alongside the 4,096-token session-history block, leaving
+4,520 for the run's own conversation. The trim enforces the slice
+dynamically — `HookMiddleware` gets `reserved_history_tokens`
+(the history + LTM blocks actually rendered) and trims turns to
+`HISTORY_TOKENS` minus that reserve, so a fresh session with no
+history keeps the full 9,640 for its own turns.
 
 ## API
 

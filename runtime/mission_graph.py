@@ -420,12 +420,58 @@ def deep_agent_node(state: MissionState) -> dict:
             limits=_limits,
             agent_id=agent_id or None,
         )
+        # Long-term memory (runtime/long_term_memory.py): turns the
+        # budget trimmed away in earlier executions, keyword-retrieved
+        # against this execution's input. The block rides on the
+        # history block — same injection points (flow/node subgraphs
+        # via run_*_subgraph, free-form via the system prompt) — and
+        # its tokens are reserved from the history slice by the
+        # middleware (reserved_history_tokens, below), so the slice is
+        # shared instead of overspent.
+        _session_id = state.get("session_id") or ""
+        if _session_id:
+            # Turns the per-agent re-cap drops here are encoded before
+            # they are forgotten (the load-time cap already encoded
+            # its own drops in session_service.load_session_history).
+            _shown_ids = {t.get("execution_id") for t in _shown_turns}
+            _dropped_turns = [
+                t
+                for t in (_history.get("turns") or [])
+                if t.get("execution_id") not in _shown_ids
+            ]
+            if _dropped_turns:
+                from runtime.long_term_memory import encode_session_turns
+
+                encode_session_turns(
+                    _session_id,
+                    state.get("execution_id") or "",
+                    _dropped_turns,
+                )
+            from runtime.long_term_memory import retrieve_long_term_memory
+
+            _ltm_block = retrieve_long_term_memory(
+                _session_id,
+                json.dumps(input_data or {}, ensure_ascii=False),
+            )
+            if _ltm_block:
+                history_block = (
+                    history_block + "\n\n" + _ltm_block
+                    if history_block
+                    else _ltm_block
+                )
         # Hooks (in-agent half): one middleware instance per run, over
         # the same registry the node already dispatched UserPromptSubmit
         # on. It denies dangerous tool calls, injects feedback on tool
         # results, and forces extra turns when the agent wants to stop
         # with no evidence gathered (see runtime/hooks/middleware.py).
         # The stop cap comes from execution.stop_max_continues.
+        # reserved_history_tokens: the history/LTM blocks rendered
+        # above already occupy part of the history slice, so the
+        # trim budget for the run's own turns is HISTORY_TOKENS
+        # minus those (a fresh session with no history keeps the
+        # full slice for its own turns).
+        from runtime.context_budget import estimate_tokens
+
         hook_middleware = HookMiddleware(
             hook_registry,
             execution_id=state.get("execution_id") or "",
@@ -439,6 +485,7 @@ def deep_agent_node(state: MissionState) -> dict:
             session_id=state.get("session_id") or "",
             allowed_tools=list(context.get("allowed_tools") or []),
             capabilities=list(context.get("capabilities") or []),
+            reserved_history_tokens=estimate_tokens(history_block),
         )
         # Part 1 (b): the per-run middleware list. For missions that
         # must not see any built-in tool (hotel only), append the

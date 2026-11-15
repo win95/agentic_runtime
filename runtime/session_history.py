@@ -34,12 +34,17 @@ of the rendered block names the limit that was applied, so the agent
 can see why history was cut.
 
 Budget accounting: the history block is charged to the HISTORY slice
-of the context budget (15,616 tokens in
+of the context budget (9,640 tokens in
 ``runtime/context_budget.py``) — ``SESSION_HISTORY_TOKENS`` (4,096)
-leaves 11,520 tokens of that slice for the current run's own
-conversation + tool output. It is NOT charged to the system-prompt
-bucket: ``deep_agent_node`` measures the fixed prefix without the
-history block (see the ``prompt_for_budget`` variable there).
+plus the long-term-memory block (1,024, see
+``runtime/long_term_memory.py``) leaves 4,520 tokens of that slice
+for the current run's own conversation + tool output. It is NOT
+charged to the system-prompt bucket: ``deep_agent_node`` measures
+the fixed prefix without the history block (see the
+``prompt_for_budget`` variable there). Turns the caps drop — at
+load time here, or by the per-agent re-cap in ``deep_agent_node`` —
+are encoded into long-term memory before they are forgotten, so a
+later execution can retrieve them by keyword.
 """
 
 from __future__ import annotations

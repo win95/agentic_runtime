@@ -260,6 +260,39 @@ class SessionGuestScope(Base):
     )
 
 
+class LongTermMemory(Base):
+    """One trimmed turn, kept for keyword retrieval (long-term memory).
+
+    Written when the context budget cuts a turn — ``HookMiddleware``
+    encodes turns removed by ``before_model`` trimming, and the
+    session-history loader encodes turns dropped by the turn/token
+    cap — instead of losing them. A later execution in the same
+    session retrieves matching turns by keyword
+    (``runtime/long_term_memory.py``) into a 1,024-token block in the
+    system prompt. ``source`` is "trim" (cut mid-run by the budget)
+    or "session_cap" (cut at load time by the session-history cap).
+    ``keywords`` is the normalized keyword list the retrieval matches
+    against; ``text`` is the rendered turn (capped at write time).
+    Retention is per session (oldest pruned past
+    ``MAX_TURNS_PER_SESSION``); there is no cross-session recall.
+    """
+
+    __tablename__ = "long_term_memories"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String(128), nullable=False, index=True)
+    execution_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    turn_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source: Mapped[str] = mapped_column(String(32), nullable=False, default="trim")
+    keywords: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    text: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # First 16 hex chars of sha256(text): dedupe key with
+    # (session_id, execution_id) — the session-cap path drops the
+    # same oldest turns on every execution of the session.
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
 class SessionSandbox(Base):
     """One OpenSandbox sandbox per session (docs/sandbox.md).
 

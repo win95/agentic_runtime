@@ -11,8 +11,14 @@ It translates hook decisions into agent behavior:
   load-context pattern).
 - ``before_model`` — context budget: trims the oldest complete
   conversation turns (AIMessage + its ToolMessages) when the turn
-  total exceeds HISTORY_TOKENS, via ``RemoveMessage`` — system/human
-  messages are never removed. A trimming failure never fails the run.
+  total exceeds the effective history budget (HISTORY_TOKENS minus
+  the history/long-term-memory blocks rendered for the run,
+  ``reserved_history_tokens``), via ``RemoveMessage`` — system/human
+  messages are never removed. Before the removal goes out, the
+  trimmed turns are encoded into long-term memory
+  (``runtime/long_term_memory.py``) so a later execution can
+  retrieve them by keyword — encode-then-remove, never the reverse.
+  A trimming failure never fails the run.
 - ``wrap_tool_call`` — PreToolUse: a ``deny`` returns an error
   ``ToolMessage`` and the tool never runs. PostToolUse /
   PostToolUseFailure: ``feedback`` text is appended to the tool result
@@ -30,8 +36,9 @@ One instance is built per run in ``deep_agent_node`` and keeps the
 run's hook record in ``events`` (one dict per dispatch: event, tool,
 decision actions, message) so the node can surface interventions in
 the execution state. Like the token/audit handler, a middleware
-failure never fails the run — but unlike that handler it does not
-touch the DB at all.
+failure never fails the run — and like it, the middleware touches
+the DB only through one best-effort writer: the long-term-memory
+encoder, whose failure is logged while the trim still goes ahead.
 """
 
 from __future__ import annotations
@@ -46,9 +53,15 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
-from runtime.context_budget import HISTORY_TOKENS, message_tokens, trim_history
+from runtime.context_budget import (
+    HISTORY_TOKENS,
+    group_turns,
+    message_tokens,
+    trim_history,
+)
 from runtime.hooks.events import HookContext, HookEvent
 from runtime.hooks.registry import HookRegistry
+from runtime.long_term_memory import encode_turns
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +84,7 @@ class HookMiddleware(AgentMiddleware):
         session_id: str = "",
         allowed_tools: list | None = None,
         capabilities: list | None = None,
+        reserved_history_tokens: int = 0,
     ):
         self.registry = registry
         self.execution_id = execution_id
@@ -84,10 +98,17 @@ class HookMiddleware(AgentMiddleware):
         self.session_id = session_id
         self.allowed_tools = list(allowed_tools or [])
         self.capabilities = list(capabilities or [])
+        # History/LTM blocks rendered into the system prompt for this
+        # run (see runtime/context_budget.py): the trim budget for the
+        # run's own turns is HISTORY_TOKENS minus these, so the
+        # history slice is shared instead of overspent. 0 keeps the
+        # old behaviour (turns alone may use the whole slice).
+        self.reserved_history_tokens = max(0, int(reserved_history_tokens or 0))
         self.tool_calls_made = 0
         self.continues = 0
         self.trimmed_messages = 0
         self.trimmed_tokens = 0
+        self.encoded_turns = 0
         self.events: list[dict] = []
 
     # -- helpers ------------------------------------------------------
@@ -130,19 +151,32 @@ class HookMiddleware(AgentMiddleware):
     def before_model(self, state, runtime):  # noqa: ARG002 - runtime unused
         try:
             messages = (state or {}).get("messages") or []
-            remove = trim_history(messages, HISTORY_TOKENS)
+            budget = max(0, HISTORY_TOKENS - self.reserved_history_tokens)
+            remove = trim_history(messages, budget)
             if not remove:
                 return None
+            # Encode-then-remove: the trimmed turns go into long-term
+            # memory BEFORE the RemoveMessage goes out, so no turn is
+            # ever lost in the gap. The encoder never raises; a
+            # storage failure just means this run's trimmed turns are
+            # not retrievable later.
+            self.encoded_turns += encode_turns(
+                self.session_id,
+                self.execution_id,
+                group_turns(remove),
+            )
             remove_ids = [getattr(m, "id", "") or "" for m in remove]
             removed_tokens = sum(message_tokens(m) for m in remove)
             self.trimmed_messages += len(remove)
             self.trimmed_tokens += removed_tokens
             logger.info(
                 "Context budget: trimmed %d message(s) (~%d tokens) "
-                "to fit the %d-token history budget",
+                "to fit the %d-token history budget "
+                "(%d reserved for history/LTM blocks)",
                 len(remove),
                 removed_tokens,
-                HISTORY_TOKENS,
+                budget,
+                self.reserved_history_tokens,
             )
             # Messages carry ids once they are in the graph state; a
             # missing id cannot be removed by id, so it is left alone.
