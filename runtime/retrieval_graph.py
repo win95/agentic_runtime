@@ -27,14 +27,14 @@ functions instead (``expand_via_graph_query``) — no new Cypher.
 Per candidate the module returns G1 (min hop distance), G2
 (path_score = max over paths of prod(w_rel) * 0.6**hops, §4.2
 weights), G4 (entity-type match +1/0/-1), G5 (direct link 1 / 0.5
-via a 1-hop neighbour / 0 + distinct seeds linked), plus the Phase
-2 features G6 (seed coverage within 2 hops), G7 (PPR of the
-document node, from ``runtime/retrieval_ppr.py``) and G8 (hub
-value of the best path's transit node). G3 is the relation-type
-weight itself (it enters G2). ``graph_score`` is the Phase 1
-combination (G1/G2/G4/G5); ``phase2_graph_scores`` is the locked
-full formula ``0.45 * minmax_log(PPR) + 0.30 * z(path_term)
-+ 0.25 * coverage`` with the hub penalty inside the path term
+via a 1-hop neighbour / 0 + distinct seeds linked), plus G6
+(seed coverage within 2 hops), G7 (PPR of the document node,
+from ``runtime/retrieval_ppr.py``) and G8 (hub value of the best
+path's transit node). G3 is the relation-type weight itself (it
+enters G2). ``graph_score`` is the path-term combination
+(G1/G2/G4/G5); ``graph_scores`` is the locked full formula
+``0.45 * minmax_log(PPR) + 0.30 * z(path_term) + 0.25 * coverage``
+with the hub penalty inside the path term
 (see docs/hybrid-retrieval-phase2.md).
 
 Timeout: expansion takes ``timeout_seconds``; a store call that
@@ -88,12 +88,12 @@ DEFAULT_TIMEOUT_SECONDS = 0.15  # 150 ms Neo4j budget, report §3.2
 MAX_LIVE_ADJACENCY_NODES = 200
 
 
-# --- Phase 2 graph_score weights (locked full formula, §4.7) ----------
+# --- graph_score weights (locked full formula, §4.7) ----------
 # graph_score = W_PPR * ppr_norm + W_PATH * z(path_term)
 #             + W_COVERAGE * coverage
 #   ppr_norm  = log1p(PPR) then min-max to [0, 1] per query
 #               (report §4.7: "PPR via log then min-max")
-#   path_term = Phase 1 graph_score (G1/G2/G4/G5) minus the hub
+#   path_term = graph_score (G1/G2/G4/G5) minus the hub
 #               penalty (G8, below); z = per-query z-score clipped
 #               to [-2, 2] (``runtime/retrieval_fusion.py``)
 #   coverage  = G6, raw fraction in [0, 1] (NOT z-scored)
@@ -708,10 +708,10 @@ def graph_features(
     - G5: direct=1 if the doc links to a seed (payload/DOCUMENTED_BY
       link), 0.5 if it links to a 1-hop neighbour of a seed, else 0;
       plus ``n_seeds_linked`` = distinct seeds touched.
-    - G6 (Phase 2): seed coverage within 2 hops (``seed_coverage``).
-    - G7 (Phase 2): PPR of the *document node* from ``ppr_scores``
+    - G6: seed coverage within 2 hops (``seed_coverage``).
+    - G7: PPR of the *document node* from ``ppr_scores``
       (``runtime/retrieval_ppr.py``); 0.0 when no scores are passed.
-    - G8 (Phase 2): hub value of the best path's transit node —
+    - G8: hub value of the best path's transit node —
       ``log(1 + degree)`` when the best path transits through a
       Building / generic Document, else 0.0. A direct seed link and
       a doc that IS a 1-hop neighbour have no transit node (the doc
@@ -803,7 +803,7 @@ def graph_features(
 
 
 def graph_score(features: dict) -> float:
-    """Phase 1 graph_score from G1/G2/G4/G5 — the exact formula.
+    """Path-term graph_score from G1/G2/G4/G5 — the exact formula.
 
     ``graph_score = clip(path_score
         + 0.10 * G4                     # type match +1 / mismatch -1
@@ -859,7 +859,7 @@ def _minmax_log(values: list[float]) -> list[float]:
     return [(v - lo) / (hi - lo) for v in logs]
 
 
-def phase2_graph_scores(
+def graph_scores(
     feature_rows: list[dict],
     *,
     w_ppr: float = W_PPR,
@@ -867,11 +867,11 @@ def phase2_graph_scores(
     w_coverage: float = W_COVERAGE,
     hub_lambda: float = HUB_LAMBDA,
 ) -> list[float]:
-    """Phase 2 graph_score — the locked full formula (§4.7).
+    """The locked full graph_score formula (§4.7).
 
     One score per feature row (one per candidate, same order)::
 
-        path_term  = graph_score(row)   # Phase 1 G1/G2/G4/G5
+        path_term  = graph_score(row)   # path features G1/G2/G4/G5
                      - hub_lambda * row["g8_hub"]
         graph_score = w_ppr * minmax_log(PPR)      # G7
                     + w_path * z(path_term)        # G2 + G1/G4/G5 + G8
@@ -882,9 +882,7 @@ def phase2_graph_scores(
     ``w_ppr=0`` is the PPR ablation: it zeroes the PPR term with
     NO renormalising of the surviving sub-weights, so the
     ablation measures PPR alone. Rows are ``graph_features``
-    dicts; when a row has no G6/G7/G8 keys (pre-Phase-2 caller)
-    they default to 0.0 and the result equals the z-scored
-    Phase 1 score.
+    dicts; when a row has no G6/G7/G8 keys they default to 0.0.
     """
     if not feature_rows:
         return []

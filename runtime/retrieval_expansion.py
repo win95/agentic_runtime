@@ -458,7 +458,6 @@ class ExpandedRetriever:
         if not variants:
             kind = "none"
             trace = {
-                "phase2": self.base.phase2,
                 "seeds": [s["key"] for s in _seeds],
                 "graph_missing": graph_missing,
                 "weights": dict(self.base.weights),
@@ -537,7 +536,6 @@ class ExpandedRetriever:
                 [],
             )
         trace = {
-            "phase2": self.base.phase2,
             "seeds": [s["key"] for s in _seeds],
             "graph_missing": graph_missing,
             "weights": dict(self.base.weights),

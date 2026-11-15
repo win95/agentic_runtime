@@ -1,4 +1,4 @@
-"""Personalized PageRank over the candidate subgraph — Phase 2
+"""Personalized PageRank over the candidate subgraph — the G7 feature
 (report §4.1 G7, §4.4c, §4.7 step 2; locked decisions: PPR is a
 *feature* inside the deterministic fusion, never the sole ranker).
 

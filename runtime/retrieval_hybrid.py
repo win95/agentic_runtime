@@ -1,4 +1,4 @@
-"""Hybrid retriever — Phases 1–2 (report §4.7, §8 Phases 1–2).
+"""Hybrid retriever — the locked formula (report §4.7).
 
 It does NOT change ``infra.qdrant_client.search_documents`` or the
 ``retrieval_context`` hook — those keep their current behaviour
@@ -17,8 +17,8 @@ Pipeline per question:
    — dynamic cache only (see ``refresh_gazetteer_codes``).
 3. Graph arm: 1-hop expansion over the supplied adjacency, or
    ``expand_via_graph_query`` (live); every doc linked to a seed or
-   a 1-hop neighbour becomes a candidate, with G1/G2/G4/G5 (Phase 1)
-   plus G6 coverage, G7 PPR and G8 hub (Phase 2, default on). On the
+   a 1-hop neighbour becomes a candidate, with G1/G2/G4/G5 path
+   features plus G6 coverage, G7 PPR and G8 hub. On the
    live path G6/G7/G8 run over ``build_live_adjacency`` (real edges
    out to the second hop), degrading to the expansion-only adjacency
    if the live build fails — never over a fabricated adjacency.
@@ -28,12 +28,11 @@ Pipeline per question:
 7. ``exact`` = 1 when a gazetteer code from the question appears
    verbatim in the candidate's title/content.
 
-Phase 2 (default): ``graph_score`` is the locked full formula
+Graph score: the locked full formula
 ``0.45 * minmax_log(PPR) + 0.30 * z(path_term) + 0.25 * coverage``
-(``runtime/retrieval_graph.py::phase2_graph_scores``), with the
-hub penalty inside the path term. ``phase2=False`` reproduces the
-Phase 1 score. ``w_ppr=0`` is the PPR ablation flag: it zeroes
-the PPR sub-weight with no renormalising.
+(``runtime/retrieval_graph.py::graph_scores``), with the
+hub penalty inside the path term. ``w_ppr=0`` is the PPR ablation
+flag: it zeroes the PPR sub-weight with no renormalising.
 
 Trace per query (logged by the harness): seeds, expansion nodes
 returned / truncated, graph_missing, per-candidate features and
@@ -59,8 +58,7 @@ from runtime.retrieval_graph import (
     expand_via_graph_query,
     gazetteer_seeds,
     graph_features,
-    graph_score,
-    phase2_graph_scores,
+    graph_scores,
 )
 
 logger = logging.getLogger(__name__)
@@ -121,7 +119,6 @@ class HybridRetriever:
         w_vec: float = W_VEC,
         w_graph: float = W_GRAPH,
         w_exact: float = W_EXACT,
-        phase2: bool = True,
         w_ppr: float = W_PPR,
     ):
         if embeddings is None:
@@ -152,9 +149,8 @@ class HybridRetriever:
         self.use_live_graph = use_live_graph
         self.graph_store = graph_store
         self.weights = {"w_vec": w_vec, "w_graph": w_graph, "w_exact": w_exact}
-        self.phase2 = phase2
         # PPR ablation flag: w_ppr=0 zeroes the PPR sub-weight
-        # (no renormalising — see phase2_graph_scores).
+        # (no renormalising — see graph_scores).
         self.w_ppr = w_ppr
         # Live sources for the three tables below. Each accepts
         # a precomputed dict or a callable; a callable is resolved
@@ -334,12 +330,12 @@ class HybridRetriever:
                 )
             expansion["graph_adjacency_nodes"] = len(graph_adjacency)
 
-        # Phase 2 PPR (once per query, over the candidate subgraph —
+        # PPR (once per query, over the candidate subgraph —
         # the live adjacency, <=~200 nodes by design).
         # Seeds weigh confidence * specificity; a seed in no linked
         # document is maximally specific (weight 1.0).
         ppr_scores: dict = {}
-        if self.phase2 and not graph_missing:
+        if not graph_missing:
             from runtime.retrieval_ppr import personalized_pagerank, seed_specificity
 
             spec = seed_specificity(seeds, self._resolved_doc_counts())
@@ -384,13 +380,10 @@ class HybridRetriever:
                     ppr_scores=ppr_scores or None,
                 )
             )
-        if self.phase2 and not graph_missing:
-            gscores = phase2_graph_scores(feature_rows, w_ppr=self.w_ppr)
+        if graph_missing:
+            gscores = [0.0 for _ in feature_rows]
         else:
-            gscores = [
-                0.0 if graph_missing else graph_score(features)
-                for features in feature_rows
-            ]
+            gscores = graph_scores(feature_rows, w_ppr=self.w_ppr)
         candidates: list[dict] = []
         for doc_id, features, gscore in zip(candidate_ids, feature_rows, gscores):
             doc = self._doc_for(doc_id, vec_by_id)
@@ -513,7 +506,6 @@ class HybridRetriever:
     def _trace(self, candidates, final, seeds, expansion, graph_missing):
         """The standard retrieve trace (shared by both paths)."""
         trace = {
-            "phase2": self.phase2,
             "seeds": [s["key"] for s in seeds],
             "expansion_nodes_returned": expansion.get("nodes_returned", 0),
             "expansion_truncated": bool(expansion.get("truncated", False)),
@@ -607,7 +599,6 @@ def build_hybrid_retriever(
     client=None,
     graph_store=None,
     embeddings=None,
-    phase2: bool = True,
     w_ppr: float = W_PPR,
     **kwargs,
 ):
@@ -699,7 +690,6 @@ def build_hybrid_retriever(
         doc_counts=lambda: count_documents_per_node(client=live_client),
         doc_links=lambda: get_document_links(client=live_client),
         doc_texts=lambda doc_ids: get_document_payloads(doc_ids, client=live_client),
-        phase2=phase2,
         w_ppr=w_ppr,
         **kwargs,
     )
