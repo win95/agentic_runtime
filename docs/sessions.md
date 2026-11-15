@@ -233,3 +233,15 @@ layer (implemented in `runtime/tracing.py`):
   own session ids and do not trigger notifications.
 - **No cross-agent sessions:** the binding rule rejects them. To talk
   to another agent, start a new session.
+
+## User-bound sessions (guest API)
+
+Sessions are bound to the user who created them (docs/guest-api.md).
+A JWT user can only join and read their own sessions: creating an
+execution with another user's `session_id` is a 422, and `GET
+/sessions/{id}` for another user's session is a 404 (never 403 — no
+existence leak). Service-key calls stay unrestricted, as before.
+`load_session_history` also scopes by the execution's owner, so the
+worker never shows another user's turns to the agent. Executions
+with `user_id` NULL (seed/demo, service-key runs) do not bind a
+session to anyone.

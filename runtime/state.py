@@ -24,6 +24,12 @@ class MissionState(TypedDict, total=False):
     # into the system prompt; the capability subgraph ignores them.
     session_id: str | None
     session_history: dict | None
+    # The authenticated user running this execution (JWT "sub", or
+    # None for service-key / schedule / admin dispatch). deep_agent_node
+    # tells the agent who is talking to it; the tools and hooks see it
+    # in the execution context. Never a guest-supplied value — it comes
+    # from the execution row, which the API sets from the JWT.
+    user_id: str | None
     # "deterministic" | "hybrid" | "autonomous" (from mission.execution.mode)
     mode: str
     # Option C: the AgentVersion that ran this execution (None when no

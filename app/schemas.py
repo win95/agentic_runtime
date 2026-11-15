@@ -130,6 +130,27 @@ class ExecutionRead(BaseModel):
     finished_at: datetime | None = None
 
 
+# --- Guest API (docs/guest-api.md) ---
+class GuestChatCreate(BaseModel):
+    session_id: str | None = Field(
+        default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$"
+    )
+    message: str = Field(min_length=1, max_length=4000)
+
+
+class GuestChatRead(BaseModel):
+    execution_id: str
+    session_id: str
+    status: str
+
+
+class GuestSessionRead(BaseModel):
+    session_id: str
+    mission_id: str
+    execution_count: int
+    last_created_at: datetime | None = None
+
+
 # --- Document Management (docs/documents.md) ---
 class DocumentRead(BaseModel):
     doc_id: str

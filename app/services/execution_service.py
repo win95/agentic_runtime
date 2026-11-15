@@ -88,6 +88,11 @@ def create_execution(
         )
         if binding_problem is not None:
             return None, [binding_problem]
+        ownership_problem = session_service.check_session_ownership(
+            db, session_id, user_id
+        )
+        if ownership_problem is not None:
+            return None, [ownership_problem]
 
     execution = models.Execution(
         id=new_execution_id(),

@@ -14,23 +14,38 @@ from sqlalchemy.orm import Session
 
 from app import schemas
 from app.core.db import get_db
-from app.core.security import require_api_key
+from app.core.security import get_current_user, require_api_key_or_user
 from app.routers.executions import _to_read
 from app.services import session_service
 from runtime.security import is_valid_session_id
 
 router = APIRouter(
-    prefix="/sessions", tags=["sessions"], dependencies=[Depends(require_api_key)]
+    prefix="/sessions",
+    tags=["sessions"],
+    dependencies=[Depends(require_api_key_or_user)],
 )
 
 
 @router.get("/{session_id}", response_model=schemas.SessionRead)
-def get_session(session_id: str, db: Session = Depends(get_db)):
+def get_session(
+    session_id: str,
+    db: Session = Depends(get_db),
+    user: dict | None = Depends(get_current_user),
+):
     if not is_valid_session_id(session_id):
         raise HTTPException(
             status_code=422,
             detail="Invalid session_id: must match ^[A-Za-z0-9_-]{1,64}$",
         )
+    # User-bound sessions (docs/sessions.md): a JWT user only reads
+    # their own sessions — another user's session is 404, exactly as
+    # if it did not exist. Service-key calls stay unrestricted.
+    if user is not None:
+        problem = session_service.check_session_ownership(
+            db, session_id, user.get("sub")
+        )
+        if problem is not None:
+            raise HTTPException(status_code=404, detail="Session not found")
     summary = session_service.get_session_summary(db, session_id)
     if summary is None:
         raise HTTPException(status_code=404, detail="Session not found")

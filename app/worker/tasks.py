@@ -64,7 +64,10 @@ def run_execution(self, execution_id: str) -> dict:
                 from app.services import session_service
 
                 session_history = session_service.load_session_history(
-                    db, execution.session_id, execution.id
+                    db,
+                    execution.session_id,
+                    execution.id,
+                    user_id=execution.user_id,
                 )
             except Exception as exc:  # noqa: BLE001 — history never blocks a run
                 logger.warning(
@@ -90,6 +93,7 @@ def run_execution(self, execution_id: str) -> dict:
             execution_id,
             session_history=session_history,
             session_id=execution.session_id,
+            user_id=execution.user_id,
         )
 
         # A cancellation that arrived mid-run wins over the graph result.

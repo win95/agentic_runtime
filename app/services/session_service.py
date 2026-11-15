@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import uuid
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app import models
@@ -58,6 +59,57 @@ def get_session_summary(db: Session, session_id: str) -> dict | None:
     }
 
 
+def check_session_ownership(
+    db: Session, session_id: str, user_id: str | None
+) -> str | None:
+    """Ownership check for a user joining a session.
+
+    Returns a problem string when the session holds executions owned
+    by a different user, else None. Service-key calls (user_id None)
+    are unrestricted, as in ``require_own_execution``. Executions
+    with user_id NULL are pre-user legacy rows (seed/demo, service-key
+    runs) and do not bind the session to anyone.
+    """
+    if user_id is None:
+        return None
+    owners = {
+        row[0]
+        for row in db.query(models.Execution.user_id)
+        .filter(models.Execution.session_id == session_id)
+        .distinct()
+        .all()
+    }
+    if any(owner is not None and owner != user_id for owner in owners):
+        return f"session '{session_id}' belongs to another user"
+    return None
+
+
+def list_user_sessions(db: Session, user_id: str) -> list[dict]:
+    """Sessions the user has executions in, newest first."""
+    rows = (
+        db.query(
+            models.Execution.session_id,
+            models.Execution.mission_id,
+            func.count(models.Execution.id),
+            func.max(models.Execution.created_at),
+        )
+        .filter(models.Execution.user_id == user_id)
+        .filter(models.Execution.session_id.isnot(None))
+        .group_by(models.Execution.session_id, models.Execution.mission_id)
+        .order_by(func.max(models.Execution.created_at).desc())
+        .all()
+    )
+    return [
+        {
+            "session_id": session_id,
+            "mission_id": mission_id,
+            "execution_count": count,
+            "last_created_at": last_created_at,
+        }
+        for session_id, mission_id, count, last_created_at in rows
+    ]
+
+
 def check_session_binding(
     db: Session, session_id: str, mission_id: str, agent_id: str | None
 ) -> str | None:
@@ -88,7 +140,10 @@ def check_session_binding(
 
 
 def load_session_history(
-    db: Session, session_id: str, exclude_execution_id: str
+    db: Session,
+    session_id: str,
+    exclude_execution_id: str,
+    user_id: str | None = None,
 ) -> dict:
     """Prior turns of a session, capped, for the next run's agent.
 
@@ -98,15 +153,26 @@ def load_session_history(
     ``{"turns": [...], "omitted": int, "total_prior": int}`` — turns
     are oldest first, already capped (see
     ``runtime/session_history.py::cap_turns``).
+
+    ``user_id`` scopes the load to the caller's own turns plus
+    pre-user (NULL-owner) rows; a turn owned by another user is never
+    shown to this run's agent. None means unfiltered (the pre-user
+    behaviour — the worker passes the execution's owner).
     """
-    priors = (
+    query = (
         db.query(models.Execution)
         .filter(models.Execution.session_id == session_id)
         .filter(models.Execution.id != exclude_execution_id)
         .filter(models.Execution.status.in_(TERMINAL_STATUSES))
-        .order_by(models.Execution.created_at.asc(), models.Execution.id.asc())
-        .all()
     )
+    if user_id is not None:
+        query = query.filter(
+            (models.Execution.user_id.is_(None))
+            | (models.Execution.user_id == user_id)
+        )
+    priors = query.order_by(
+        models.Execution.created_at.asc(), models.Execution.id.asc()
+    ).all()
     turns = [
         summarize_turn(
             execution,

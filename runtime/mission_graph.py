@@ -231,6 +231,7 @@ def deep_agent_node(state: MissionState) -> dict:
         "input": input_data,
         "execution_config": mission.get("execution") or {},
         "session_id": state.get("session_id") or "",
+        "user_id": state.get("user_id"),
     }
     try:
         from runtime.deep_agent import (
@@ -593,6 +594,19 @@ def deep_agent_node(state: MissionState) -> dict:
             # seed text) runs — the runtime never looks up MLflow for
             # prompts (docs/agent-versioning.md).
             base_prompt_text = DEFAULT_SYSTEM_PROMPT
+        # The authenticated user, when known (guest API / JWT runs):
+        # the agent must know who it is talking to, so it never treats
+        # another user's data as this user's. One line in the system
+        # prompt reaches every path (free-form, node and flow agents all
+        # build from base_prompt_text). Never guest-supplied — it comes
+        # from the execution row via run_mission.
+        if state.get("user_id"):
+            base_prompt_text = (
+                base_prompt_text
+                + "\n\nCurrent user: "
+                + state["user_id"]
+                + " (the authenticated user talking to you)."
+            )
         # Tracing (docs/sessions.md): the execution/session identity rides
         # in the LangSmith config of the agent invoke (free-form) or the
         # subgraph invoke (pilot) — built once, used by either path.
@@ -1224,6 +1238,7 @@ def run_mission(
     execution_id: str,
     session_history: dict | None = None,
     session_id: str | None = None,
+    user_id: str | None = None,
 ) -> dict:
     """Run one execution through the Mission Graph and return final state.
 
@@ -1234,6 +1249,10 @@ def run_mission(
     ``session_service.load_session_history`` ({"turns", "omitted",
     "total_prior"}) — None means no history, and the run behaves
     exactly as before (fresh session, or callers that pass nothing).
+
+    ``user_id`` is the authenticated user (JWT "sub", or None for
+    service-key / schedule / admin dispatch). It rides in the state so
+    deep_agent_node can tell the agent who is talking to it.
     """
 
     # Tracing for direct callers (worker, eval, langgraph dev): the API
@@ -1266,6 +1285,7 @@ def run_mission(
         "agent_version_drift": agent_version_drift,
         "session_id": session_id,
         "session_history": session_history,
+        "user_id": user_id,
     }
     # Tracing (docs/sessions.md): the execution/session identity rides
     # in the LangSmith config (metadata + tags, propagated to child

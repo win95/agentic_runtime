@@ -66,6 +66,22 @@ async def get_current_user(
     return decode_bearer_token(authorization)
 
 
+async def require_jwt_user(
+    authorization: str | None = Header(default=None),
+) -> dict:
+    """Dependency: a valid user JWT — API keys are NOT accepted.
+
+    Guest endpoints use this: a service key must never stand in for
+    a guest, or one caller could read every guest's sessions.
+    """
+    user = decode_bearer_token(authorization)
+    if user is None:
+        raise HTTPException(
+            status_code=401, detail="Missing or invalid Bearer token"
+        )
+    return user
+
+
 async def require_api_key_or_user(
     x_api_key: str | None = Header(default=None),
     authorization: str | None = Header(default=None),
