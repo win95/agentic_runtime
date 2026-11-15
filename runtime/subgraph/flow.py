@@ -18,16 +18,17 @@ Direction C: one agent per FLOW, not per node.
   list order until a terminal node (inclusive) or a resume node
   (exclusive — a resume node starts its own flow, see below). Nodes
   the walk never reaches become single-node flows, so every map node
-  belongs to exactly one flow. For hotel_reception that gives 7 flows:
+  belongs to exactly one flow. For hotel_reception that gives 8 flows:
   booking-quote (booking-dates, check-availability, quote-price,
   confirm-booking), booking-create (create-booking, report-booking),
-  task (task-details, find-staff, create-task, assign-task,
-  report-task), and the four single-node lookups
+  booking-payment (booking-payment, collect-payment, confirm-payment,
+  report-payment), task (task-details, find-staff, create-task,
+  assign-task, report-task), and the four single-node lookups
   (policy-lookup, booking-lookup, booking-change, task-status).
 - The router runs once per flow boundary, not once per node: a plain
   model call (the map's start node) declares ``FLOW: <flow-id>`` — or
-  ``FLOW: END`` / ``FLOW: WAIT``. The choice set is 6-7 flow ids with
-  their branch ``when`` conditions, not 16 nodes. After a flow ends,
+  ``FLOW: END`` / ``FLOW: WAIT``. The choice set is 7-8 flow ids with
+  their branch ``when`` conditions, not 20 nodes. After a flow ends,
   the router runs again so a multi-request turn can enter a second
   flow; a flow already visited this turn is never re-entered.
 - There is no ``NEXT:`` inside a flow. The flow agent is a Deep Agent

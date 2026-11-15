@@ -1,15 +1,15 @@
 """Drive the hotel receptionist agent through the real API + worker + LLM.
 
 The agent (``hotel_receptionist``) and mission (``hotel_reception``) are
-config-only: every booking / policy / task action goes through the 14
+config-only: every booking / policy / task action goes through the 17
 MCP tools in its contract. This script proves the whole live chain —
 API -> Celery worker -> Deep Agent -> real LLM -> MCP client -> mock PMS
 server — and checks the agent's behaviour, not just "the run succeeded":
 
-1. **preflight** — the active AgentVersion pins the 14 tools + 10-turn
-   session limits, ``MCP_TOOL_CAPABILITIES`` maps all 14 to
+1. **preflight** — the active AgentVersion pins the 17 tools + 10-turn
+   session limits, ``MCP_TOOL_CAPABILITIES`` maps all 17 to
    ``hotel_reception``, the MCP server exposes exactly the contract, and
-   the capability gate gives the hotel mission all 14 (and a non-hotel
+   the capability gate gives the hotel mission all 17 (and a non-hotel
    mission none). It also reuses ``agent_config_check``'s static checks
    (seed <-> row <-> version, skills, hooks, manifest drift).
 2. **availability** — Deluxe 2026-12-20 -> 22: the agent must call
@@ -70,6 +70,15 @@ server — and checks the agent's behaviour, not just "the run succeeded":
 12. **soldout_switch** — Suite sold out for 2026-12-24 -> 26, the
     guest switches to Deluxe on other dates and books it: no Suite
     booking may exist for the sold-out window.
+13. **payment** — a Deluxe booking paid in full by bank transfer in
+    two turns: turn 1 records the payment (``record_payment``,
+    PENDING), turn 2 reports the money has arrived and the agent
+    confirms it (``confirm_payment``). The gate is the payments table:
+    one CONFIRMED payment for the exact total, booking PAID, zero
+    balance. Best-effort with the 3B model: a model that never records
+    only WARNs; a same-turn confirm (treating "I transferred" as
+    receipt) only WARNs and skips turn 2, since the end state is
+    still PAID.
 
 Every execution is also checked for SUCCEEDED, the pinned AgentVersion,
 and ``agent_version_drift == false``. Tool usage is verified from
@@ -140,6 +149,9 @@ CONTRACT_TOOLS = (
     "register_guest",
     "create_booking",
     "get_booking",
+    "record_payment",
+    "confirm_payment",
+    "list_payments",
     "cancel_booking",
     "change_booking_dates",
     "list_staff",
@@ -150,9 +162,20 @@ CONTRACT_TOOLS = (
     "read_policy_document",
 )
 
-SCENARIOS = ("availability", "soldout", "policy", "task", "booking", "memory",
-             "journey", "task_full", "cancel", "multi_request",
-             "soldout_switch")
+SCENARIOS = (
+    "availability",
+    "soldout",
+    "policy",
+    "task",
+    "booking",
+    "memory",
+    "journey",
+    "task_full",
+    "cancel",
+    "multi_request",
+    "soldout_switch",
+    "payment",
+)
 
 
 # --- DB / audit helpers ------------------------------------------------------
@@ -362,7 +385,7 @@ def mcp_settings_checks(report: Report, mcp: Mcp) -> None:
         capabilities = {}
     report.check(
         set(capabilities) == set(CONTRACT_TOOLS),
-        "MCP_TOOL_CAPABILITIES maps exactly the 14 contract tools",
+        "MCP_TOOL_CAPABILITIES maps exactly the 17 contract tools",
         f"{len(capabilities)} mapped",
     )
     report.check(
@@ -374,7 +397,7 @@ def mcp_settings_checks(report: Report, mcp: Mcp) -> None:
 
     report.check(
         set(mcp.tools) == set(CONTRACT_TOOLS),
-        "MCP server exposes exactly the 14 contract tools",
+        "MCP server exposes exactly the 17 contract tools",
         f"{len(mcp.tools)} tool(s)",
     )
     report.check(
@@ -392,7 +415,7 @@ def mcp_settings_checks(report: Report, mcp: Mcp) -> None:
     ]
     report.check(
         not bad,
-        "all 14 tools registered as hotel_reception / mcp / write",
+        "all 17 tools registered as hotel_reception / mcp / write",
         ", ".join(bad) if bad else "",
     )
 
@@ -414,7 +437,7 @@ def mcp_settings_checks(report: Report, mcp: Mcp) -> None:
     other_tools = {t.name for t in registry.get_langchain_tools(other_ctx)}
     report.check(
         hotel_tools == set(CONTRACT_TOOLS),
-        "capability gate gives the hotel mission all 14 MCP tools",
+        "capability gate gives the hotel mission all 17 MCP tools",
         f"{len(hotel_tools)} tool(s)",
     )
     report.check(
@@ -449,7 +472,7 @@ def version_checks(report: Report, config: dict) -> None:
                  f"mission agent is {AGENT_ID}", config["agent_id"])
     report.check(
         set(version["allowed_tools"]) == set(CONTRACT_TOOLS),
-        "AgentVersion pins exactly the 14 MCP tools",
+        "AgentVersion pins exactly the 17 MCP tools",
         f"{len(version['allowed_tools'])} tool(s)",
     )
     report.check(
@@ -2276,6 +2299,100 @@ def scenario_soldout_switch(report: Report, mcp: Mcp, session_id: str,
     )
 
 
+def scenario_payment(report: Report, mcp: Mcp, session_id: str,
+                     version: int, timeout: float) -> None:
+    """Pay a Deluxe booking in full by bank transfer, in two turns.
+
+    Books first (reusing ``_book_confirmed_deluxe``), then turn 1 pays:
+    the guest names the code, the exact total and the method, and the
+    agent must call ``record_payment`` with those exact arguments —
+    the store must then show one PENDING payment for the full total.
+    Turn 2 reports the bank has confirmed the money arrived, and the
+    agent must call ``confirm_payment`` — the store must then show
+    that payment CONFIRMED and the booking PAID with zero balance.
+    The gate is the payments table, not the prose. Best-effort with
+    the 3B model like the booking scenario: a model that never records
+    only WARNs and the scenario stops there; a same-turn confirm
+    (treating "I transferred" as receipt) only WARNs and skips turn 2,
+    since the end state is still PAID.
+    """
+    print(f"\n=== scenario: payment (session {session_id}) ===")
+    code, booking, _in, _out, booked_session = _book_confirmed_deluxe(
+        report, mcp, session_id, version, timeout, "payment"
+    )
+    if not booking:
+        return
+    total = booking["total_price"]
+
+    turn1 = run_turn(
+        booked_session,
+        f"Tôi là Nguyễn Văn An, muốn thanh toán cho booking {code} bằng "
+        f"chuyển khoản, số tiền {total} đồng. Tôi sẽ chuyển khoản ngay.",
+        timeout,
+    )
+    print_turn("payment turn 1 (record)", turn1)
+    check_execution(report, "payment turn 1", turn1, version, timeout)
+    payments = mcp.call("list_payments", booking_id=code)
+    recorded = payments.get("payments") or []
+    if not recorded:
+        report.warn(
+            "payment turn 1: agent recorded the payment",
+            "no payment in the store — the model asked instead of "
+            "calling record_payment",
+        )
+        return
+    report.check(
+        len(recorded) == 1
+        and recorded[0].get("amount") == total
+        and recorded[0].get("method") == "bank_transfer"
+        and recorded[0].get("booking_id") == code,
+        "payment turn 1: one payment recorded for the exact total",
+        json.dumps(recorded, ensure_ascii=False),
+    )
+    payment_id = recorded[0].get("payment_id")
+    if recorded[0].get("status") == "CONFIRMED":
+        report.warn(
+            "payment turn 1: payment stays PENDING until receipt is confirmed",
+            "the agent confirmed in the same turn as the record — "
+            "end state is still PAID, so turn 2 is skipped",
+        )
+    else:
+        report.check(
+            recorded[0].get("status") == "PENDING",
+            "payment turn 1: payment is PENDING, not yet confirmed",
+            recorded[0].get("status") or "none",
+        )
+        turn2 = run_turn(
+            booked_session,
+            "Ngân hàng vừa báo tiền đã vào tài khoản của khách sạn rồi, "
+            "nhờ anh/chị xác nhận giúp tôi đã nhận được tiền.",
+            timeout,
+        )
+        print_turn("payment turn 2 (confirm)", turn2)
+        check_execution(report, "payment turn 2", turn2, version, timeout)
+        report.check(
+            "confirm_payment" in tool_names(turn2),
+            "payment turn 2: agent called confirm_payment",
+            ", ".join(sorted(tool_names(turn2))),
+        )
+
+    final = mcp.call("list_payments", booking_id=code)
+    paid = mcp.call("get_booking", booking_id=code)
+    report.check(
+        len(final.get("payments") or []) == 1
+        and (final.get("payments") or [{}])[0].get("status") == "CONFIRMED"
+        and (final.get("payments") or [{}])[0].get("payment_id") == payment_id,
+        "payment: the recorded payment is CONFIRMED",
+        json.dumps(final.get("payments"), ensure_ascii=False),
+    )
+    report.check(
+        paid.get("payment_status") == "PAID" and paid.get("balance") == 0,
+        "payment: booking is PAID with zero balance",
+        f"status={paid.get('payment_status')} "
+        f"balance={paid.get('balance')}",
+    )
+
+
 # --- Cleanup -----------------------------------------------------------------
 
 
@@ -2388,6 +2505,7 @@ def main() -> int:
                 "cancel": scenario_cancel,
                 "multi_request": scenario_multi_request,
                 "soldout_switch": scenario_soldout_switch,
+                "payment": scenario_payment,
             }
             for name in SCENARIOS:
                 if name not in selected:

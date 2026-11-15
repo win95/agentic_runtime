@@ -1,9 +1,10 @@
 """Mock hotel MCP server — fake PMS + staff/tasks + policy docs.
 
-Implements exactly the 14 tools the ``hotel_receptionist`` agent
+Implements exactly the 17 tools the ``hotel_receptionist`` agent
 expects (see ``docs/hotel-reception.md``). The mutable data (guests,
-bookings, tasks, id counters) lives in SQLite, so a create / update /
-delete survives a server restart and can be checked afterwards — e.g.::
+bookings, payments, refunds, tasks, id counters) lives in SQLite, so a
+create / update / delete survives a server restart and can be checked
+afterwards — e.g.::
 
     sqlite3 mock_hotel.db "SELECT booking_id, status FROM bookings;"
     python -m scripts.mock_hotel_mcp_server --dump
@@ -164,6 +165,22 @@ CREATE TABLE IF NOT EXISTS bookings (
     currency TEXT NOT NULL,
     status TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS payments (
+    payment_id TEXT PRIMARY KEY,
+    booking_id TEXT NOT NULL,
+    amount INTEGER NOT NULL,
+    method TEXT NOT NULL,
+    status TEXT NOT NULL,
+    currency TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS refunds (
+    refund_id TEXT PRIMARY KEY,
+    booking_id TEXT NOT NULL,
+    amount INTEGER NOT NULL,
+    fee_vnd INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    currency TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS tasks (
     task_id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
@@ -202,7 +219,7 @@ _SEED_BOOKINGS = [
      "total_price": 7_000_000, "currency": CURRENCY, "status": "CONFIRMED"},
 ]
 
-_SEED_COUNTERS = {"guest": 3, "booking": 1004, "task": 2001}
+_SEED_COUNTERS = {"guest": 3, "booking": 1004, "task": 2001, "payment": 3001, "refund": 4001}
 
 _LOCK = threading.Lock()
 _CONN: sqlite3.Connection | None = None
@@ -287,6 +304,8 @@ def reset_store() -> None:
     conn = _db()
     with _LOCK:
         conn.execute("DELETE FROM tasks")
+        conn.execute("DELETE FROM refunds")
+        conn.execute("DELETE FROM payments")
         conn.execute("DELETE FROM bookings")
         conn.execute("DELETE FROM guests")
         conn.execute("DELETE FROM meta")
@@ -295,19 +314,24 @@ def reset_store() -> None:
 
 
 def dump_store() -> dict:
-    """The whole store as plain dicts (guests/bookings/tasks/counters)."""
+    """The whole store as plain dicts (guests/bookings/payments/refunds/
+    tasks/counters)."""
     conn = _db()
     with _LOCK:
         guests = [dict(r) for r in conn.execute(
             "SELECT * FROM guests ORDER BY guest_id")]
         bookings = [dict(r) for r in conn.execute(
             "SELECT * FROM bookings ORDER BY booking_id")]
+        payments = [dict(r) for r in conn.execute(
+            "SELECT * FROM payments ORDER BY payment_id")]
+        refunds = [dict(r) for r in conn.execute(
+            "SELECT * FROM refunds ORDER BY refund_id")]
         tasks = [dict(r) for r in conn.execute(
             "SELECT * FROM tasks ORDER BY task_id")]
         counters = {r["key"]: int(r["value"]) for r in conn.execute(
             "SELECT * FROM meta")}
-    return {"guests": guests, "bookings": bookings, "tasks": tasks,
-            "counters": counters}
+    return {"guests": guests, "bookings": bookings, "payments": payments,
+            "refunds": refunds, "tasks": tasks, "counters": counters}
 
 
 def _next_counter_locked(conn: sqlite3.Connection, key: str) -> int:
@@ -507,21 +531,181 @@ def create_booking(guest_id: str, room_type: str, check_in: str,
 
 
 def get_booking(booking_id: str) -> dict:
-    """Tra cứu một booking theo mã."""
+    """Tra cứu một booking theo mã, kèm tình trạng thanh toán."""
     conn = _db()
     with _LOCK:
         row = conn.execute(
             "SELECT * FROM bookings WHERE booking_id = ?",
             (booking_id,)).fetchone()
-    if row is None:
-        return {"error": f"Booking not found: {booking_id}"}
-    return dict(row)
+        if row is None:
+            return {"error": f"Booking not found: {booking_id}"}
+        booking = dict(row)
+        booking.update(_payment_summary_locked(conn, booking))
+        refund = _refund_locked(conn, booking_id)
+        if refund is not None:
+            booking["refund_amount"] = refund["amount"]
+            booking["refund_status"] = refund["status"]
+    return booking
+
+
+# --- Payments ---
+# A real PMS separates the payment from the booking: the guest pays
+# (cash at the desk, card, or bank transfer) and the hotel confirms
+# receipt as its own step — a transfer the guest initiated is not
+# money received yet. So record_payment only creates a PENDING
+# payment; confirm_payment moves it to CONFIRMED. Payments are
+# receipts and stay that way: a cancellation does not rewrite them,
+# it creates a separate refund record (see cancel_booking) whose
+# status stays PENDING until the hotel actually returns the money
+# (POL-CANCEL: within 7 working days, via the original method).
+PAYMENT_METHODS = ("cash", "card", "bank_transfer")
+
+# payment_status: UNPAID (nothing yet), PENDING (a payment was
+# recorded but receipt is not confirmed), PARTIAL (some confirmed),
+# PAID (confirmed covers the whole total).
+
+
+def _payment_totals_locked(conn: sqlite3.Connection,
+                           booking_id: str) -> tuple[int, int]:
+    """(confirmed, pending) sums for a booking. Caller must hold _LOCK."""
+    rows = conn.execute(
+        "SELECT status, COALESCE(SUM(amount), 0) FROM payments"
+        " WHERE booking_id = ? GROUP BY status",
+        (booking_id,)).fetchall()
+    totals = {row[0]: int(row[1]) for row in rows}
+    return totals.get("CONFIRMED", 0), totals.get("PENDING", 0)
+
+
+def _payment_summary_locked(conn: sqlite3.Connection,
+                            booking: dict) -> dict:
+    """Payment state for one booking row. Caller must hold _LOCK."""
+    confirmed, pending = _payment_totals_locked(conn, booking["booking_id"])
+    total = booking["total_price"]
+    if confirmed >= total:
+        status = "PAID"
+    elif confirmed > 0:
+        status = "PARTIAL"
+    elif pending > 0:
+        status = "PENDING"
+    else:
+        status = "UNPAID"
+    return {
+        "paid_amount": confirmed,
+        "pending_amount": pending,
+        "balance": total - confirmed - pending,
+        "payment_status": status,
+        "currency": booking["currency"],
+    }
+
+
+def _refund_locked(conn: sqlite3.Connection,
+                   booking_id: str) -> dict | None:
+    """The refund record for a booking, if one was created. Caller
+    must hold _LOCK."""
+    row = conn.execute(
+        "SELECT * FROM refunds WHERE booking_id = ?",
+        (booking_id,)).fetchone()
+    return dict(row) if row is not None else None
+
+
+def record_payment(booking_id: str, amount: int, method: str) -> dict:
+    """Ghi nhận một khoản thanh toán cho booking (chưa xác nhận đã
+    nhận tiền). Số tiền không vượt quá số còn lại phải trả."""
+    method = str(method or "").strip().lower()
+    if method not in PAYMENT_METHODS:
+        return {"error": f"Unknown payment method: {method}",
+                "methods": list(PAYMENT_METHODS)}
+    if isinstance(amount, float) and amount.is_integer():
+        amount = int(amount)
+    if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
+        return {"error": "amount must be a positive whole number of VND",
+                "amount": amount}
+    conn = _db()
+    with _LOCK:
+        row = conn.execute(
+            "SELECT * FROM bookings WHERE booking_id = ?",
+            (booking_id,)).fetchone()
+        if row is None:
+            return {"error": f"Booking not found: {booking_id}"}
+        booking = dict(row)
+        if booking["status"] == "CANCELLED":
+            return {"error": f"Booking {booking_id} is cancelled"}
+        summary = _payment_summary_locked(conn, booking)
+        if amount > summary["balance"]:
+            return {"error": f"amount exceeds the remaining balance"
+                             f" ({summary['balance']} VND)",
+                    "booking_id": booking_id,
+                    "balance": summary["balance"], "currency": CURRENCY}
+        number = _next_counter_locked(conn, "payment")
+        payment_id = f"PM-{number}"
+        payment = {
+            "payment_id": payment_id, "booking_id": booking_id,
+            "amount": amount, "method": method, "status": "PENDING",
+            "currency": CURRENCY,
+        }
+        conn.execute(
+            "INSERT INTO payments (payment_id, booking_id, amount, method,"
+            " status, currency) VALUES (?, ?, ?, ?, ?, ?)",
+            (payment["payment_id"], payment["booking_id"], payment["amount"],
+             payment["method"], payment["status"], payment["currency"]),
+        )
+        conn.commit()
+        payment["balance"] = summary["balance"] - amount
+    return payment
+
+
+def confirm_payment(payment_id: str) -> dict:
+    """Xác nhận khách sạn đã nhận tiền cho một payment đã ghi nhận."""
+    conn = _db()
+    with _LOCK:
+        row = conn.execute(
+            "SELECT * FROM payments WHERE payment_id = ?",
+            (payment_id,)).fetchone()
+        if row is None:
+            return {"error": f"Payment not found: {payment_id}"}
+        payment = dict(row)
+        if payment["status"] == "CONFIRMED":
+            return {"error": f"Payment {payment_id} is already confirmed"}
+        booking_row = conn.execute(
+            "SELECT * FROM bookings WHERE booking_id = ?",
+            (payment["booking_id"],)).fetchone()
+        conn.execute(
+            "UPDATE payments SET status = 'CONFIRMED' WHERE payment_id = ?",
+            (payment_id,),
+        )
+        conn.commit()
+        payment["status"] = "CONFIRMED"
+        if booking_row is not None:
+            payment.update(_payment_summary_locked(conn, dict(booking_row)))
+    return payment
+
+
+def list_payments(booking_id: str) -> dict:
+    """Liệt kê các khoản thanh toán của một booking kèm số còn lại."""
+    conn = _db()
+    with _LOCK:
+        row = conn.execute(
+            "SELECT * FROM bookings WHERE booking_id = ?",
+            (booking_id,)).fetchone()
+        if row is None:
+            return {"error": f"Booking not found: {booking_id}"}
+        booking = dict(row)
+        payments = [dict(r) for r in conn.execute(
+            "SELECT * FROM payments WHERE booking_id = ?"
+            " ORDER BY payment_id",
+            (booking_id,))]
+        summary = _payment_summary_locked(conn, booking)
+    return {"booking_id": booking_id, "payments": payments,
+            "total_price": booking["total_price"], **summary}
 
 
 def cancel_booking(booking_id: str, reason: str | None = None) -> dict:
     """Hủy booking. Chỉ gọi sau khi khách đã xác nhận trong chat.
     Phí hủy: miễn phí khi hủy trước check-in ít nhất 3 ngày, còn lại
-    bằng giá 1 đêm đầu tiên."""
+    bằng giá 1 đêm đầu tiên. Tiền đã thanh toán được hoàn lại sau khi
+    trừ phí (POL-CANCEL: hoàn trong 7 ngày làm việc, qua cùng phương
+    thức thanh toán ban đầu) — hoàn tiền là một bản ghi riêng, trạng
+    thái PENDING cho tới khi khách sạn thực sự trả tiền."""
     conn = _db()
     with _LOCK:
         row = conn.execute(
@@ -536,6 +720,18 @@ def cancel_booking(booking_id: str, reason: str | None = None) -> dict:
         days_left = (check_in - datetime.date.today()).days
         fee = 0 if days_left >= FREE_CANCEL_DAYS else ROOM_TYPES[
             booking["room_type"]]["price_per_night"]
+        paid, _pending = _payment_totals_locked(conn, booking_id)
+        refund_amount = max(0, paid - fee)
+        refund_status = "NONE"
+        if refund_amount > 0:
+            number = _next_counter_locked(conn, "refund")
+            conn.execute(
+                "INSERT INTO refunds (refund_id, booking_id, amount,"
+                " fee_vnd, status, currency) VALUES (?, ?, ?, ?, ?, ?)",
+                (f"RF-{number}", booking_id, refund_amount, fee,
+                 "PENDING", CURRENCY),
+            )
+            refund_status = "PENDING"
         conn.execute(
             "UPDATE bookings SET status = 'CANCELLED' WHERE booking_id = ?",
             (booking_id,),
@@ -543,6 +739,7 @@ def cancel_booking(booking_id: str, reason: str | None = None) -> dict:
         conn.commit()
     return {"booking_id": booking_id, "status": "CANCELLED",
             "fee_vnd": fee, "currency": CURRENCY,
+            "refund_amount": refund_amount, "refund_status": refund_status,
             "reason": reason}
 
 
@@ -694,6 +891,9 @@ HOTEL_TOOL_FUNCTIONS = [
     register_guest,
     create_booking,
     get_booking,
+    record_payment,
+    confirm_payment,
+    list_payments,
     cancel_booking,
     change_booking_dates,
     list_staff,
@@ -706,7 +906,7 @@ HOTEL_TOOL_FUNCTIONS = [
 
 
 def create_server(name: str = "hotel-mock") -> FastMCP:
-    """A fresh FastMCP instance exposing the 14 contract tools."""
+    """A fresh FastMCP instance exposing the 17 contract tools."""
     server = FastMCP(name)
     for fn in HOTEL_TOOL_FUNCTIONS:
         server.tool()(fn)

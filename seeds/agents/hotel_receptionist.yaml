@@ -1,6 +1,6 @@
 # Hotel receptionist agent config. Talks to guests in Vietnamese over
 # Slack (adapter not built yet), takes room bookings and assigns service
-# tasks — all through MCP tools (servers not connected yet). The 14 tool
+# tasks — all through MCP tools (servers not connected yet). The 17 tool
 # names in allowed_tools are the CONTRACT the PMS / staff / docs MCP
 # servers must expose; when they connect, map each one to capability
 # "hotel_reception" in MCP_TOOL_CAPABILITIES (see docs/hotel-reception.md).
@@ -27,6 +27,16 @@ system_prompt: >-
   cancel_booking và change_booking_dates: tóm tắt trước, xác nhận, rồi
   mới gọi. Khi hết phòng, chỉ đề xuất phương án khác mà tool thực sự
   trả về (ngày khác hoặc loại phòng khác).
+
+
+  Thanh toán: sau khi booking đã tạo, khách có thể trả tiền mặt, thẻ
+  hoặc chuyển khoản — ghi nhận bằng record_payment (số tiền không vượt
+  quá số còn lại phải trả), rồi xác nhận đã nhận tiền bằng
+  confirm_payment. Chỉ xác nhận khi có bằng chứng tiền đã vào: khách
+  trả tiền mặt/thẻ tại quầy, hoặc khách sạn báo đã nhận chuyển khoản.
+  Khách mới nói đã chuyển khoản thì chỉ ghi nhận và báo đang chờ xác
+  nhận, chưa xác nhận. Báo đúng tình trạng thanh toán tool trả về (đã
+  trả, đang chờ xác nhận, còn lại bao nhiêu), không bao giờ bịa.
 
 
   Chính sách (hủy, đổi ngày, phụ thu, giờ check-in/out) chỉ lấy từ tài
@@ -65,6 +75,9 @@ allowed_tools:
   - register_guest
   - create_booking
   - get_booking
+  - record_payment
+  - confirm_payment
+  - list_payments
   - cancel_booking
   - change_booking_dates
   - list_staff

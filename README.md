@@ -837,7 +837,7 @@ Khai báo trong `execution:` của YAML mission (`hooks: [...]`, giống
 khai báo tường minh đủ 8 hook (thêm `request_permission` — duyệt bởi
 người trước tool phá hoại). `hotel_reception` khai báo tường minh đủ 8
 hook (thêm `deny_builtin_tools` — chặn tool file/subagent built-in của
-deepagents, chỉ dùng 14 tool MCP). Mỗi lần dispatch ghi một record vào
+deepagents, chỉ dùng 17 tool MCP). Mỗi lần dispatch ghi một record vào
 `MissionState.hook_events`; can thiệp được tóm tắt một dòng trong
 `notes`. Chưa nối dây: `PreCompact` (không có compaction),
 `SubagentStart/Stop` (chưa có subagent).
@@ -905,7 +905,7 @@ alembic downgrade base       # gỡ toàn bộ (dev/test)
 
 Một nguồn duy nhất: `runtime/context_budget.py`. Cửa sổ 32.000 token
 chia như sau (đo thực tế trước khi chia: system prompt 200–266 token,
-14 tool ~1.050 token, 2 skill tối đa ~773 token, retrieval cap cũ 750
+17 tool ~1.275 token (ước theo 14 tool ~1.050 đo thực tế, chưa đo lại), 2 skill tối đa ~773 token, retrieval cap cũ 750
 token, input cap 8 KB = 2.048 token):
 
 | Thành phần | Token | Tỉ lệ |

@@ -323,7 +323,7 @@ def deny_builtin_tools(context: HookContext) -> HookDecision | None:
     """PreToolUse: deny deepagents built-in file/subagent tools (Part 1).
 
     Scoped to ``_BUILTIN_DENY_MISSIONS`` (hotel only): the
-    receptionist's whole contract is the 14 MCP tools, so a file
+    receptionist's whole contract is the 17 MCP tools, so a file
     read/write or a subagent spawn is never a legitimate step for it —
     the manual runs showed the 3B model falling into read_file loops
     (55% of traces touched a file tool) and inventing subagents. The

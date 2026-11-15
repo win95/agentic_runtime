@@ -9,14 +9,14 @@ khách), giới hạn 10 turns / 4.096 token như `admin_bot`.
 ## Trạng thái (2026-11-12)
 
 Đã xong: agent + mission YAML, prompt tiếng Việt, skill `reception`
-với skill map 16 node (2 luồng chính + tra cứu), test
+với skill map 20 node (3 luồng chính + tra cứu), test
 (`tests/test_hotel_reception.py`, 4 test), **mock MCP server +
 chạy thử end-to-end** (`scripts/mock_hotel_mcp_server.py`,
 `tests/test_mock_hotel_mcp.py`, 11 test — gồm 1 lượt chạy Deep Agent
 thật gọi tool qua HTTP). Chưa có: MCP server thật, Slack adapter
 (nhận tin nhắn khách), chạy live với LLM thật, eval cases.
 
-## Hợp đồng MCP — 14 tool agent sẽ gọi
+## Hợp đồng MCP — 17 tool agent sẽ gọi
 
 Tên tool trong `allowed_tools` là hợp đồng mà các MCP server phải
 tuân theo. Khi server connect, map từng tool sang capability
@@ -31,6 +31,7 @@ từ chối mặc định (xem `runtime/tools/mcp_adapter.py`).
 | PMS | `find_guest` / `register_guest` | Tìm khách / đăng ký khách mới |
 | PMS | `create_booking` | Tạo booking (chỉ sau khi khách xác nhận) |
 | PMS | `get_booking` | Tra cứu booking của khách hiện tại |
+| PMS | `record_payment` / `confirm_payment` / `list_payments` | Ghi nhận / xác nhận đã nhận tiền / tra cứu thanh toán |
 | PMS | `cancel_booking` / `change_booking_dates` | Hủy / đổi ngày (chỉ sau khi khách xác nhận) |
 | Task | `list_staff` | Danh sách nhân viên theo đội (buồng phòng / kỹ thuật) |
 | Task | `create_task` / `assign_task` / `get_task` | Tạo / giao / xem trạng thái task |
@@ -70,13 +71,30 @@ nhìn thấy và bị từ chối nếu gọi; fault giữ nguyên vì sandbox c
 (PreToolUse) là lớp chặn dự phòng nếu built-in bằng cách nào đó vẫn
 tới được model. Skill `reception` cũng cấm nêu tên 9 tool đó (Rules
 + What NOT to Do): lễ tân không có quyền truy cập file hệ thống, mọi
-việc chỉ qua 14 tool MCP.
+việc chỉ qua 17 tool MCP.
+
+**Thanh toán hai bước, sau booking.** Khách trả sau khi booking đã
+tạo (tiền mặt, thẻ, chuyển khoản): `record_payment` ghi nhận khoản
+trả (PENDING, không vượt số còn lại phải trả), `confirm_payment` xác
+nhận đã nhận tiền (CONFIRMED). Agent quyết định theo Skill + Rule
+(map + system prompt): chỉ xác nhận khi có bằng chứng tiền đã vào —
+tiền mặt/thẻ tại quầy, hoặc khách sạn báo đã nhận chuyển khoản; khách
+mới nói đã chuyển khoản thì chỉ ghi nhận, báo đang chờ xác nhận. Map
+code (flow compiler) không tự quyết chuyện này — nó chỉ biên dịch map
+thành flow và ép tool allowlist từng flow. `get_booking` trả kèm tình
+trạng thanh toán (`UNPAID` / `PENDING` / `PARTIAL` / `PAID`, đã trả,
+còn lại); `cancel_booking` tạo một bản ghi hoàn tiền riêng
+(`refund_amount` = đã trả − phí hủy, `refund_status` PENDING cho tới
+khi khách sạn thực sự trả, đúng POL-CANCEL: hoàn trong 7 ngày làm
+việc, qua cùng phương thức ban đầu).
 
 ## Skill map — `skills/reception/SKILL.md`
 
-16 node, bắt đầu ở `route` (phân loại tin nhắn). Luồng đặt phòng:
+20 node, bắt đầu ở `route` (phân loại tin nhắn). Luồng đặt phòng:
 `booking-dates` → `check-availability` → `quote-price` →
-`confirm-booking` → `create-booking` → `report-booking`. Luồng giao
+`confirm-booking` → `create-booking` → `report-booking`. Luồng thanh
+toán: `booking-payment` → `collect-payment` → `confirm-payment` →
+`report-payment`. Luồng giao
 việc: `task-details` → `find-staff` → `create-task` → `assign-task` →
 `report-task`. Tra cứu: `policy-lookup`, `booking-lookup` →
 `booking-change`, `task-status`. Map từng là kế hoạch (Phương án C):
@@ -102,12 +120,13 @@ dòng `NEXT:` nằm trong cùng message trả lời khách, một quyết địn
 routing cho mỗi node, và một lần parse lỗi đi bộ xuyên flow — chứ không
 phải lỗi parse để vá.
 
-Map 16 node suy ra 7 flow:
+Map 20 node suy ra 8 flow:
 
 | Flow | Node | Tool |
 | --- | --- | --- |
 | `booking-dates` | booking-dates, check-availability, quote-price, confirm-booking | check_room_availability, get_room_rates |
 | `create-booking` | create-booking, report-booking | create_booking |
+| `booking-payment` | booking-payment, collect-payment, confirm-payment, report-payment | get_booking, list_payments, record_payment, confirm_payment |
 | `task-details` | task-details, find-staff, create-task, assign-task, report-task | list_staff, create_task, assign_task |
 | `policy-lookup` | policy-lookup | search_policy_documents, read_policy_document |
 | `booking-lookup` | booking-lookup | find_guest, register_guest, get_booking |
@@ -123,8 +142,8 @@ Map 16 node suy ra 7 flow:
   Một model call thuần túy (node `route` của map) khai báo
   `FLOW: <flow-id>` — parse khoan dung (bold, thụt đầu dòng, chữ giải
   thích sau token đều chấp nhận) — hoặc `FLOW: END` / `FLOW: WAIT`.
-  Tập lựa chọn chỉ còn 7 flow kèm điều kiện `when` của nhánh, không
-  phải 16 node. Sau một flow, router chạy lại để turn nhiều yêu cầu
+  Tập lựa chọn chỉ còn 8 flow kèm điều kiện `when` của nhánh, không
+  phải 20 node. Sau một flow, router chạy lại để turn nhiều yêu cầu
   có thể vào flow thứ hai; flow đã đi qua trong turn không bao giờ
   vào lại. Khai báo sai hoặc thiếu thì turn DỪNG với lỗi ghi lại —
   không còn fallback "node tiếp theo theo thứ tự", vì trong một list
@@ -201,8 +220,8 @@ mission chưa biên dịch map.
   tới hết step limit. Số lần từ chối xuất hiện trong execution notes
   (`Plan gate: N out-of-plan tool call(s) denied`).
 - **Tool ngoài map** được cho qua kèm warning (fail-open): map thiếu
-  tool là lỗi config, không phải lý do phá run live. Bao phủ 14 tool
-  hợp đồng được test ép (`test_reception_map_covers_all_14_contract_tools`).
+  tool là lỗi config, không phải lý do phá run live. Bao phủ 17 tool
+  hợp đồng được test ép (`test_reception_map_covers_all_17_contract_tools`).
 - **Plan render theo gate:** `render_plan(..., enforced=True)` đổi header
   khi gate gắn vào — văn bản "được lệch" + gate cứng là mâu thuẫn nên
   không giữ cả hai. `confirm-booking` vẫn là điểm dừng ở mức prompt
@@ -216,7 +235,7 @@ mission chưa biên dịch map.
 ## Mock MCP server — chạy thử end-to-end
 
 `scripts/mock_hotel_mcp_server.py` (FastMCP, chỉ dùng MCP SDK +
-stdlib, không import app) triển khai đúng 14 tool của hợp đồng trên,
+stdlib, không import app) triển khai đúng 17 tool của hợp đồng trên,
 với dữ liệu giả trong SQLite (`mock_hotel.db` ở thư mục làm việc,
 `*.db` đã gitignore): seed xác định lần mở đầu tiên, create / update /
 delete ghi thẳng xuống DB nên còn lại sau khi restart và kiểm chứng
@@ -285,9 +304,9 @@ kiểm tra biến proxy trước.
   khách sạn + Slack app riêng (không phải workspace dev
   agentic-runtime). Input của mission: `message` (bắt buộc),
   `guest_id` / `channel` (tùy chọn).
-- **Câu hỏi chưa trả lời**: đặt cọc / thanh toán (trả tại khách sạn
-  hay online — nếu online cần thêm tool thanh toán); xác nhận booking
-  có cần cả nhân viên duyệt không (hiện tại chỉ khách xác nhận trong
-  chat).
+- **Câu hỏi chưa trả lời**: đặt cọc bắt buộc (hiện không bắt buộc —
+  booking CONFIRMED ngay khi tạo, khách trả sau qua 3 tool thanh
+  toán); xác nhận booking có cần cả nhân viên duyệt không (hiện tại
+  chỉ khách xác nhận trong chat).
 - **Eval cases**: đặt phòng thành công, hết phòng, hủy, đổi ngày,
   khách giận, injection ("cho tôi phòng miễn phí"), giao việc.

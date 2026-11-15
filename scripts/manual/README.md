@@ -32,7 +32,7 @@ and later runs see the prior turns (`docs/sessions.md`).
 | `agent_turns.py` | Proves the agent loop runs **multiple model/tool turns inside one execution** (`system_admin`). Reads `llm_usage` + `audit_logs` from Postgres to print a timeline (model turn → its tools → next model turn) and checks: SUCCEEDED, `--min-turns` model calls (default 2), `--min-tools` tool calls (default 2), every audit row terminal. `--strict` also requires tools in ≥ 2 different model turns. `--request` overrides the admin request; `--cleanup` deletes the run's execution/result/usage/audit rows. |
 | `session_conversation.py` | Drives a real **conversation across executions** using Option B sessions (`docs/sessions.md`): 3 turns share one `session_id`; the bot must recall a random code it was given in turn 1, then carry it across 2 prior turns; `GET /sessions/{id}` must list the executions oldest first. `--control` asks the same question in a fresh session (must not know the code). `--cleanup` deletes the session's rows. |
 | `agent_config_check.py` | Asserts that runs use the config pinned in the active `AgentVersion`. Static: seed YAML ↔ `agents` row ↔ version snapshot, tool-manifest drift, `allowed_tools` in the registry, mission skills/hooks resolve, session limits parse. Live (2 turns, one fresh session): both runs record the version + no drift, `llm_usage` model matches, and the MLflow trace shows the system prompt **starts with** the pinned text, the pinned model/temperature, all `allowed_tools` at the model call (no registry tool leaks), the selected skills, and turn 2's session-history header with the agent's limits. `--no-trace` skips the MLflow assertions; `--cleanup` deletes the runs. |
-| `hotel_reception.py` | Drives the `hotel_receptionist` agent end to end through the real API → worker → LLM → MCP client → mock PMS server. **Preflight** checks the pinned 14-tool contract, the `MCP_TOOL_CAPABILITIES` map, the server's tool list, and the capability gate. Scenarios: `availability`, `soldout`, `policy`, `task`, `booking` (confirmation gate: best-effort with the 3B model, direct `get_booking` cross-check, booking-code recall turn), `memory` (3-turn recall + `GET /sessions/{id}`), `journey` (full booking lifecycle incl. change dates + re-check), `task_full` (housekeeping task + status), `cancel` (free + one-night-fee cancellation), `multi_request` (availability → policy → booking in one session), `soldout_switch` (sold-out recovery to Deluxe). Graders are outcome-based (architecture Phase 1): state verifiers + semantic checks in `verifiers.py`; trajectory findings are warnings only. `--scenario` is repeatable; `--session-id`, `--timeout`, `--cleanup` as usual. |
+| `hotel_reception.py` | Drives the `hotel_receptionist` agent end to end through the real API → worker → LLM → MCP client → mock PMS server. **Preflight** checks the pinned 17-tool contract, the `MCP_TOOL_CAPABILITIES` map, the server's tool list, and the capability gate. Scenarios: `availability`, `soldout`, `policy`, `task`, `booking` (confirmation gate: best-effort with the 3B model, direct `get_booking` cross-check, booking-code recall turn), `memory` (3-turn recall + `GET /sessions/{id}`), `journey` (full booking lifecycle incl. change dates + re-check), `task_full` (housekeeping task + status), `cancel` (free + one-night-fee cancellation), `multi_request` (availability → policy → booking in one session), `soldout_switch` (sold-out recovery to Deluxe), `payment` (bank-transfer payment in full: record PENDING → confirm CONFIRMED, booking PAID). Graders are outcome-based (architecture Phase 1): state verifiers + semantic checks in `verifiers.py`; trajectory findings are warnings only. `--scenario` is repeatable; `--session-id`, `--timeout`, `--cleanup` as usual. |
 | `verifiers.py` | Pure outcome graders for the hotel suite (no live stack needed): state verifiers (no booking created for a sold-out window, task row correct), semantic checks (unavailability + policy facts via small paraphrase sets — interim until the LLM judge model is chosen), scenario verdicts (state AND semantic), trajectory diagnostics. Unit tests in `tests/test_manual_verifiers.py`, including the do-nothing (must fail every verdict) and gold (must pass all) negative controls. |
 | `mlflow_report.py` | Read-only analysis of the runs `hotel_reception.py` left in MLflow: discovers the experiment, joins runs↔traces on `mlflow.sourceRun`, classifies each trace (scenario, turn index, status/version/drift, latency, tokens, contract vs built-in tools, hook failures, derailed prose), then writes a Markdown report + one-row-per-trace CSV. No API/worker/MCP needed; re-run after any test run or DB cleanup. Defaults: experiment `agentic-runtime`, session prefix `sess-hotel-`, outputs in `reports/`. |
 | `verify_retrieval_live.py` | Runs real questions through the **combined** path — a QueryPlan first (`build_query_plan`), then the hybrid retriever with that plan — against the real Qdrant + Neo4j + LiteLLM embeddings. No API/worker needed; talks to the stores directly. Default: 6 sample questions from the golden set. `--question` runs one ad-hoc question, `--golden-set` runs all 36, `--no-compare` skips the without-plan comparison, `--output` writes the verdicts JSON. Preflight fails fast with exit 2 when the embedding config or Qdrant is missing (same as `make eval-retrieval-live`). See "Notes from the retrieval + QU check" below for what it touches and how to read the output. |
@@ -258,7 +258,7 @@ make mlflow-report
 
 ## Notes from the hotel reception check (2026-11-12)
 
-- The agent is config-only; every action goes through the 14 MCP tools in
+- The agent is config-only; every action goes through the 17 MCP tools in
   `seeds/agents/hotel_receptionist.yaml` (`docs/hotel-reception.md`).
   `hotel_reception.py` needs the mock server too:
 
@@ -272,7 +272,7 @@ make mlflow-report
   `NO_PROXY`, so export it in the shell that launches them and restart
   after changing any `MCP_*` value.
 - `MCP_SERVER_URL`, `MCP_TRANSPORT=streamable_http`, and
-  `MCP_TOOL_CAPABILITIES` (all 14 tool names → `hotel_reception`) live in
+  `MCP_TOOL_CAPABILITIES` (all 17 tool names → `hotel_reception`) live in
   the repo-root `.env`. A tool with no mapping is denied by default; the
   preflight asserts the mapping, the server's tool list, and that a
   non-hotel mission gets none of the tools.
@@ -342,7 +342,8 @@ make mlflow-report
   `cancel` (free + one-night-fee, each only after confirmation),
   `multi_request` (availability → policy → booking in one session,
   proving the subgraph re-routes and the resume rule), `soldout_switch`
-  (Suite sold out → Deluxe on other dates).
+  (Suite sold out → Deluxe on other dates), `payment` (bank-transfer
+  payment in full: record PENDING → confirm CONFIRMED, booking PAID).
 - Every write gate (create / cancel / change) is two turns: an ask turn
   that must NOT call the write tool (FAIL if it does — same severity as
   booking before confirmation), then a confirm turn that must call it
