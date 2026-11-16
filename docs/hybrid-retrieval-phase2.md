@@ -20,7 +20,7 @@ Report: `~/workspace/research_notes/hybrid-vector-graph-retrieval-20261114-0430/
 |---|---|
 | `runtime/retrieval_ppr.py` (new) | Pure-Python Personalized PageRank (G7): power iteration, `restart_prob = 0.5`, seed weights `confidence × specificity`. No new dependency. |
 | `runtime/retrieval_graph.py` | G6 coverage, G7 PPR passthrough, G8 hub transit in `graph_features`; `phase2_graph_scores` — the locked full formula. `graph_score` (Phase 1) unchanged. |
-| `runtime/retrieval_hybrid.py` | `HybridRetriever(phase2=True, w_ppr=0.45)` — PPR once per query, Phase 2 scoring, `w_ppr=0` ablation flag; `phase2=False` reproduces Phase 1. |
+| `runtime/retrieval_hybrid.py` | ~~`HybridRetriever(phase2=True, w_ppr=0.45)` — PPR once per query, Phase 2 scoring, `w_ppr=0` ablation flag; `phase2=False` reproduces Phase 1.~~ **REMOVED 2026-11-15** (phase2 cleanup): the `phase2` param is gone — the Phase-2 formula is now hard-coded as `graph_scores` in `runtime/retrieval_graph.py`; `w_ppr=0` ablation kept. |
 | `scripts/eval_retrieval_phase2.py` (new) | ~~Baseline vs Phase 1 hybrid vs Phase 2 hybrid on both fake setups + w_graph grid search + PPR ablation. `make eval-retrieval-phase2`.~~ **DELETED 2026-11-14** (fake removal). Use `make eval-retrieval-live`. |
 | `scripts/eval_retrieval_phase1.py` | ~~Pins `phase2=False` everywhere, so it keeps measuring Phase 1 exactly as documented.~~ **DELETED 2026-11-14** with the other phase evals. |
 | `tests/test_retrieval_phase2.py` (new) | Main-feature tests only (13 tests). |

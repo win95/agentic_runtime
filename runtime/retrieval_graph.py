@@ -58,6 +58,15 @@ import time
 import unicodedata
 
 from runtime.retrieval_fusion import zscores
+from runtime.retrieval_weights import (
+    GRAPH_W_COVERAGE as W_COVERAGE,
+)
+from runtime.retrieval_weights import (
+    GRAPH_W_PATH as W_PATH,
+)
+from runtime.retrieval_weights import (
+    GRAPH_W_PPR as W_PPR,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -107,9 +116,6 @@ MAX_LIVE_ADJACENCY_NODES = 200
 # phase2.md). W_PPR = 0 is the PPR ablation flag (no renormalising
 # of the surviving sub-weights — the path:coverage ratio stays
 # 0.30:0.25, so the ablation measures PPR alone).
-W_PPR = 0.45
-W_PATH = 0.30
-W_COVERAGE = 0.25
 # Hub penalty (G8): HUB_LAMBDA * log(1 + degree(transit node)),
 # subtracted from the path term, only when the best path transits
 # through a Building or a generic Document (report §4.3/§4.1 G8:
@@ -760,9 +766,16 @@ def graph_features(
         direct = 0.0
     n_seeds_linked = len(linked_set & seed_keys) + (1 if doc_id in seed_keys else 0)
 
-    # G4 entity-type match / mismatch.
-    doc_comps = {k for k in linked_set if _node_type(k) == "Component"}
-    doc_assets = {k for k in linked_set if _node_type(k) == "Asset"}
+    # G4 entity-type match / mismatch. The real label comes from the
+    # live adjacency (Neo4j node labels) or the expansion map when
+    # available; the key-prefix inference (``_node_type``) is only the
+    # fallback for payload-linked nodes the graph never saw.
+    def _linked_type(key: str) -> str:
+        real = (adjacency.get(key) or {}).get("type") or (expanded.get(key) or {}).get("type")
+        return real if real else _node_type(key)
+
+    doc_comps = {k for k in linked_set if _linked_type(k) == "Component"}
+    doc_assets = {k for k in linked_set if _linked_type(k) == "Asset"}
     if seed_comps:
         if doc_comps & seed_comps:
             g4 = 1

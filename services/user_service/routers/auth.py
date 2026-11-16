@@ -7,10 +7,10 @@ never tells a caller which one it was.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
-from services.user_service import schemas
+from services.user_service import rate_limit, schemas
 from services.user_service.auth import (
     create_access_token,
     hash_password,
@@ -24,8 +24,22 @@ from services.user_service.models import User
 router = APIRouter(tags=["auth"])
 
 
+def _client_ip(request: Request) -> str:
+    """Best-effort client address (TestClient reports 'testclient')."""
+    return request.client.host if request.client is not None else "unknown"
+
+
 @router.post("/auth/register", response_model=schemas.UserRead, status_code=201)
-def register(payload: schemas.RegisterRequest, db: Session = Depends(get_db)):
+def register(
+    payload: schemas.RegisterRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    rate_limit.check_rate_limit(
+        f"register:{_client_ip(request)}",
+        rate_limit.REGISTER_LIMIT,
+        rate_limit.REGISTER_WINDOW_SECONDS,
+    )
     email = payload.email.strip().lower()
     if db.query(User).filter(User.email == email).first() is not None:
         raise HTTPException(status_code=409, detail="Email already registered")
@@ -37,10 +51,22 @@ def register(payload: schemas.RegisterRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/auth/login", response_model=schemas.TokenResponse)
-def login(payload: schemas.LoginRequest, db: Session = Depends(get_db)):
+def login(
+    payload: schemas.LoginRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
     if not settings.jwt_secret:
         raise HTTPException(status_code=503, detail="JWT auth is not configured")
     email = payload.email.strip().lower()
+    # Rate-limit BEFORE the password check, keyed on email + IP: an
+    # attacker cannot burn the budget for the victim from another IP,
+    # and a wrong password never reveals whether the email exists.
+    rate_limit.check_rate_limit(
+        f"login:{email}:{_client_ip(request)}",
+        rate_limit.LOGIN_LIMIT,
+        rate_limit.LOGIN_WINDOW_SECONDS,
+    )
     user = db.query(User).filter(User.email == email).first()
     if (
         user is None

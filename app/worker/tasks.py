@@ -295,6 +295,21 @@ def projection_drain() -> dict:
                 result.get("processed"),
                 result.get("errors"),
             )
+        elif (
+            result.get("processed")
+            or result.get("errors")
+            or result.get("pending")
+            or result.get("dead_total")
+        ):
+            logger.info(
+                "Projection drain: processed=%s errors=%s dead=%s "
+                "pending=%s dead_total=%s",
+                result.get("processed"),
+                result.get("errors"),
+                result.get("dead"),
+                result.get("pending"),
+                result.get("dead_total"),
+            )
         return result
     finally:
         db.close()

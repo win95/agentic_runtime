@@ -2341,6 +2341,13 @@ def scenario_payment(report: Report, mcp: Mcp, session_id: str,
     only WARNs and the scenario stops there; a same-turn confirm
     (treating "I transferred" as receipt) only WARNs and skips turn 2,
     since the end state is still PAID.
+
+    NOT a gate for payment correctness: a PASS here shows the agent
+    behaved once, and a WARN shows nothing about the tools. The
+    payment contract itself (record → confirm, balances, refunds,
+    rejections) is proven by ``scripts/manual/probe_payment.py`` at
+    the mock level (22 checks, no agent, no router). Do not read this
+    scenario's result as proof that the agent handles money correctly.
     """
     print(f"\n=== scenario: payment (session {session_id}) ===")
     code, booking, _in, _out, booked_session = _book_confirmed_deluxe(

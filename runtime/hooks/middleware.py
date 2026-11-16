@@ -61,7 +61,7 @@ from runtime.context_budget import (
 )
 from runtime.hooks.events import HookContext, HookEvent
 from runtime.hooks.registry import HookRegistry
-from runtime.long_term_memory import encode_turns
+from runtime.long_term_memory import encode_texts, turn_text
 
 logger = logging.getLogger(__name__)
 
@@ -160,10 +160,11 @@ class HookMiddleware(AgentMiddleware):
             # ever lost in the gap. The encoder never raises; a
             # storage failure just means this run's trimmed turns are
             # not retrievable later.
-            self.encoded_turns += encode_turns(
+            self.encoded_turns += encode_texts(
                 self.session_id,
                 self.execution_id,
-                group_turns(remove),
+                [turn_text(turn) for turn in group_turns(remove)],
+                source="trim",
             )
             remove_ids = [getattr(m, "id", "") or "" for m in remove]
             removed_tokens = sum(message_tokens(m) for m in remove)

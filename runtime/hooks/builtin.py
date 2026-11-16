@@ -171,6 +171,12 @@ def enforce_layer(context: HookContext) -> HookDecision | None:
     - read tools are never denied here: reads build context, and
       their data is scoped by the wrappers, not by tool name.
 
+    Fail-closed like ``request_permission``: if the registry cannot
+    be imported, or any check inside raises, the call is DENIED —
+    an unverifiable tool must not run unchecked. (A handler that
+    raised would be swallowed by the registry's dispatch, so this
+    handler never raises: every failure path returns a deny.)
+
     Built-in deepagents tools are skipped: ``deny_builtin_tools``
     owns them for hotel, and fault_analysis legitimately needs them
     inside its sandbox.
@@ -180,29 +186,36 @@ def enforce_layer(context: HookContext) -> HookDecision | None:
     try:
         import runtime.tools  # noqa: F401 — registers the built-in tools
         from runtime.tools.registry import registry
-    except Exception:  # noqa: BLE001 — cannot judge; do not break the run
-        logger.debug("enforce_layer: registry unavailable, allowing %s", context.tool_name)
+
+        entry = registry.get(context.tool_name)
+        if entry is None:
+            return HookDecision.deny(
+                f"Tool '{context.tool_name}' denied by hook 'enforce_layer': "
+                "not in the tool registry."
+            )
+        capabilities = context.capabilities or []
+        if capabilities and entry.capability not in capabilities:
+            return HookDecision.deny(
+                f"Tool '{context.tool_name}' denied by hook 'enforce_layer': "
+                f"capability '{entry.capability}' is not in this mission's "
+                "capabilities."
+            )
+        allowed_tools = context.allowed_tools or []
+        if allowed_tools and not entry.read_only and context.tool_name not in allowed_tools:
+            return HookDecision.deny(
+                f"Tool '{context.tool_name}' denied by hook 'enforce_layer': "
+                "write tool not in the agent's pinned allowed_tools."
+            )
         return None
-    entry = registry.get(context.tool_name)
-    if entry is None:
+    except Exception as exc:  # noqa: BLE001 — fail closed, never raise
+        logger.warning(
+            "enforce_layer check failed, denying %s: %s", context.tool_name, exc
+        )
         return HookDecision.deny(
             f"Tool '{context.tool_name}' denied by hook 'enforce_layer': "
-            "not in the tool registry."
+            "could not verify the tool against the registry — refuse "
+            "the action and report it."
         )
-    capabilities = context.capabilities or []
-    if capabilities and entry.capability not in capabilities:
-        return HookDecision.deny(
-            f"Tool '{context.tool_name}' denied by hook 'enforce_layer': "
-            f"capability '{entry.capability}' is not in this mission's "
-            "capabilities."
-        )
-    allowed_tools = context.allowed_tools or []
-    if allowed_tools and not entry.read_only and context.tool_name not in allowed_tools:
-        return HookDecision.deny(
-            f"Tool '{context.tool_name}' denied by hook 'enforce_layer': "
-            "write tool not in the agent's pinned allowed_tools."
-        )
-    return None
 
 
 def guard_destructive_target(context: HookContext) -> HookDecision | None:

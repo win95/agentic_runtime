@@ -85,7 +85,7 @@ OUTPUT_RESERVE_TOKENS = 5_120
 KV_CACHE_TOKENS_PER_AGENT = 2_048
 
 # Prompt side: everything except the output reserve and the KV cache
-# reserve. 1,024 + 2,048 + 1,024 + 3,072 + 2,048 + 15,616 = 24,832.
+# reserve. 1,024 + 2,048 + 2,048 + 8,024 + 2,048 + 9,640 = 24,832.
 PROMPT_SIDE_TOKENS = (
     SYSTEM_PROMPT_TOKENS
     + TOOL_DEFINITIONS_TOKENS

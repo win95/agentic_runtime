@@ -1,7 +1,8 @@
 # Hotel receptionist — lễ tân khách sạn
 
 Agent `hotel_receptionist` + mission `hotel_reception` (autonomous,
-capability `hotel_reception`): phục vụ khách bằng tiếng Việt qua Slack,
+capability `hotel_reception`): phục vụ khách bằng tiếng Việt qua public
+API (guest API),
 nhận đặt phòng, trả lời chính sách, giao việc cho buồng phòng / kỹ
 thuật. Session memory kiểu B (1 session = 1 cuộc trò chuyện với 1
 khách), giới hạn 10 turns / 4.096 token như `admin_bot`.
@@ -9,7 +10,8 @@ khách), giới hạn 10 turns / 4.096 token như `admin_bot`.
 ## Trạng thái (2026-11-12)
 
 Đã xong: agent + mission YAML, prompt tiếng Việt, skill `reception`
-với skill map 20 node (3 luồng chính + tra cứu), test
+với skill map 20 node (8 flow: đặt phòng, thanh toán, giao việc +
+5 tra cứu), test
 (`tests/test_hotel_reception.py`, 4 test), **mock MCP server +
 chạy thử end-to-end** (`scripts/mock_hotel_mcp_server.py`,
 `tests/test_mock_hotel_mcp.py`, 11 test — gồm 1 lượt chạy Deep Agent
@@ -97,11 +99,13 @@ toán: `booking-payment` → `collect-payment` → `confirm-payment` →
 `report-payment`. Luồng giao
 việc: `task-details` → `find-staff` → `create-task` → `assign-task` →
 `report-task`. Tra cứu: `policy-lookup`, `booking-lookup` →
-`booking-change`, `task-status`. Map từng là kế hoạch (Phương án C):
-agent được lệch khi có lý do và phải báo các node đã đi qua. Từ Phase
-3a, map của hotel được **ép buộc ở runtime bằng plan gate** (mục dưới)
-— văn bản skill và plan render đã đổi theo: thứ tự node bị từ chối
-khi gọi tool ngoài lượt, không còn là lời khuyên.
+`booking-change`, `task-status`. Map là kế hoạch (Phương án C) nhưng
+từ Direction C (2026-11-15) được **biên dịch thành flow-agent** (mục
+dưới): thứ tự node được thực thi bằng flow boundary + tool allowlist
+theo flow + cap `requires` (vd `confirm_payment` bắt buộc đã
+`record_payment`). Plan gate (Phase 3a) đã bị xóa 2026-11-16 vì không
+bao giờ chạy được qua `deep_agent_node` — xem mục Plan gate (lịch sử)
+bên dưới.
 
 Cho tới khi MCP server connect, `load_skills()` sẽ drop các tool của
 map (tool chưa biết) nhưng giữ nguyên cấu trúc node — plan vẫn render
@@ -114,11 +118,15 @@ map (tool chưa biết) nhưng giữ nguyên cấu trúc node — plan vẫn ren
 con, chạy thay cho một agent tự do duy nhất (`deep_agent_node` chọn
 đường này khi mission thuộc `FLOW_PILOT_MISSIONS` và có skill map;
 hiện chỉ có `hotel_reception`). Đây là hướng C thay cho node compiler
-cũ (`runtime/subgraph/node.py`, nay là legacy): run live v4b
+cũ (`runtime/subgraph/node.py`, đã xóa 2026-11-16): run live v4b
 (109 pass / 32 fail) cho thấy lỗi của node compiler là cấu trúc — một
 dòng `NEXT:` nằm trong cùng message trả lời khách, một quyết định
 routing cho mỗi node, và một lần parse lỗi đi bộ xuyên flow — chứ không
-phải lỗi parse để vá.
+phải lỗi parse để vá. Bằng chứng gốc của run v4b (log +
+`reports/hotel-mlflow-report-v4b.md` / `reports/hotel-mlflow-traces-v4b.csv`
+mà file verify trích dẫn) hiện không còn trong repo — chỉ còn
+`reports/phase3-subgraph-verify-2e9ab1a.md` và
+`reports/phase3-subgraph-fix-proposals.md` làm bằng chứng lịch sử.
 
 Map 20 node suy ra 8 flow:
 
@@ -198,15 +206,23 @@ Map 20 node suy ra 8 flow:
   schema khai báo — dùng `StateGraph(dict)` trần đã làm mất lặng lẽ
   `session_history` sau node đầu tiên, khiến luật resume không bao giờ
   kích hoạt (lỗi đã bắt được bằng test ở node compiler cũ).
-- **Gate và flow subgraph không chạy cùng nhau:** khi flow subgraph
-  chạy, plan gate không gắn vào (không còn gì để nó từ chối) và plan
-  block không append vào prompt (map đã biên dịch, không còn là
-  prose). Gate còn lại làm cơ chế ép cho mission chưa lên subgraph.
+- **Gate đã xóa, chỉ còn flow subgraph:** plan gate (Phase 3a) đã bị
+  xóa 2026-11-16 vì không bao giờ chạy được — khi flow subgraph chạy,
+  gate cũng không gắn vào; plan block không append vào prompt (map đã
+  biên dịch, không còn là prose). Mission chưa lên subgraph chạy agent
+  tự do với plan prose tư vấn.
 - **Chưa có:** trace 7 layer cho pilot (Phase 3 tiếp theo), judge LLM
   (chưa chọn model), tách eval temp 0 / production 0.5 (Phase 4).
   Chưa live-verify: chạy lại suite hotel manual (v5) trên máy tran.
 
-## Plan gate — ép thứ tự map ở runtime (Phase 3a)
+## Plan gate — ép thứ tự map ở runtime (Phase 3a) [LỊCH SỬ — ĐÃ XÓA 2026-11-16]
+
+> Mục này giữ lại làm lịch sử. `runtime/plan_gate.py` và
+> `runtime/subgraph/node.py` đã bị xóa 2026-11-16: gate không bao giờ
+> chạy được qua `deep_agent_node` (nhánh flow luôn thắng điều kiện,
+> gate trả `None` cho mọi mission), node compiler cũng vậy. Cơ chế ép
+> buộc hiện tại là flow compiler (mục trên). Nội dung dưới đây mô tả
+> cơ chế cũ, không còn trong code.
 
 `runtime/plan_gate.py`: một `AgentMiddleware` xây từ `SkillMap` đã parse
 của run, gắn vào danh sách middleware của `deep_agent_node` ngay sau
@@ -234,11 +250,12 @@ mission chưa biên dịch map.
   khi gate gắn vào — văn bản "được lệch" + gate cứng là mâu thuẫn nên
   không giữ cả hai. `confirm-booking` vẫn là điểm dừng ở mức prompt
   (node không có tool nên gate không quan sát được việc xác nhận).
-- **Chưa có:** điều kiện tiên quyết giữa các tool (ví dụ `create_task`
-  bắt buộc đã `list_staff`) — allowlist đã ép đúng thứ tự đó cho luồng
-  task; quyết định từng rule (dependency dữ liệu / gate / bỏ) vẫn mở.
-  Subgraph biên dịch từ map đã xong (mục trên) — gate chỉ còn là cơ
-  chế dự phòng cho mission chưa lên subgraph.
+- **Đã có (2026-11-16):** điều kiện tiên quyết giữa các tool qua
+  trường `requires` trong map (vd `confirm_payment` requires
+  `record_payment`), do flow cap (`ToolCallCap`) thực thi ở call
+  boundary — xem mục Flow subgraph. Thứ tự trong luồng task vẫn do
+  allowlist + goal text giữ (chưa có `requires` cho `create_task` /
+  `assign-task`).
 
 ## Mock MCP server — chạy thử end-to-end
 

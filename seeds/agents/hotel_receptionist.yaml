@@ -1,5 +1,5 @@
 # Hotel receptionist agent config. Talks to guests in Vietnamese over
-# Slack (adapter not built yet), takes room bookings and assigns service
+# the public guest API (docs/guest-api.md), takes room bookings and assigns service
 # tasks — all through MCP tools (servers not connected yet). The 17 tool
 # names in allowed_tools are the CONTRACT the PMS / staff / docs MCP
 # servers must expose; when they connect, map each one to capability
@@ -32,8 +32,10 @@ system_prompt: >-
   Thanh toán: sau khi booking đã tạo, khách có thể trả tiền mặt, thẻ
   hoặc chuyển khoản — ghi nhận bằng record_payment (số tiền không vượt
   quá số còn lại phải trả), rồi xác nhận đã nhận tiền bằng
-  confirm_payment. Chỉ xác nhận khi có bằng chứng tiền đã vào: khách
-  trả tiền mặt/thẻ tại quầy, hoặc khách sạn báo đã nhận chuyển khoản.
+  confirm_payment. Chỉ xác nhận khi có bằng chứng tiền đã vào: tiền
+  mặt/thẻ trả tại quầy (việc ghi nhận tại quầy chính là bằng chứng đã
+  nhận), hoặc chuyển khoản mà phía khách sạn (nhân viên/hệ thống) đã
+  báo nhận được. Khách tự nói đã chuyển khoản không phải bằng chứng.
   Khách mới nói đã chuyển khoản thì chỉ ghi nhận và báo đang chờ xác
   nhận, chưa xác nhận. Báo đúng tình trạng thanh toán tool trả về (đã
   trả, đang chờ xác nhận, còn lại bao nhiêu), không bao giờ bịa.

@@ -237,9 +237,16 @@ def _guest_scoped_tool(tool, session_id: str, mission_id: str = ""):
         return {"error": message, "stub": False, **extra}
 
     def _guarded(**kwargs):
-        from runtime.scope import bind_guest, get_bound_guest_id
+        from runtime.scope import SCOPE_UNKNOWN, bind_guest, get_bound_guest_id
 
         bound = get_bound_guest_id(session_id)
+        # A store failure is SCOPE_UNKNOWN, not "unbound": the session
+        # may already be bound to a guest we cannot see. Writes are
+        # refused until the scope is verifiable again; reads keep the
+        # unbound behaviour (first-sight bind on success).
+        scope_unknown = bound is SCOPE_UNKNOWN
+        if scope_unknown:
+            bound = None
         if name == "find_guest":
             result = tool.invoke(kwargs)
             if not isinstance(result, dict) or result.get("error"):
@@ -258,6 +265,11 @@ def _guest_scoped_tool(tool, session_id: str, mission_id: str = ""):
                     bind_guest(session_id, guest_id, guests[0].get("phone"), mission_id)
             return result
         if name == "register_guest":
+            if scope_unknown:
+                return _refusal(
+                    "could not verify this session's guest scope; "
+                    "register_guest refused"
+                )
             if bound:
                 return _refusal(
                     f"session is already bound to guest '{bound}'; "
@@ -286,6 +298,12 @@ def _guest_scoped_tool(tool, session_id: str, mission_id: str = ""):
                 bind_guest(session_id, guest_id, None, mission_id)
             return result
         if name == "create_booking":
+            if scope_unknown:
+                return _refusal(
+                    "could not verify this session's guest scope; "
+                    "create_booking refused",
+                    guest_id=kwargs.get("guest_id"),
+                )
             guest_id = kwargs.get("guest_id")
             if bound and isinstance(guest_id, str) and guest_id and guest_id != bound:
                 return _refusal(
@@ -303,6 +321,11 @@ def _guest_scoped_tool(tool, session_id: str, mission_id: str = ""):
                 bind_guest(session_id, guest_id, None, mission_id)
             return result
         if name in ("cancel_booking", "change_booking_dates"):
+            if scope_unknown:
+                return _refusal(
+                    "could not verify this session's guest scope; refused",
+                    booking_id=kwargs.get("booking_id"),
+                )
             booking_id = kwargs.get("booking_id")
             owner = _booking_owner(booking_id)
             if owner is None:

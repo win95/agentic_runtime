@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_hours: int = 24
 
+    # Redis for rate limiting (login/register) — db 2, separate from
+    # the platform's Celery broker (db 0) and result backend (db 1).
+    redis_url: str = "redis://localhost:6379/2"
+
     # One-off admin seed (services.user_service.seed_admin). Empty =
     # seeding refuses to run; set them in the environment, never in code.
     admin_email: str = ""

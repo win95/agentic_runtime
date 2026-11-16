@@ -51,16 +51,23 @@ through to the API-key path.
 
 ## What the base does NOT do
 
-- **Sessions are not yet user-owned.** A session is still keyed by
-  `session_id` and bound to one agent + mission (docs/sessions.md).
-  The execution carries `user_id`, so the audit trail exists; binding
-  sessions to users (and rejecting a session owned by someone else) is
-  the next step.
+- **Rate limiting on login and register.** `POST /auth/login` giới
+  hạn 5 lần/phút theo (email, IP) — key theo cả hai để kẻ tấn công
+  không khóa được nạn nhân từ IP khác; giới hạn chạy TRƯỚC khi kiểm
+  tra mật khẩu nên 429 không lộ email có tồn tại hay không.
+  `POST /auth/register` giới hạn 5 lần/phút theo IP. Cả hai dùng
+  Redis (db 2, `REDIS_URL`; xem `services/user_service/rate_limit.py`).
+  Redis lỗi thì fail-open (ghi log) — giới hạn là rào chắn, không
+  phải auth.
+- **Sessions are user-bound** since the guest API demo
+  (docs/guest-api.md): a session belongs to one user, and loading
+  another user's session is a 404. The execution carries `user_id`,
+  so the audit trail exists.
 - **No refresh tokens, password reset, email verification, OAuth,
-  per-user cost caps, login rate limiting, or CORS.** Each is a small
-  follow-up on top of this base. The per-user cost cap is Layer 7 of
-  the security & cost roadmap (docs/security-cost-roadmap.md) — this
-  base supplies the `user_id` it needs to be enforced against.
+  per-user cost caps, or CORS.** Each is a small follow-up on top of
+  this base. The per-user cost cap is Layer 7 of the security & cost
+  roadmap (docs/security-cost-roadmap.md) — this base supplies the
+  `user_id` it needs to be enforced against.
 - **No tenant separation beyond user_id.** The platform still runs one
   tenant (`"default"` in the mission context); `user_id` is ownership,
   not a tenant boundary.

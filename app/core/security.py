@@ -1,13 +1,19 @@
-"""API-key auth — minimal stub for the scaffold.
+"""API-key auth + JWT user auth + mission authorization.
 
 The Platform API accepts an `X-API-Key` header compared (constant-time)
 against the `API_KEY` env var. If `API_KEY` is empty, auth is DISABLED —
-this is a dev-only convenience and must never be used in production.
+but ONLY when `ENVIRONMENT=dev`. In any other environment an empty
+`API_KEY` is a configuration error and every API-key check fails closed
+(401). Production must set API_KEY (docker-compose requires it).
 
 Users authenticate with a JWT instead (see below): the user service
 signs HS256 tokens with the shared `JWT_SECRET`, and this module
 verifies them. A route can accept either credential via
 `require_api_key_or_user`.
+
+A JWT user is not an operator: `require_mission_for_role` limits which
+missions a plain user may run through POST /executions (guests may only
+run `hotel_reception`; admins and service-key calls are unrestricted).
 """
 
 from __future__ import annotations
@@ -25,10 +31,20 @@ _warned = False
 
 
 async def require_api_key(x_api_key: str | None = Header(default=None)) -> str | None:
-    """Dependency: require a valid API key unless auth is disabled."""
+    """Dependency: require a valid API key unless auth is disabled.
+
+    Auth is disabled ONLY in dev (`ENVIRONMENT=dev`) with an empty
+    `API_KEY`. In any other environment an empty `API_KEY` fails
+    closed — a missing key is a deployment error, not an open door.
+    """
     global _warned
     expected = settings.api_key
     if not expected:
+        if settings.environment != "dev":
+            raise HTTPException(
+                status_code=401,
+                detail="API_KEY is not configured (ENVIRONMENT != dev)",
+            )
         if not _warned:
             logger.warning("API_KEY is empty — API-key auth is DISABLED (dev only).")
             _warned = True
@@ -107,3 +123,26 @@ def require_own_execution(execution, user: dict | None) -> None:
     """
     if user is not None and getattr(execution, "user_id", None) != user.get("sub"):
         raise HTTPException(status_code=404, detail="Execution not found")
+
+
+# Missions a plain JWT user ("role": "user") may run through
+# POST /executions. Guests talk to the hotel agent only — fault analysis
+# and system admin are operator missions (they read infra state and can
+# trigger destructive tools behind human approval). Admins ("role":
+# "admin") and service-key calls (user is None) are unrestricted.
+# A token with no role claim is treated as a plain user (least privilege).
+USER_RUNNABLE_MISSIONS = frozenset({"hotel_reception"})
+
+
+def require_mission_for_role(user: dict | None, mission_id: str) -> None:
+    """Refuse a mission the caller's role may not run.
+
+    Deliberately 404 (not 403), like `require_own_execution`: the API
+    never confirms that a mission outside the caller's scope exists.
+    """
+    if user is None:
+        return
+    if user.get("role", "user") == "admin":
+        return
+    if mission_id not in USER_RUNNABLE_MISSIONS:
+        raise HTTPException(status_code=404, detail="Mission not found")

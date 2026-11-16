@@ -6,7 +6,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from ontology.models import (
@@ -154,6 +154,22 @@ class CanonicalOntologyRepository:
             row.trace_id = trace_id
             row.last_error = None
         self._session.flush()
+
+    def count_projection_states(self) -> dict[str, int]:
+        """Queue depth for observability: remaining ``pending`` rows
+        and terminal ``dead`` rows (poison rows need a manual fix —
+        upsert_projection_pending re-queues one)."""
+        pending = self._session.scalar(
+            select(func.count())
+            .select_from(OntologyProjectionState)
+            .where(OntologyProjectionState.status == "pending")
+        )
+        dead = self._session.scalar(
+            select(func.count())
+            .select_from(OntologyProjectionState)
+            .where(OntologyProjectionState.status == "dead")
+        )
+        return {"pending": int(pending or 0), "dead": int(dead or 0)}
 
     def claim_pending_projections(self, limit: int = 32) -> list[OntologyProjectionState]:
         stmt = (

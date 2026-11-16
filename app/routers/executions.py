@@ -15,6 +15,7 @@ from app.core.db import get_db
 from app.core.security import (
     get_current_user,
     require_api_key_or_user,
+    require_mission_for_role,
     require_own_execution,
 )
 from app.services import execution_service
@@ -50,6 +51,9 @@ def create_execution(
     db: Session = Depends(get_db),
     user: dict | None = Depends(get_current_user),
 ):
+    # A plain JWT user may only run the guest mission; anything else is
+    # 404 (never 403) so the API does not confirm the mission exists.
+    require_mission_for_role(user, payload.mission_id)
     try:
         execution, problems = execution_service.create_execution(
             db,

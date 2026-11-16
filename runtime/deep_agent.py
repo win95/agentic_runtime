@@ -228,8 +228,8 @@ def outcome_from_messages(messages: list, skill_maps: list[SkillMap] | None = No
     """Derive the standard outcome from an agent run's messages.
 
     Shared by ``run_deep_agent`` (one free-form agent) and
-    ``runtime.subgraph.node.run_skill_subgraph`` (one agent per map
-    node): the outcome semantics must stay identical whichever path ran
+    ``runtime.subgraph.flow.run_flow_subgraph`` (one agent per flow):
+    the outcome semantics must stay identical whichever path ran
     — summary is the last non-empty text, ``actions_taken`` lists the
     tool names the agent called AND whose results did not report
     failure, in order (a refused or failed call goes into ``errors`` as

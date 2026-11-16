@@ -191,8 +191,12 @@ it is the Phase 3 gating trigger "gazetteer_miss" (§6).
 
 ## 6. Expansion — gated multi-query + decomposition (Phase 3)
 
-Off by default. `ExpandedRetriever` wraps `HybridRetriever`;
-when nothing triggers, the base ranking is returned untouched.
+Off by default. Expansion lives in ONE place now:
+`HybridRetriever.retrieve(question, query_plan=plan)`
+(`runtime/retrieval_hybrid.py`) — the old Phase 3 wrapper
+(`ExpandedRetriever` / `build_expanded_retriever`) duplicated
+that logic and was deleted 2026-11-16. When nothing triggers,
+the base ranking is returned untouched.
 
 **Gating** (deterministic, on the PRE-fusion candidate rows).
 Expand iff top-1 vector score < `LOW_TOP1_VEC = 0.35`, OR
@@ -352,7 +356,14 @@ detail: `docs/hybrid-retrieval-phase5.md`.
   — **a wrong link is worse than no link**. Fault codes are
   NOT fetched (no Fault entity type;
   `FAULT_CODE_LINKS` stays demo-grounded): a fault code links
-  nothing. Matching reuses the Phase 4
+  nothing. **Fault-code-only queries are vector-only BY DESIGN**
+  (2026-11-16): Fault / Maintenance / Sensor are not canonical
+  entity types (v1: Asset, Building, Component, Document — see
+  `ontology/canonical/schema.py`), so a question naming only a
+  fault code (e.g. "F-204") has no graph seeds and the graph arm
+  contributes nothing; the vector arm + exact match carry it.
+  Making Fault a 5th canonical type is an open Phase 0 ontology
+  decision, not a retrieval bug. Matching reuses the Phase 4
   normalisation (verbatim 1.0, separator / diacritics variant
   0.8, 1.0 twin wins dedup). `clear_gazetteer_codes()` empties
   the cache — the gazetteer then links nothing until
@@ -640,8 +651,9 @@ the runner for the §8 metric table.
    0.30 → 0.957, 0.40 → 0.958, 0.50 → 0.978 — three swaps, not a
    live prediction).
 7. **Live expansion A/B:** swap the stub generators for the
-   live ones (`ExpandedRetriever(base)` with no generator
-   arguments), re-run the Phase 3 A/B with the same exit
+   live ones (the plan path builds them lazily —
+   `HybridRetriever.retrieve(question, query_plan=plan)` with
+   no generator arguments), re-run the Phase 3 A/B with the same exit
    criterion (no Precision@6 loss, no Recall@6/nDCG@6
    regression, gated subset reported separately). Re-tune the
    gating thresholds live (0.35 / 0.15 are fake-BoW cosine
@@ -686,7 +698,7 @@ pre-retrieval hook): when set, the hook calls
 `build_hybrid_retriever()` (Phase 5, §6b — the factory
 now exists and does the embedding / client / store / gazetteer
 work, including the real corpus doc-counts for seed
-specificity) — or `ExpandedRetriever` over it, once the live
+specificity) — with `query_plan=True` over it, once the live
 A/B in §11.7 passes — assembles context with
 `runtime/retrieval_context.py::assemble_context`, and logs the
 trace (seeds, expansion, per-candidate G1–G9, guardrail flags,

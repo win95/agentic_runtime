@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from app import models
 from app.services import execution_service
-from runtime.session_history import TERMINAL_STATUSES, cap_turns, summarize_turn
+from runtime.session_history import TERMINAL_STATUSES, cap_turns, render_turn, summarize_turn
 
 
 def new_session_id() -> str:
@@ -173,24 +173,48 @@ def load_session_history(
     priors = query.order_by(
         models.Execution.created_at.asc(), models.Execution.id.asc()
     ).all()
-    turns = [
-        summarize_turn(
-            execution,
-            execution_service.get_execution_result(db, execution.id),
-        )
+    pairs = [
+        (execution, execution_service.get_execution_result(db, execution.id))
         for execution in priors
     ]
+    turns = [summarize_turn(execution, result) for execution, result in pairs]
+    # Tools that already succeeded in this session (any terminal turn):
+    # a prerequisite recorded in a prior turn still counts — e.g. a
+    # payment recorded last turn satisfies confirm_payment's
+    # ``requires: [record_payment]`` this turn. ``actions_taken`` lists
+    # only calls whose results did not report failure, so it is the
+    # successful-call set by construction. Computed from ALL priors,
+    # not the capped turns: a state fact must not fall out of the
+    # history window.
+    prior_actions: list[str] = []
+    seen_actions: set[str] = set()
+    for _, result in pairs:
+        output = (result.output or {}) if result is not None else {}
+        for name in output.get("actions_taken") or []:
+            if isinstance(name, str) and name and name not in seen_actions:
+                seen_actions.add(name)
+                prior_actions.append(name)
     kept, omitted = cap_turns(turns)
     if omitted:
         # The load-time cap drops the oldest turns; encode them into
         # long-term memory before they are forgotten (best-effort —
-        # encode_session_turns never raises, and it dedupes on
+        # encode_texts never raises, and it dedupes on
         # (session, execution, content hash), so the same dropped
         # turns are not re-stored on every later execution).
         kept_ids = {t["execution_id"] for t in kept}
         dropped = [t for t in turns if t["execution_id"] not in kept_ids]
         if dropped:
-            from runtime.long_term_memory import encode_session_turns
+            from runtime.long_term_memory import encode_texts
 
-            encode_session_turns(session_id, exclude_execution_id, dropped)
-    return {"turns": kept, "omitted": omitted, "total_prior": len(turns)}
+            encode_texts(
+                session_id,
+                exclude_execution_id,
+                [render_turn(t, i + 1) for i, t in enumerate(dropped)],
+                source="session_cap",
+            )
+    return {
+        "turns": kept,
+        "omitted": omitted,
+        "total_prior": len(turns),
+        "prior_actions": prior_actions,
+    }

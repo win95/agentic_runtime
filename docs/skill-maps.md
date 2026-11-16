@@ -9,23 +9,35 @@ tools are injected; data is fetched through tools when a node needs it,
 never stuffed in upfront.
 
 > **2026-11-13 — the map is now enforced by code, not just prose.**
-> For the pilot mission the map is compiled into a LangGraph subgraph;
-> for missions still on the free-form path a plan gate enforces the
-> order at the tool-call boundary. See [Enforcement](#enforcement-subgraph--plan-gate)
+> For the pilot mission the map is compiled into a LangGraph subgraph.
+> (The plan gate mentioned here for free-form missions was deleted
+> 2026-11-16 — it never ran; free-form missions keep the advisory
+> plan block only.) See [Enforcement](#enforcement-flow-subgraph-plan-gate--node-compiler-deleted-2026-11-16)
 > below. Option C's "deviate with reason" now applies only to missions
 > not yet on the subgraph.
 >
 > **2026-11-15 — Direction C: the pilot moved from one agent per map
-> node to one agent per flow** (see the flow bullet below). The node
-> compiler stays as the fallback; the v4b live run showed its failure
-> mode is structural (a `NEXT:` line inside the guest's answer, one
-> routing decision per node, a silent walk across flow boundaries on a
-> bad parse), not a parse bug to patch.
+> node to one agent per flow** (see the flow bullet below). The v4b
+> live run showed the node compiler's failure mode is structural (a
+> `NEXT:` line inside the guest's answer, one routing decision per
+> node, a silent walk across flow boundaries on a bad parse), not a
+> parse bug to patch.
+>
+> **2026-11-16 — the node compiler and the plan gate were deleted.**
+> Neither could run through `deep_agent_node` anymore (the flow branch
+> always won the condition; the gate returned `None` for every
+> mission), so they were dead code, not a fallback. The flow compiler
+> is the only subgraph path; free-form missions run with the advisory
+> plan block only. Node order inside a flow is now data: a node's
+> `requires` list is enforced by the flow's tool-call cap
+> (`ToolCallCap`), and resume nodes are marked `resume: true` in the
+> map itself.
 
-## Enforcement: subgraph + plan gate
+## Enforcement: flow subgraph (plan gate + node compiler deleted 2026-11-16)
 
-One run uses exactly one enforcement mechanism, chosen in
-`deep_agent_node` (`runtime/mission_graph.py`):
+A run uses the flow compiler when the mission is a flow pilot with a
+skill map; otherwise it runs free-form with the advisory plan block
+below — there is no other enforcement mechanism left.
 
 - **Flow subgraph** (`runtime/subgraph/flow.py`, pilot:
   `hotel_reception`, Direction C, 2026-11-15). `build_flow_subgraph`
@@ -81,23 +93,27 @@ One run uses exactly one enforcement mechanism, chosen in
   the graph itself is the enforcement. `run_flow_subgraph` returns the
   same outcome shape as `run_deep_agent`, plus `visited_nodes` (flow
   ids) and `flow_trace`.
-- **Node subgraph** (`runtime/subgraph/node.py`) — LEGACY, superseded
-  by the flow compiler for the pilot; kept for its tests and as the
-  fallback path. Same shape (one Deep Agent per map node, code router
-  over `NEXT:` lines, fallback to next-in-order, `NEXT: END` honored
-  only at terminal nodes). Both compilers live in `runtime/subgraph/`
-  with their shared pieces (`ToolCallCap`, `tools_for_node`,
-  `next_in_order`, `last_text`) in `common.py`.
+- **Node subgraph** (`runtime/subgraph/node.py`) — [DELETED
+  2026-11-16] LEGACY, superseded by the flow compiler for the pilot;
+  deleted because the flow branch always won the condition in
+  `deep_agent_node`, so it could never run. Same shape it used to
+  have: one Deep Agent per map node, code router over `NEXT:` lines,
+  fallback to next-in-order, `NEXT: END` honored only at terminal
+  nodes. Its shared pieces (`ToolCallCap`, `tools_for_node`,
+  `next_in_order`, `last_text`) still live in `common.py` and serve
+  the flow compiler.
 - **Plan gate** (`runtime/plan_gate.py`, `PLAN_GATE_MISSIONS =
-  {"hotel_reception"}` — currently no production mission attaches it,
-  since hotel moved to the subgraph). An `AgentMiddleware` built from
-  the run's parsed maps: it allows the current node's tools, the next
-  tool node in order, branch targets of the current node and of the
-  start node (re-route), and already-visited tool nodes; anything
-  else is denied with a ToolMessage naming the allowed next tools.
-  After 5 denials the run fails with `PlanGateExceededError`. Tools
-  in no map node are allowed with a warning (fail-open; map coverage
-  is enforced by test instead).
+  {"hotel_reception"}`) — [DELETED 2026-11-16] An `AgentMiddleware`
+  built from the run's parsed maps: it allowed the current node's
+  tools, the next tool node in order, branch targets of the current
+  node and of the start node (re-route), and already-visited tool
+  nodes; anything else was denied with a ToolMessage naming the
+  allowed next tools. After 5 denials the run failed with
+  `PlanGateExceededError`. Tools in no map node were allowed with a
+  warning (fail-open; map coverage is enforced by test instead). It
+  could never run through `deep_agent_node` — the gate was only built
+  when neither subgraph nor flow ran, and it returned `None` for
+  every mission — so it was deleted with the node compiler.
 
 The two mechanisms share the map schema and the `plan_trace`
 diagnostics below; the gate is the enforcement for missions still on
@@ -152,14 +168,14 @@ Rules (`runtime/skills/map_plan.py`):
    prompt runs (pinned AgentVersion prompt, admin prompt, or default).
    The plan is skill-derived runtime context — like the skill files
    themselves — not part of the pinned prompt text. Skills without a
-   map change nothing. With `enforced=True`, the header states the
-   plan gate refuses out-of-step calls; the default header keeps the
-   Option C "you may deviate" text. On the **subgraph path** no plan
+   map change nothing. The header keeps the Option C "you may deviate"
+   text — the enforced variant (`render_plan(..., enforced=True)`) was
+   removed with the plan gate (2026-11-16). On the **subgraph path** no plan
    block is rendered at all — the compiled graph carries the plan.
 3. The plan block states the contract: follow the plan; deviate only
    when the evidence justifies it and say why; report visited nodes
    and deviations at the end. The data-access pilot renders to ~370
-   tokens (skills budget: 1,024).
+   tokens (skills budget: 2,048).
 4. The native deepagents SkillsMiddleware still discloses the full
    `SKILL.md` file (including the frontmatter map) on demand — the
    rendered plan in the system prompt is the operative copy.

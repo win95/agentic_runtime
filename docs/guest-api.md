@@ -54,16 +54,14 @@ curl -s localhost:8000/executions/EXEC_ID/result \
   qua worker vào state, rồi thành một dòng trong system prompt
   (`Current user: ...`) và vào `guest_id`/`channel` của input —
   cả hai đều do server đặt từ JWT, khách không tự khai được.
-- **Rate limit 20 tin/phút/khách** (in-memory, xem dưới). Tin nhắn
-  tối đa 4.000 ký tự.
+- **Rate limit 20 tin/phút/khách** (Redis, shared store — xem
+  `app/core/rate_limit.py`). Tin nhắn tối đa 4.000 ký tự.
 - **History chỉ load turn của chính user** (cộng các turn chưa có
   chủ từ trước thời user service). Turn của khách khác không bao giờ
   vào prompt.
 
 ## Demo-only (chưa làm cho production)
 
-- Rate limit in-memory theo từng process API — chạy nhiều replica
-  thì mỗi replica đếm riêng. Production cần Redis.
 - Không streaming/SSE — client poll kết quả. Worker + LiteLLM proxy
   + mock MCP phải chạy thì chat mới có trả lời thật.
 - Chưa có trần chi phí LLM theo user, chưa có refresh token.

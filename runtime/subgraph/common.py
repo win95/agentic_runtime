@@ -1,12 +1,12 @@
 """Shared pieces for the subgraph compilers (``runtime/subgraph/``).
 
-Both compilers — the flow compiler (``flow.py``, Direction C, current)
-and the legacy node compiler (``node.py``) — build Deep Agents with a
-per-execution tool-call budget + repeat guard, pick tools by name, walk
-the map in list order, and read the last text of a message list. Those
-pieces live here so neither compiler owns what the other imports; the
-legacy node module used to own them, which is backwards now that the
-flow compiler is the current path.
+The flow compiler (``flow.py``, Direction C, current) builds Deep
+Agents with a per-execution tool-call budget + repeat guard, picks
+tools by name, walks the map in list order, and reads the last text
+of a message list. Those pieces live here so the compiler owns what
+only it imports. (The legacy node compiler and the Phase 3a plan
+gate were deleted 2026-11-16 — the flow compiler is the only
+subgraph path now.)
 """
 
 from __future__ import annotations
@@ -98,18 +98,42 @@ class ToolCallCap(AgentMiddleware):
        get_booking / find_guest. A success never clears the set: a
        (name, args) that failed stays denied for the rest of the
        execution even if other calls succeed in between.
+    3. Order (``tool_requires``): a tool whose prerequisites have
+       not succeeded yet is denied with a message naming them, without
+       executing. Prerequisites come from the skill map's ``requires``
+       field (e.g. ``confirm_payment`` requires ``record_payment``),
+       so node order is data, not prose. A prerequisite is satisfied
+       by a successful call in this execution OR in a prior turn of
+       the same session (``prior_successful_tools`` — a payment
+       recorded last turn still counts this turn). A failed call
+       never satisfies a prerequisite. Denied (not raised): unlike
+       budget exhaustion, an ordering mistake is recoverable — the
+       model can call the prerequisite first and continue.
     """
 
-    def __init__(self, max_calls: int = DEFAULT_TOOL_CALL_BUDGET):
+    def __init__(
+        self,
+        max_calls: int = DEFAULT_TOOL_CALL_BUDGET,
+        tool_requires: dict[str, frozenset[str]] | None = None,
+        prior_successful_tools: frozenset[str] | None = None,
+    ):
         self.max_calls = max_calls
+        self._requires: dict[str, frozenset[str]] = {
+            name: frozenset(reqs) for name, reqs in (tool_requires or {}).items()
+        }
+        self._prior: frozenset[str] = frozenset(prior_successful_tools or ())
         self.calls = 0
         self.exceeded = False
         self._failed: dict[tuple[str, str], str] = {}
+        self._succeeded: set[str] = set(self._prior)
 
     def reset(self) -> None:
         self.calls = 0
         self.exceeded = False
         self._failed = {}
+        # Prior-turn successes survive the reset: they are session
+        # facts, not per-execution state.
+        self._succeeded = set(self._prior)
 
     def wrap_tool_call(self, request, handler):
         tool_call = request.tool_call or {}
@@ -134,10 +158,24 @@ class ToolCallCap(AgentMiddleware):
                 tool_call_id=tool_call_id,
                 status="error",
             )
+        missing = sorted(self._requires.get(name, frozenset()) - self._succeeded)
+        if missing:
+            return ToolMessage(
+                content=(
+                    f"'{name}' cannot run yet: it requires "
+                    f"{', '.join(repr(m) for m in missing)} to have succeeded "
+                    f"first. Call {missing[0]} first (with the right arguments), "
+                    f"then call '{name}'."
+                ),
+                tool_call_id=tool_call_id,
+                status="error",
+            )
         result = handler(request)
         error = _error_in_result(result)
         if error is not None:
             self._failed[key] = error
+        else:
+            self._succeeded.add(name)
         return result
 
 

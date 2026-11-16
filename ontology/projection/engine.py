@@ -189,6 +189,7 @@ class ProjectionEngine:
                 "dead": 0,
                 "claimed": 0,
                 "detail": "neo4j_unhealthy",
+                **self._queue_depth(),
             }
         if not store.is_healthy():
             return {
@@ -197,6 +198,7 @@ class ProjectionEngine:
                 "dead": 0,
                 "claimed": 0,
                 "detail": "neo4j_unhealthy",
+                **self._queue_depth(),
             }
         rows = self._repo.claim_pending_projections(limit=limit)
         processed = 0
@@ -221,7 +223,30 @@ class ProjectionEngine:
                 else:
                     self._repo.mark_projection_failed(row, str(exc))
         self._session.commit()
-        return {"processed": processed, "errors": errors, "dead": dead, "claimed": len(rows)}
+        depth = self._queue_depth()
+        if depth["dead_total"] > 0:
+            logger.warning(
+                "Projection drain: %d dead row(s) in ontology_projection_state "
+                "need a manual fix (upsert_projection_pending re-queues one)",
+                depth["dead_total"],
+            )
+        return {
+            "processed": processed,
+            "errors": errors,
+            "dead": dead,
+            "claimed": len(rows),
+            **depth,
+        }
+
+    def _queue_depth(self) -> dict[str, int]:
+        """Remaining queue depth (best-effort — a counting failure
+        must not fail the drain)."""
+        try:
+            counts = self._repo.count_projection_states()
+            return {"pending": counts["pending"], "dead_total": counts["dead"]}
+        except Exception as exc:  # noqa: BLE001 — observability only
+            logger.debug("Projection queue depth unavailable: %s", exc)
+            return {"pending": 0, "dead_total": 0}
 
 
 def drain_pending_projections(

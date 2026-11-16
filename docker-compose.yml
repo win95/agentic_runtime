@@ -1,6 +1,9 @@
 # Agentic Runtime — local development stack.
-# All passwords/keys use ${VAR:-default-dev-only}; defaults are DEV-ONLY.
+# Most passwords/keys use ${VAR:-default-dev-only}; defaults are DEV-ONLY.
 # Never use these defaults outside local development.
+# EXCEPTION: API_KEY and JWT_SECRET have NO default — compose refuses to
+# start without them, so the platform never runs with auth disabled or
+# with the publicly known dev JWT secret. Put both in your .env.
 services:
   postgres:
     image: postgres:16-alpine
@@ -132,11 +135,13 @@ services:
   api:
     build: .
     environment:
+      # Required: compose fails fast without it, so the
+      # platform never starts with API-key auth disabled.
+      API_KEY: ${API_KEY:?API_KEY must be set}
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-agentic_runtime}
       # Shared with the user service — must match its JWT_SECRET, or
-      # Bearer tokens fail verification. Dev-only default, like the
-      # other ${VAR:-...} values in this file.
-      JWT_SECRET: ${JWT_SECRET:-dev-only-change-me}
+      # Bearer tokens fail verification. Required (no dev default).
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
       QDRANT_URL: http://qdrant:6333
@@ -184,7 +189,10 @@ services:
       USER_SERVICE_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/user_service
       # Must match the api service's JWT_SECRET — the service signs
       # tokens with it, the API verifies them.
-      JWT_SECRET: ${JWT_SECRET:-dev-only-change-me}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
+      # Rate limiting (login/register) — db 2, separate from the
+      # platform's Celery broker (db 0) and result backend (db 1).
+      REDIS_URL: redis://redis:6379/2
     env_file:
       - path: .env
         required: false  # optional: create from .env.example to inject secrets
@@ -203,6 +211,9 @@ services:
     build: .
     command: celery -A app.worker.celery_app worker --loglevel=info
     environment:
+      # Required: compose fails fast without it, so the
+      # platform never starts with API-key auth disabled.
+      API_KEY: ${API_KEY:?API_KEY must be set}
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-agentic_runtime}
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
@@ -247,6 +258,9 @@ services:
     build: .
     command: celery -A app.worker.celery_app beat --loglevel=info
     environment:
+      # Required: compose fails fast without it, so the
+      # platform never starts with API-key auth disabled.
+      API_KEY: ${API_KEY:?API_KEY must be set}
       DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-agentic_runtime}
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1

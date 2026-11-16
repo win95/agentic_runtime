@@ -2,8 +2,14 @@
 (report §2, §8 Phase 3; locked decisions: multi-query gated only,
 HyDE deferred, decomposition gated only, no reranker model).
 
-This module wraps ``HybridRetriever`` (Phases 1–2) and changes
-nothing when expansion does not trigger: the base ranking is
+This module holds the SHARED expansion helpers — gating, the
+variant/decomposition generators, and the candidate merge. The
+expansion itself now lives in ONE place:
+``HybridRetriever.retrieve(question, query_plan=plan)``
+(``runtime/retrieval_hybrid.py``), which runs the same gated
+expansion inline. The old Phase 3 wrapper (``ExpandedRetriever`` /
+``build_expanded_retriever``) duplicated that logic and was deleted
+2026-11-16; when expansion does not trigger, the base ranking is
 returned untouched. When it triggers, each variant / sub-question
 is retrieved through the SAME base retriever
 (``_candidate_rows`` — dense top-40 + 1-hop graph per variant),
@@ -102,7 +108,6 @@ import logging
 import re
 
 from runtime.retrieval_graph import gazetteer_seeds
-from runtime.retrieval_hybrid import trace_feature_rows
 
 logger = logging.getLogger(__name__)
 
@@ -400,195 +405,3 @@ def _jaccard(a: set, b: set) -> float:
         return 1.0
     return len(a & b) / len(a | b) if (a | b) else 0.0
 
-
-class ExpandedRetriever:
-    """Hybrid retriever + gated expansion (Phase 3 wrapper).
-
-    ``base`` is a ``HybridRetriever`` (Phases 1–2). Generators are
-    pluggable callables; defaults are the LIVE LLM generators
-    (lazy model build — no LLM call until a gated query needs one).
-    The fake eval and the tests pass the stub generators explicitly.
-    """
-
-    def __init__(
-        self,
-        base,
-        *,
-        paraphrase_generator=None,
-        decomposition_generator=None,
-        max_variants: int = MAX_VARIANTS,
-    ):
-        self.base = base
-        self.paraphrase_generator = (
-            paraphrase_generator or build_live_variant_generator()
-        )
-        self.decomposition_generator = (
-            decomposition_generator or build_live_decomposition_generator()
-        )
-        self.max_variants = max_variants
-
-    def __call__(self, question: str):
-        return self.retrieve(question)
-
-    def retrieve(self, question: str):
-        base_rows, _seeds, _expansion, graph_missing = self.base._candidate_rows(question)
-        base_final = self.base._rank_candidates(base_rows, graph_missing)
-        base_ranked = [c["doc_id"] for c in base_final]
-        base_top6 = set(base_ranked)
-        gating = gating_decision(question, base_rows)
-        multi = detect_multi_part(question)
-
-        kind = "none"
-        variants: list[str] = []
-        if multi["is_multi_part"]:
-            kind = "decomposition"
-            variants = list(self.decomposition_generator(question) or [])[: self.max_variants]
-            if len(variants) == 1 and variants[0].strip() == question.strip():
-                # Generator says single-part (or cannot split this
-                # wording — the stub splitter fails on "Both X and Y"
-                # / "Compare X with Y" with no "and"): fall through
-                # to gated multi-query instead of expanding nothing.
-                variants = []
-                kind = "none"
-        if kind == "none" and gating["triggered"]:
-            kind = "multi-query"
-            variants = list(self.paraphrase_generator(question) or [])[: self.max_variants]
-            variants = [v for v in variants if v.strip() and v.strip() != question.strip()]
-
-        if not variants:
-            kind = "none"
-            trace = {
-                "seeds": [s["key"] for s in _seeds],
-                "graph_missing": graph_missing,
-                "weights": dict(self.base.weights),
-                "expansion": {
-                    "triggered": False,
-                    "kind": "none",
-                    "gating": gating,
-                    "multi_part": multi,
-                    "variants": [],
-                    "variant_overlap": {},
-                },
-                "feature_rows": trace_feature_rows(base_rows, base_final),
-                "candidates": {
-                    c["doc_id"]: {
-                        "vec": round(c["vec_score"], 4),
-                        "graph": round(c["graph_score"], 4),
-                        "exact": c["exact"],
-                        "final": c.get("final_score"),
-                        "g1": c.get("graph_g1_min_hops"),
-                        "g2": c.get("graph_g2_path_score"),
-                        "g4": c.get("graph_g4_type_match"),
-                        "g5": c.get("graph_g5_direct"),
-                        "g6_coverage": c.get("graph_g6_coverage"),
-                        "g7_ppr": c.get("graph_g7_ppr"),
-                        "g8_hub": c.get("graph_g8_hub"),
-                        "g8_transit": c.get("graph_g8_transit_key"),
-                    }
-                    for c in base_final
-                },
-            }
-            return base_ranked, trace
-
-        # Retrieve per variant (dense + graph expansion per variant).
-        variant_rows = []
-        variant_rankings: list[list[str]] = []
-        for variant in variants:
-            rows, _s, _e, _gm = self.base._candidate_rows(variant)
-            variant_rows.append(rows)
-            variant_rankings.append(
-                [c["doc_id"] for c in self.base._rank_candidates(rows, graph_missing)]
-            )
-        merged = merge_candidate_rows([base_rows, *variant_rows])
-        # Provenance: variants whose fused top-6 contained the doc
-        # (variant 0 is the original question).
-        all_rankings = [base_ranked, *variant_rankings]
-        for row in merged:
-            row["provenance_variants"] = [
-                i for i, ranked in enumerate(all_rankings)
-                if row["doc_id"] in set(ranked)
-            ]
-        merged_final = self.base._rank_candidates(merged, graph_missing)
-        ranked_ids = [c["doc_id"] for c in merged_final]
-
-        overlap = {
-            f"variant_{i + 1}": round(
-                _jaccard(set(ranked), base_top6), 4)
-            for i, ranked in enumerate(variant_rankings)
-        }
-        overlap["mean_top6_jaccard"] = round(
-            sum(overlap.values()) / len(overlap), 4) if overlap else 0.0
-        # Candidate-set overlap is 1.0 by construction on this corpus
-        # (the vector arm returns all 7 docs for every variant);
-        # report it as measured, not as a finding.
-        cand_sets = [set(r["doc_id"] for r in rows) for rows in [base_rows, *variant_rows]]
-        overlap["mean_candidate_jaccard"] = round(
-            sum(_jaccard(cand_sets[0], s) for s in cand_sets[1:]) / max(len(cand_sets) - 1, 1), 4
-        ) if len(cand_sets) > 1 else 1.0
-
-        feature_rows = trace_feature_rows(merged, merged_final)
-        base_rank = {doc_id: i + 1 for i, doc_id in enumerate(base_ranked)}
-        for row in feature_rows:
-            row["rank_before"] = base_rank.get(row["doc_id"])
-            row["provenance_variants"] = next(
-                (m.get("provenance_variants", []) for m in merged
-                 if m["doc_id"] == row["doc_id"]),
-                [],
-            )
-        trace = {
-            "seeds": [s["key"] for s in _seeds],
-            "graph_missing": graph_missing,
-            "weights": dict(self.base.weights),
-            "expansion": {
-                "triggered": True,
-                "kind": kind,
-                "gating": gating,
-                "multi_part": multi,
-                "variants": variants,
-                "variant_overlap": overlap,
-            },
-            "feature_rows": feature_rows,
-            "candidates": {
-                c["doc_id"]: {
-                    "vec": round(c["vec_score"], 4),
-                    "graph": round(c["graph_score"], 4),
-                    "exact": c["exact"],
-                    "final": c.get("final_score"),
-                    "g1": c.get("graph_g1_min_hops"),
-                    "g2": c.get("graph_g2_path_score"),
-                    "g4": c.get("graph_g4_type_match"),
-                    "g5": c.get("graph_g5_direct"),
-                    "g6_coverage": c.get("graph_g6_coverage"),
-                    "g7_ppr": c.get("graph_g7_ppr"),
-                    "g8_hub": c.get("graph_g8_hub"),
-                    "g8_transit": c.get("graph_g8_transit_key"),
-                }
-                for c in merged_final
-            },
-        }
-        return ranked_ids, trace
-
-
-def build_expanded_retriever(
-    *,
-    paraphrase_generator=None,
-    decomposition_generator=None,
-    **kwargs,
-):
-    """Expanded retriever over the live stores.
-
-    Base is the live factory (``build_hybrid_retriever`` — real
-    embeddings + Qdrant + live graph); generators default to the
-    live LLM generators (lazy model build) unless explicit
-    callables are passed (tests inject the stub generators).
-    """
-    from runtime.retrieval_hybrid import build_hybrid_retriever
-
-    base = build_hybrid_retriever(**kwargs)
-    retriever = ExpandedRetriever(
-        base,
-        paraphrase_generator=paraphrase_generator,
-        decomposition_generator=decomposition_generator,
-    )
-    retriever.__name__ = "hybrid_expanded"
-    return retriever

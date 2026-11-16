@@ -66,11 +66,13 @@ def approve(
     """Approve a pending request and re-dispatch the original execution.
 
     The approval is single-use with a 60-minute window; the re-run
-    claims it when the agent retries the destructive call. When the
-    original execution cannot be re-dispatched (mission deleted,
-    input no longer valid) the approval still stands and
-    ``redispatched_execution_id`` is null — re-dispatch manually
-    within the window.
+    claims it when the agent retries the destructive call. The
+    re-dispatched execution keeps the original execution's owner, so
+    the user who started it can still read its result. When the
+    original execution cannot be re-dispatched (execution gone,
+    mission deleted, input no longer valid, broker down) this returns
+    an error naming the cause — the approval still stands, so
+    re-dispatch manually within the window instead of approving again.
     """
     row = permission_service.get_request(db, request_id)
     if row is None:
@@ -80,22 +82,36 @@ def approve(
     )
     if approved is None:
         raise HTTPException(status_code=409, detail="Permission request is not pending")
-    redispatched = None
     execution = (
         execution_service.get_execution(db, row.execution_id)
         if row.execution_id
         else None
     )
-    if execution is not None:
-        new_execution, _problems = execution_service.create_execution(
+    if execution is None:
+        raise HTTPException(
+            status_code=422,
+            detail="Original execution not found; approval stands, "
+            "re-dispatch manually within the window",
+        )
+    try:
+        new_execution, problems = execution_service.create_execution(
             db,
             execution.mission_id,
             dict(execution.input or {}),
             session_id=execution.session_id,
+            user_id=execution.user_id,
         )
-        if new_execution is not None:
-            redispatched = new_execution.id
-    return _to_read(approved, redispatched_execution_id=redispatched)
+    except Exception as exc:  # dispatch failure (broker down, ...)
+        raise HTTPException(
+            status_code=502, detail=f"re-dispatch failed: {exc}"
+        ) from exc
+    if new_execution is None:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Re-dispatch failed: {problems}; approval stands, "
+            "re-dispatch manually within the window",
+        )
+    return _to_read(approved, redispatched_execution_id=new_execution.id)
 
 
 @router.post("/{request_id}/deny", response_model=schemas.PermissionRequestRead)

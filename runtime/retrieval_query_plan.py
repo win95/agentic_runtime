@@ -162,7 +162,11 @@ class QueryPlan:
     ``is_multi_part`` / ``multi_part_reasons`` (cheap detection,
     always computed), ``related`` / ``shared_nodes`` (the
     decomposition verdict, ``None``/``[]`` when no decomposition
-    ran).
+    ran). ``base_question`` / ``base_candidate_rows``: when the
+    plan was built with a retriever, the original question's
+    pre-fusion candidate rows the gate already fetched — the
+    retriever reuses them instead of fetching the same question
+    twice (``None`` when built without a retriever).
     """
 
     intent: str
@@ -178,6 +182,8 @@ class QueryPlan:
     multi_part_reasons: list[str] = field(default_factory=list)
     related: bool | None = None
     shared_nodes: list[str] = field(default_factory=list)
+    base_question: str | None = None
+    base_candidate_rows: tuple | None = None
 
 
 # --- Normalisation helpers (for the preservation floor) -------------------
@@ -340,9 +346,13 @@ def build_query_plan(
 
     # Gating: on the base retriever's pre-fusion rows when one is
     # available, else gazetteer-miss-only (vector values None =
-    # unmeasured, never invented).
+    # unmeasured, never invented). The rows are kept on the plan so
+    # retrieve() reuses them instead of fetching the same question
+    # twice (see below).
+    plan_rows: tuple | None = None
     if retriever is not None:
         base_rows, _s, _e, _gm = retriever._candidate_rows(question or "")
+        plan_rows = (base_rows, _s, _e, _gm)
         gating = gating_decision(question or "", base_rows)
     else:
         gating = {
@@ -365,6 +375,9 @@ def build_query_plan(
         is_multi_part=detection["is_multi_part"],
         multi_part_reasons=detection["reasons"],
     )
+    if plan_rows is not None:
+        plan.base_question = question or ""
+        plan.base_candidate_rows = plan_rows
 
     if gated_off:
         # Cheap + deterministic parts are already on the plan; the

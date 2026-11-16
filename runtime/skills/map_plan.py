@@ -24,6 +24,11 @@ jump taken when its ``when`` condition holds (plain words — the agent
 decides). A node with no tools is a reasoning-only step. Unknown tool
 names and unknown ``goto`` targets are dropped with a warning, never
 fatal; a skill without a map works exactly as before (``map=None``).
+Two fields are data, not prose, and the flow compiler enforces them:
+``resume: true`` marks a resume node (its flow is enterable only with
+prior turns), and ``requires: [tool, ...]`` names tools that must have
+succeeded — in this flow execution or a prior turn of the session —
+before the node's tools may be called.
 """
 
 from __future__ import annotations
@@ -52,6 +57,15 @@ class MapNode:
     after merely restating the issue) — the router falls back to the
     next node in order instead. A node that needs more information
     from the guest ends the turn with ``NEXT: WAIT`` (always honored).
+
+    ``resume`` marks a resume node: its flow is enterable only when
+    the session has prior turns (the confirmation-turn rule — the
+    booking-create flow). ``requires`` names tools that must have
+    been called successfully — in this flow execution, or in a prior
+    turn of the same session — before this node's tools may be
+    called (e.g. ``confirm_payment`` requires ``record_payment``).
+    Both are DATA, not prose: the flow compiler reads them, and the
+    tool-call cap enforces ``requires`` at the call boundary.
     """
 
     id: str
@@ -60,6 +74,8 @@ class MapNode:
     branches: list[MapBranch] = field(default_factory=list)
     stop_when: str = ""
     terminal: bool = False
+    resume: bool = False
+    requires: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -129,7 +145,8 @@ def parse_skill_map(
             continue
         seen_ids.add(node_id)
         for key in entry:
-            if key not in {"id", "goal", "tools", "branches", "stop_when", "terminal"}:
+            if key not in {"id", "goal", "tools", "branches", "stop_when",
+                           "terminal", "resume", "requires"}:
                 logger.debug("Skill %s: ignoring unknown map node key %r", skill_name, key)
         goal = entry.get("goal")
         goal = str(goal).strip() if goal is not None else ""
@@ -190,9 +207,35 @@ def parse_skill_map(
         stop_when = entry.get("stop_when")
         stop_when = str(stop_when).strip() if stop_when is not None else ""
         terminal = entry.get("terminal") is True
+        resume = entry.get("resume") is True
+        requires: list[str] = []
+        requires_raw = entry.get("requires") or []
+        if not isinstance(requires_raw, list):
+            logger.warning(
+                "Skill %s: node %r 'requires' must be a list; ignoring",
+                skill_name, node_id,
+            )
+            requires_raw = []
+        for tool in requires_raw:
+            if not isinstance(tool, str) or not tool.strip():
+                logger.warning(
+                    "Skill %s: node %r has a non-string requires entry; dropping",
+                    skill_name, node_id,
+                )
+                continue
+            tool = tool.strip()
+            if known_tools is not None and tool not in known_tools:
+                logger.warning(
+                    "Skill %s: node %r requires unknown tool %r; dropping it",
+                    skill_name, node_id, tool,
+                )
+                continue
+            if tool not in requires:
+                requires.append(tool)
         nodes.append(
             MapNode(id=node_id, goal=goal, tools=tools, branches=branches,
-                    stop_when=stop_when, terminal=terminal)
+                    stop_when=stop_when, terminal=terminal, resume=resume,
+                    requires=requires)
         )
     if not nodes:
         logger.warning("Skill %s: map has no usable nodes; ignoring", skill_name)
@@ -222,31 +265,22 @@ def parse_skill_map(
     return SkillMap(skill_name=skill_name, start=start, nodes=nodes)
 
 
-def render_plan(skill_map: SkillMap, enforced: bool = False) -> str:
+def render_plan(skill_map: SkillMap) -> str:
     """Render a map as a compact plan block for the agent's instructions.
 
     One line per node: id, goal, tools, branches as ``if <when> -> <goto>``,
     and stop conditions. The header states the Option C contract: follow
     the plan, deviate only with a stated reason, report visited nodes and
-    deviations at the end. With ``enforced=True`` (Phase 3a, the plan gate
-    is active for this mission) the header says so instead: tool order is
-    refused at the call boundary, so advisory-deviation text would be
-    incoherent next to a hard gate.
+    deviations at the end. (The Phase 3a plan gate used to render an
+    enforced header here; it was deleted 2026-11-16 — the flow compiler
+    is the enforcement now, and free-form missions only ever see this
+    advisory text.)
     """
-    if enforced:
-        header = (
-            f"Plan — skill '{skill_map.skill_name}'. This plan is ENFORCED by "
-            "the plan gate: a tool call outside the current step is refused, "
-            "and the refusal names the tools you may call next. Follow the "
-            "nodes in order; re-route only through the start node's branches. "
-            "At the end, report the plan nodes you visited."
-        )
-    else:
-        header = (
-            f"Plan — skill '{skill_map.skill_name}'. Follow this plan; you may deviate "
-            "when the evidence justifies it, but state why in your summary. At the end, "
-            "report the plan nodes you visited and any deviations."
-        )
+    header = (
+        f"Plan — skill '{skill_map.skill_name}'. Follow this plan; you may deviate "
+        "when the evidence justifies it, but state why in your summary. At the end, "
+        "report the plan nodes you visited and any deviations."
+    )
     lines = [
         header,
         f"Start at '{skill_map.start}'. Default flow is the next node in order.",

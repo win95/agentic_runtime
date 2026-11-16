@@ -46,6 +46,7 @@ map:
     - id: create-booking
       goal: Tạo booking đúng như khách đã xác nhận.
       tools: [create_booking]
+      resume: true
     - id: report-booking
       goal: Báo mã booking và tóm tắt cho khách.
       tools: []
@@ -57,8 +58,9 @@ map:
       goal: Ghi nhận thanh toán bằng record_payment khi đã đủ mã booking, số tiền và phương thức; số tiền không vượt quá số còn lại phải trả.
       tools: [record_payment]
     - id: confirm-payment
-      goal: Xác nhận đã nhận tiền bằng confirm_payment — chỉ khi có bằng chứng tiền đã vào (khách trả tiền mặt/thẻ tại quầy, hoặc khách sạn báo đã nhận chuyển khoản). Khách mới nói đã chuyển khoản mà chưa có xác nhận đã nhận thì dừng lại, báo payment đang chờ xác nhận, không gọi confirm_payment.
+      goal: Xác nhận đã nhận tiền bằng confirm_payment — chỉ khi có bằng chứng tiền đã vào — tiền mặt/thẻ trả tại quầy (việc ghi nhận tại quầy chính là bằng chứng đã nhận), hoặc chuyển khoản mà phía khách sạn (nhân viên/hệ thống) đã báo nhận được. Khách tự nói 'đã chuyển khoản' không phải bằng chứng — khi đó chỉ ghi nhận rồi báo đang chờ xác nhận, không gọi confirm_payment.
       tools: [confirm_payment]
+      requires: [record_payment]
     - id: report-payment
       goal: Báo tình trạng thanh toán (đã trả, đang chờ xác nhận, còn lại bao nhiêu) và mã payment cho khách.
       tools: []

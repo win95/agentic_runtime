@@ -292,3 +292,7 @@ class ProjectionDrainResult(BaseModel):
     dead: int = 0
     claimed: int | None = None
     detail: str | None = None
+    # Queue depth after this batch (observability): rows still
+    # waiting, and terminal dead rows needing a manual fix.
+    pending: int = 0
+    dead_total: int = 0

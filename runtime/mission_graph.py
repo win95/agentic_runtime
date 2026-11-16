@@ -141,17 +141,22 @@ def capability_node(state: MissionState) -> dict:
     return updates
 
 
-def _resolve_agent_version(agent_id: str) -> tuple[object | None, bool]:
+def _resolve_agent_version(agent_id: str) -> tuple[object | None, bool, bool]:
     """Resolve the active AgentVersion + drift flag for one agent.
 
-    Best-effort and never raising: any failure returns ``(None,
-    False)`` and the caller falls back to the pre-versioning
-    behaviour (env model + registry prompt, no allowed_tools gate).
-    Shared by ``run_mission`` (every execution, so capability-only
-    runs record their version too) and ``deep_agent_node``.
+    Returns ``(agent_version, drift, resolution_failed)``.
+    ``resolution_failed`` is True only when the store call itself
+    raised — "no active version" is not a failure (``(None, False,
+    False)``). Best-effort and never raising: any failure returns
+    ``(None, False, True)`` and the caller records an explicit note
+    that the run proceeds without the pinned allowed_tools gate
+    (see :func:`_ungated_version_note`) instead of silently falling
+    back to pre-versioning behaviour. Shared by ``run_mission``
+    (every execution, so capability-only runs record their version
+    too) and ``deep_agent_node``.
     """
     if not agent_id:
-        return None, False
+        return None, False, False
     agent_version = None
     try:
         from app.core.db import SessionLocal
@@ -164,9 +169,9 @@ def _resolve_agent_version(agent_id: str) -> tuple[object | None, bool]:
             _db.close()
     except Exception as exc:  # noqa: BLE001 — versioning never breaks a run
         logger.debug("Could not resolve active agent version for %s: %s", agent_id, exc)
-        return None, False
+        return None, False, True
     if agent_version is None:
-        return None, False
+        return None, False, False
     drift = False
     try:
         from app.services import agent_version_service
@@ -181,7 +186,25 @@ def _resolve_agent_version(agent_id: str) -> tuple[object | None, bool]:
             )
     except Exception as exc:  # noqa: BLE001 — drift is advisory
         logger.debug("Could not compute live tool manifest: %s", exc)
-    return agent_version, drift
+    return agent_version, drift, False
+
+
+def _ungated_version_note(agent_id: str, resolution_failed: bool) -> str:
+    """Note recorded when a mission runs without the pinned gate.
+
+    The run still proceeds (pre-versioning fallback: env model +
+    registry prompt, capability check only) — but the execution
+    record must say so, instead of looking like a normal gated run.
+    """
+    if resolution_failed:
+        return (
+            f"Agent version could not be resolved for agent '{agent_id}' "
+            "(store error) — running without the pinned allowed_tools gate."
+        )
+    return (
+        f"No active AgentVersion for agent '{agent_id}' — running "
+        "without the pinned allowed_tools gate (pre-versioning fallback)."
+    )
 
 
 def _load_agent_session_limits(agent_id: str) -> dict | None:
@@ -291,6 +314,7 @@ def deep_agent_node(state: MissionState) -> dict:
         agent_version_drift = bool(state.get("agent_version_drift"))
         agent_id = mission.get("agent_id") or ""
         state_version = state.get("agent_version")
+        version_note: str | None = None
         if agent_id and state_version is not None:
             try:
                 from app.core.db import SessionLocal
@@ -310,7 +334,14 @@ def deep_agent_node(state: MissionState) -> dict:
                 )
                 agent_version = None
         if agent_version is None:
-            agent_version, agent_version_drift = _resolve_agent_version(agent_id)
+            agent_version, agent_version_drift, _version_failed = _resolve_agent_version(agent_id)
+            if agent_id and agent_version is None:
+                # The run proceeds without the pinned gate — say so in
+                # the record. run_mission notes the same up front, but
+                # the node also runs standalone (tests, langgraph dev);
+                # the append below dedupes against state notes, so the
+                # final record carries it exactly once.
+                version_note = _ungated_version_note(agent_id, _version_failed)
         if agent_version is not None:
             context["allowed_tools"] = list(agent_version.allowed_tools or [])
 
@@ -354,31 +385,21 @@ def deep_agent_node(state: MissionState) -> dict:
         # runtime context, like the skill files themselves, not part of
         # the pinned prompt text. Skills without a map are unaffected.
         mapped_skills = [s for s in (selected_skills or []) if getattr(s, "map", None) is not None]
-        # Phase 3 — the skill subgraph is the new architecture's core:
-        # for pilot missions the map is COMPILED into a LangGraph (one
-        # agent per map node, code-owned routing) instead of running one
-        # free-form agent with the map as prose. The plan gate (Phase
-        # 3a) is the enforcement mechanism for missions still on the
-        # free-form path — a run uses ONE of the two, never both, so the
-        # gate is built only when the subgraph does not run.
+        # Direction C — the skill subgraph is the new architecture's
+        # core: for pilot missions the map is COMPILED into a LangGraph
+        # (one agent per flow, code-owned routing) instead of running
+        # one free-form agent with the map as prose. The flow compiler
+        # IS the enforcement. The legacy node compiler
+        # (runtime/subgraph/node.py) and the plan gate (Phase 3a,
+        # runtime/plan_gate.py) were deleted 2026-11-16: neither could
+        # run through this node anymore — the flow branch always won
+        # the condition, and the gate returned None for every mission
+        # — so they were dead code, not a fallback.
         from runtime.subgraph.flow import use_flow_subgraph
-        from runtime.subgraph.node import use_skill_subgraph
 
         use_flow = use_flow_subgraph(state.get("mission_id"), mapped_skills)
-        use_subgraph = use_skill_subgraph(state.get("mission_id"), mapped_skills)
-        plan_gate_mw = None
-        if not use_subgraph and not use_flow:
-            from runtime.plan_gate import plan_gate
-
-            plan_gate_mw = plan_gate(
-                [s.map for s in mapped_skills],
-                state.get("mission_id"),
-                execution_id=state.get("execution_id") or "",
-            )
         plan_block = (
-            "\n\n".join(
-                render_plan(s.map, enforced=plan_gate_mw is not None) for s in mapped_skills
-            )
+            "\n\n".join(render_plan(s.map) for s in mapped_skills)
             if mapped_skills
             else ""
         )
@@ -423,12 +444,13 @@ def deep_agent_node(state: MissionState) -> dict:
         )
         # Long-term memory (runtime/long_term_memory.py): turns the
         # budget trimmed away in earlier executions, keyword-retrieved
-        # against this execution's input. The block rides on the
-        # history block — same injection points (flow/node subgraphs
-        # via run_*_subgraph, free-form via the system prompt) — and
-        # its tokens are reserved from the history slice by the
-        # middleware (reserved_history_tokens, below), so the slice is
-        # shared instead of overspent.
+        # against this execution's input. One assembly function
+        # (past_context_block) joins the history block with the LTM
+        # block into a single deduped block — same injection points
+        # (flow/node subgraphs via run_*_subgraph, free-form via the
+        # system prompt) — and its tokens are reserved from the
+        # history slice by the middleware (reserved_history_tokens,
+        # below), so the slice is shared instead of overspent.
         _session_id = state.get("session_id") or ""
         if _session_id:
             # Turns the per-agent re-cap drops here are encoded before
@@ -441,25 +463,23 @@ def deep_agent_node(state: MissionState) -> dict:
                 if t.get("execution_id") not in _shown_ids
             ]
             if _dropped_turns:
-                from runtime.long_term_memory import encode_session_turns
+                from runtime.long_term_memory import encode_texts
+                from runtime.session_history import render_turn
 
-                encode_session_turns(
+                encode_texts(
                     _session_id,
                     state.get("execution_id") or "",
-                    _dropped_turns,
+                    [render_turn(t, i + 1) for i, t in enumerate(_dropped_turns)],
+                    source="session_cap",
                 )
-            from runtime.long_term_memory import retrieve_long_term_memory
+            from runtime.long_term_memory import past_context_block
 
-            _ltm_block = retrieve_long_term_memory(
+            history_block = past_context_block(
                 _session_id,
                 json.dumps(input_data or {}, ensure_ascii=False),
+                history_block=history_block,
+                shown_execution_ids={t.get("execution_id") for t in _shown_turns},
             )
-            if _ltm_block:
-                history_block = (
-                    history_block + "\n\n" + _ltm_block
-                    if history_block
-                    else _ltm_block
-                )
         # Hooks (in-agent half): one middleware instance per run, over
         # the same registry the node already dispatched UserPromptSubmit
         # on. It denies dangerous tool calls, injects feedback on tool
@@ -499,12 +519,6 @@ def deep_agent_node(state: MissionState) -> dict:
         exclusion = builtin_tools_exclusion(state.get("mission_id"))
         if exclusion is not None:
             middleware.append(exclusion)
-        # Phase 3a: the plan gate enforces the skill map's tool order
-        # for the pilot mission (hotel only). It is appended after the
-        # exclusion so the exclusion hides the built-ins first; the gate
-        # then sees only the tools the model may actually call.
-        if plan_gate_mw is not None:
-            middleware.append(plan_gate_mw)
         # Direction C: flow agents get their own hook middleware whose
         # registry excludes stop_completion — a flow agent that stops
         # without tools is usually asking the guest a question (dates
@@ -513,9 +527,8 @@ def deep_agent_node(state: MissionState) -> dict:
         # A shallow copy shares the events list (flow hook events still
         # appear in the run's hook_events) but keeps its own counters;
         # the original instance is unused on the flow path, so its
-        # `continues` stays 0 truthfully. The plan gate is not attached
-        # — the flow compiler IS the enforcement, as with the node
-        # subgraph.
+        # `continues` stays 0 truthfully. No plan gate is attached —
+        # the flow compiler IS the enforcement.
         flow_middleware = middleware
         if use_flow:
             flow_hook_middleware = copy.copy(hook_middleware)
@@ -623,19 +636,42 @@ def deep_agent_node(state: MissionState) -> dict:
             mission.get("agent_id") or None,
             state.get("session_id"),
         )
+        # Context budget (Phương án A): the fixed prefix — system
+        # prompt, tool definitions, selected skill texts — measured
+        # against its buckets. Advisory only: an overrun is logged and
+        # noted on the execution; the run still proceeds (these are
+        # pinned config, not run data). The session-history block is
+        # measured against its own budget at render time and is NOT
+        # part of this check (prompt_for_budget excludes it). The
+        # flow path measures the same prefix (minus the plan block —
+        # the map is compiled, not prose), so the text computation is
+        # shared and each branch only sets its prompt + runs the check.
+        from runtime.context_budget import check_prefix_budgets
+
+        tools_text = "".join(
+            getattr(t, "name", "")
+            + (getattr(t, "description", "") or "")
+            + json.dumps(getattr(t, "args", {}) or {}, default=str)
+            for t in tools
+        )
+        skills_text = "".join(s.raw for s in (selected_skills or []))
         if use_flow:
             # Direction C: compile the first mapped skill's map into
             # flow agents + one router and run it instead of one
             # free-form agent. The flow agents carry the hook
             # middleware (minus stop_completion) + built-in exclusion
-            # (the plan gate is not attached — the flow compiler IS
-            # the enforcement). The context-budget prefix check is
-            # skipped here: the per-flow prompts are smaller than the
-            # free-form prefix it measures, and the check is advisory.
+            # (the flow compiler IS the enforcement). The fixed-prefix
+            # check runs here too (same call as the free-form path):
+            # the flow prompts are the base prompt + tools + skills,
+            # so this is a conservative upper bound for the per-flow
+            # prompts. History/LTM/retrieval are charged to their own
+            # buckets, not this check.
             from runtime.subgraph.flow import build_flow_subgraph, run_flow_subgraph
 
             prompt_for_budget = base_prompt_text
-            prefix_overruns = []
+            prefix_overruns = check_prefix_budgets(prompt_for_budget, tools_text, skills_text)
+            for overrun in prefix_overruns:
+                logger.warning("Context budget overrun: %s", overrun)
             subgraph = build_flow_subgraph(
                 mapped_skills[0].map,
                 tools,
@@ -648,52 +684,16 @@ def deep_agent_node(state: MissionState) -> dict:
                 callbacks=[handler],
                 trace_metadata=trace_metadata,
                 trace_tags=trace_tags,
-                # Confirmation-turn rule: the booking-create flow is
-                # enterable only when the session has prior turns (see
-                # runtime/subgraph/flow.py).
-                resume_nodes=frozenset({"create-booking"}),
+                # Prerequisites recorded in prior turns of this session
+                # still count: load_session_history reports them as
+                # prior_actions, and the flow cap seeds its satisfied
+                # set from them. Resume nodes come from the map itself
+                # (``resume: true``) — see runtime/subgraph/flow.py.
+                prior_successful_tools=frozenset(
+                    (state.get("session_history") or {}).get("prior_actions") or ()
+                ),
             )
             outcome = run_flow_subgraph(
-                subgraph,
-                mission,
-                input_data,
-                session_history=_history,
-                history_block=history_block,
-                skill_maps=[s.map for s in mapped_skills],
-                trace_metadata=trace_metadata,
-                trace_tags=trace_tags,
-            )
-        elif use_subgraph:
-            # Phase 3: compile the first mapped skill's map into a
-            # subgraph and run it instead of one free-form agent. The
-            # node agents carry the hook middleware + built-in exclusion
-            # (the plan gate is not attached — the subgraph IS the
-            # enforcement). The context-budget prefix check is skipped
-            # here: the per-node prompts are smaller than the free-form
-            # prefix it measures, and the check is advisory.
-            from runtime.subgraph.node import build_skill_subgraph, run_skill_subgraph
-
-            prompt_for_budget = base_prompt_text
-            prefix_overruns = []
-            subgraph = build_skill_subgraph(
-                mapped_skills[0].map,
-                tools,
-                base_prompt_text,
-                model_config=version_cfg,
-                middleware=middleware,
-                backend=sandbox_backend,
-                skills=skill_sources,
-                files=skill_files,
-                callbacks=[handler],
-                trace_metadata=trace_metadata,
-                trace_tags=trace_tags,
-                # Confirmation-turn rule: from the start node, the
-                # guest's confirmation may resume straight at
-                # create-booking when the session has prior turns
-                # (see runtime/subgraph/node.py).
-                resume_nodes=frozenset({"create-booking"}),
-            )
-            outcome = run_skill_subgraph(
                 subgraph,
                 mission,
                 input_data,
@@ -747,22 +747,8 @@ def deep_agent_node(state: MissionState) -> dict:
                     middleware=middleware,
                     backend=sandbox_backend,
                 )
-            # Context budget (Phương án A): measure the fixed prefix —
-            # system prompt, tool definitions, selected skill texts —
-            # against its buckets. Advisory only: an overrun is logged and
-            # noted on the execution; the run still proceeds (these are
-            # pinned config, not run data). The session-history block is
-            # measured against its own budget at render time and is NOT
-            # part of this check (prompt_for_budget excludes it).
-            from runtime.context_budget import check_prefix_budgets
-
-            tools_text = "".join(
-                getattr(t, "name", "")
-                + (getattr(t, "description", "") or "")
-                + json.dumps(getattr(t, "args", {}) or {}, default=str)
-                for t in tools
-            )
-            skills_text = "".join(s.raw for s in (selected_skills or []))
+            # Fixed prefix (see the shared computation above):
+            # prompt_for_budget was set by whichever branch ran.
             prefix_overruns = check_prefix_budgets(prompt_for_budget, tools_text, skills_text)
             for overrun in prefix_overruns:
                 logger.warning("Context budget overrun: %s", overrun)
@@ -792,11 +778,8 @@ def deep_agent_node(state: MissionState) -> dict:
                     else:
                         raise
         notes = [f"Deep agent: {outcome.get('summary', '')}"] if outcome.get("summary") else []
-        # Phase 3a: surface plan-gate denials in the execution notes, so
-        # a run that had to be corrected is explainable from the result
-        # alone (the denial messages themselves are in the trace).
-        if plan_gate_mw is not None and plan_gate_mw.denied_count:
-            notes.append(f"Plan gate: {plan_gate_mw.denied_count} out-of-plan tool call(s) denied")
+        if version_note and version_note not in (state.get("notes") or []):
+            notes.append(version_note)
         # Sandbox backend (docs/sandbox.md): one line saying which
         # backend ran — the sandbox id, or that the run fell back to
         # the in-memory backend because no sandbox was available.
@@ -1085,9 +1068,13 @@ def validate_results(state: MissionState) -> dict:
     session_id = state.get("session_id") or ""
     if session_id:
         try:
-            from runtime.scope import get_bound_guest_id
+            from runtime.scope import SCOPE_UNKNOWN, get_bound_guest_id
 
             scope_guest = get_bound_guest_id(session_id)
+            if scope_guest is SCOPE_UNKNOWN:
+                # Store failure: no guest check (same as unbound) — a
+                # store outage must not fail validation outright.
+                scope_guest = None
         except Exception:  # noqa: BLE001 — no binding means no guest check
             scope_guest = None
     try:
@@ -1266,8 +1253,16 @@ def run_mission(
     # escalate to the Deep Agent (previously the version was resolved
     # only inside deep_agent_node, so capability-only runs kept
     # agent_version NULL). Best-effort: a DB failure leaves it NULL
-    # and the run continues as before.
-    agent_version, agent_version_drift = _resolve_agent_version(mission.get("agent_id") or "")
+    # and the run continues — but the note below records that it ran
+    # without the pinned allowed_tools gate, instead of silently
+    # falling back to pre-versioning behaviour.
+    agent_id = mission.get("agent_id") or ""
+    agent_version, agent_version_drift, _version_failed = _resolve_agent_version(agent_id)
+    version_note = (
+        _ungated_version_note(agent_id, _version_failed)
+        if agent_id and agent_version is None
+        else None
+    )
     initial_state: MissionState = {
         "execution_id": execution_id,
         "mission_id": mission.get("mission_id", ""),
@@ -1279,7 +1274,7 @@ def run_mission(
         "result": None,
         "status": "RUNNING",
         "errors": [],
-        "notes": [],
+        "notes": [version_note] if version_note else [],
         "hook_events": [],
         "agent_version": agent_version.version if agent_version is not None else None,
         "agent_version_drift": agent_version_drift,
@@ -1297,7 +1292,6 @@ def run_mission(
         mlflow_execution_run,
     )
 
-    agent_id = mission.get("agent_id") or ""
     trace_metadata = build_run_metadata(
         execution_id, mission.get("mission_id", ""), agent_id or None, session_id
     )

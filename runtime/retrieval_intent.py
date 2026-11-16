@@ -169,13 +169,17 @@ import re
 from runtime.retrieval_expansion import COMPARISON_RE, FAULT_CODE_RE
 from runtime.retrieval_fusion import zscores
 from runtime.retrieval_graph import gazetteer_seeds
+from runtime.retrieval_weights import (
+    INTENT_W_EXACT as W_EXACT,
+)
+from runtime.retrieval_weights import (
+    INTENT_W_GRAPH as W_GRAPH,
+)
+from runtime.retrieval_weights import (
+    INTENT_W_VEC as W_VEC,
+)
 
 logger = logging.getLogger(__name__)
-
-# --- Fusion-style weights (priors; see module docstring) ---------------
-W_VEC = 0.50
-W_GRAPH = 0.30
-W_EXACT = 0.20
 
 # --- Candidate intents + tie-break order ---------------------------------
 INTENT_ORDER = [

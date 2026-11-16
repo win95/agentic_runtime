@@ -14,10 +14,12 @@ the tool name:
 
 The session -> guest binding lives in ``session_guest_scopes``
 (``app/services/session_scope_service.py``). Access here is
-best-effort: a scope-store failure returns None (unbound) and the
-wrappers fail open, because a store outage must not break the
-receptionist's normal flow — the guarantee holds whenever the store
-is up, which is the normal case.
+best-effort, but a scope-store failure is NOT the same as "unbound":
+:func:`get_bound_guest_id` returns the ``SCOPE_UNKNOWN`` sentinel so
+callers can tell the difference. Guest WRITE tools refuse when the
+scope is unknown (a store outage must not let a write land for a
+guest the session cannot prove); reads keep the unbound behaviour,
+and L3 validation skips the guest check when the scope is unknown.
 """
 
 from __future__ import annotations
@@ -26,9 +28,16 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Sentinel: get_bound_guest_id returns this when the scope store
+# lookup failed. It is NOT "unbound" (None) — callers that would bind
+# or refuse on the strength of the binding must treat it as
+# "cannot verify" instead of "no guest yet".
+SCOPE_UNKNOWN = object()
 
-def get_bound_guest_id(session_id: str) -> str | None:
-    """Guest id bound to one session, or None when unbound/unknown."""
+
+def get_bound_guest_id(session_id: str) -> str | None | object:
+    """Guest id bound to one session, None when unbound, or
+    ``SCOPE_UNKNOWN`` when the store lookup failed."""
     if not session_id:
         return None
     try:
@@ -43,7 +52,7 @@ def get_bound_guest_id(session_id: str) -> str | None:
             db.close()
     except Exception as exc:  # noqa: BLE001 — binding is best-effort
         logger.warning("Session guest lookup failed for %s: %s", session_id, exc)
-        return None
+        return SCOPE_UNKNOWN
 
 
 def bind_guest(

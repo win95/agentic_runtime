@@ -1,22 +1,26 @@
 """Long-term memory — what the context-budget trim used to throw away.
 
-Two write paths, one read path:
+One write function, one read function, one assembly function:
 
-- WRITE (trim): ``HookMiddleware.before_model`` trims the oldest
-  turns when the turn total exceeds the history budget. Before the
-  ``RemoveMessage`` goes out, the trimmed turns are encoded here
-  (``encode_turns``) — rendered to text, keyworded, stored as
-  ``long_term_memories`` rows keyed by session. Encode-then-remove:
-  the turn is never lost in the gap between the two.
-- WRITE (session cap): the session-history loader drops turns past
-  its turn/token cap (``cap_turns``). Those turns are already prose
-  summaries; ``encode_session_turns`` stores them the same way.
+- WRITE: ``encode_texts`` stores already-rendered turn texts as
+  ``long_term_memories`` rows keyed by session. Two callers render
+  differently and both funnel here — ``HookMiddleware.before_model``
+  trims the oldest turns when the turn total exceeds the history
+  budget (rendered by ``turn_text``, source ``"trim"``), and the
+  session-history loader / per-agent re-cap drop turns past their
+  turn/token cap (rendered by ``render_turn``, source
+  ``"session_cap"``). Encode-then-remove / encode-then-forget: the
+  turn is never lost in the gap between the two.
 - READ: at the start of an execution (``deep_agent_node``), the
   current input is keyword-matched against the session's stored
   turns (``retrieve_long_term_memory``). Matches fill a block of at
   most ``LTM_TOKENS`` (1,024) in the system prompt, charged to the
   history slice of the context budget — never more, never
   re-retrieved mid-run.
+- ASSEMBLY: ``past_context_block`` joins the rendered session
+  history with the LTM block into ONE deduped block: LTM rows from
+  an execution whose turn is already shown in the history are
+  skipped, so a turn is never pasted twice into the prompt.
 
 Keyword, not vector, by design: no embedding call, no new infra,
 deterministic matching. Structured tokens (booking codes ``BK-####``,
@@ -132,7 +136,7 @@ def _content_text(message) -> str:
     return text
 
 
-def _turn_text(turn: list) -> str:
+def turn_text(turn: list) -> str:
     """One trimmed turn (ai + its tool messages) rendered to text."""
     lines = []
     for message in turn:
@@ -227,44 +231,23 @@ def _store(session_id, execution_id, items, *, session_factory=None) -> int:
         return 0
 
 
-def encode_turns(
+def encode_texts(
     session_id: str,
     execution_id: str,
-    turns: list[list],
+    texts: list[str],
     *,
+    source: str,
     session_factory=None,
 ) -> int:
-    """Encode trimmed turns (message lists) into long-term memory.
+    """The ONE encode function: store rendered turn texts as rows.
 
-    ``turns`` are the turns ``trim_history`` removed, in order — the
-    same unit they were removed as. Call BEFORE the ``RemoveMessage``
-    goes out. Returns the number of rows stored.
+    ``texts`` are turn texts in order (already rendered by the
+    caller — ``turn_text`` for trimmed message-list turns,
+    ``render_turn`` for session-history summary turns);
+    ``source`` is ``"trim"`` or ``"session_cap"``. Returns the
+    number of rows stored.
     """
-    items = [
-        (i, _turn_text(turn), "trim") for i, turn in enumerate(turns)
-    ]
-    return _store(session_id, execution_id, items, session_factory=session_factory)
-
-
-def encode_session_turns(
-    session_id: str,
-    execution_id: str,
-    turns: list[dict],
-    *,
-    session_factory=None,
-) -> int:
-    """Encode session-history turns dropped by the turn/token cap.
-
-    ``turns`` are the ``summarize_turn`` dicts ``cap_turns`` dropped
-    (already prose summaries, not full evidence). Returns the number
-    of rows stored.
-    """
-    from runtime.session_history import render_turn
-
-    items = [
-        (i, render_turn(turn, i + 1), "session_cap")
-        for i, turn in enumerate(turns)
-    ]
+    items = [(i, text, source) for i, text in enumerate(texts)]
     return _store(session_id, execution_id, items, session_factory=session_factory)
 
 
@@ -282,17 +265,24 @@ def retrieve_long_term_memory(
     query_text: str,
     *,
     max_tokens: int = LTM_TOKENS,
+    exclude_execution_ids: set[str] | None = None,
     session_factory=None,
 ) -> str:
     """Keyword-retrieve stored turns for one session, as a prompt block.
 
     Scores each stored turn by keyword overlap with the query
     (structured tokens double), takes the best matches until
-    ``max_tokens``, newest first on ties. Returns "" when nothing
-    matches. Never raises.
+    ``max_tokens``, newest first on ties. Rows from an execution in
+    ``exclude_execution_ids`` are skipped — that turn is already
+    shown in the session-history block, and pasting it again would
+    duplicate it in the prompt. Returns "" when nothing matches.
+    Never raises.
     """
     if not session_id or not query_text:
         return ""
+    # NULL execution ids never match: a shown turn without an id
+    # must not exclude every unlabelled row.
+    exclude = {e for e in (exclude_execution_ids or ()) if e}
     try:
         from app import models
 
@@ -313,6 +303,7 @@ def retrieve_long_term_memory(
         scored = [
             (_score_row(row.keywords, query_keywords), row)
             for row in rows
+            if not (exclude and row.execution_id in exclude)
         ]
         scored = [(score, row) for score, row in scored if score > 0]
         if not scored:
@@ -346,3 +337,40 @@ def retrieve_long_term_memory(
     except Exception as exc:  # noqa: BLE001 — LTM must never break a run
         logger.warning("Long-term memory retrieve failed (non-fatal): %s", exc)
         return ""
+
+
+def past_context_block(
+    session_id: str,
+    query_text: str,
+    *,
+    history_block: str = "",
+    shown_execution_ids: set[str] | None = None,
+    max_tokens: int = LTM_TOKENS,
+    session_factory=None,
+) -> str:
+    """The ONE past-context block for an execution: session history
+    + long-term memory, deduped.
+
+    The history block (already rendered, capped turns) comes first;
+    the LTM block is appended after it, minus any row from an
+    execution whose turn is already shown — without this, a turn
+    dropped by one agent's tight cap (and encoded) is pasted twice
+    when a later execution with a looser cap renders it in history
+    AND retrieves it from LTM. Returns ``history_block`` unchanged
+    when nothing matches. The combined block's tokens are counted
+    ONCE by the caller (``reserved_history_tokens``) — the LTM
+    ``max_tokens`` above is the LTM block's own cap, not a second
+    count of the same text.
+    """
+    ltm_block = retrieve_long_term_memory(
+        session_id,
+        query_text,
+        max_tokens=max_tokens,
+        exclude_execution_ids=shown_execution_ids,
+        session_factory=session_factory,
+    )
+    if not ltm_block:
+        return history_block
+    if not history_block:
+        return ltm_block
+    return history_block + "\n\n" + ltm_block

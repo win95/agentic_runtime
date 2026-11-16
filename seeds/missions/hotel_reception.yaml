@@ -4,7 +4,7 @@ mission_id: hotel_reception
 version: 1
 name: Hotel Reception
 objective: >
-  Serve hotel guests in Vietnamese over Slack: take room bookings,
+  Serve hotel guests in Vietnamese over the public guest API: take room bookings,
   answer questions about bookings and policies, and assign service
   tasks to housekeeping and technicians. Only use the hotel tools.
   Never invent availability, prices, policies or staff: report exactly

@@ -436,9 +436,19 @@ class HybridRetriever:
         from runtime.retrieval_expansion import merge_candidate_rows
 
         plan_seeds = list(query_plan.linked_nodes or [])
-        base_rows, seeds, expansion, graph_missing = self._candidate_rows(
-            question, seeds=plan_seeds
-        )
+        # The plan already fetched this question's candidate rows
+        # for gating (build_query_plan) — reuse them instead of
+        # fetching the same question twice. The cache applies only
+        # to the question the plan was built for; a plan built by
+        # hand (or for another question) falls through to a fresh
+        # fetch with the plan's seeds.
+        cached = getattr(query_plan, "base_candidate_rows", None)
+        if cached is not None and getattr(query_plan, "base_question", None) == question:
+            base_rows, seeds, expansion, graph_missing = cached
+        else:
+            base_rows, seeds, expansion, graph_missing = self._candidate_rows(
+                question, seeds=plan_seeds
+            )
         base_final = self._rank_candidates(base_rows, graph_missing)
         base_ranked = [c["doc_id"] for c in base_final]
         if query_plan.sub_questions:

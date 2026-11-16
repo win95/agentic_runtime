@@ -45,13 +45,20 @@ from __future__ import annotations
 
 import math
 
+from runtime.retrieval_weights import (
+    FUSION_W_EXACT as W_EXACT,
+)
+from runtime.retrieval_weights import (
+    FUSION_W_GRAPH as W_GRAPH,
+)
+from runtime.retrieval_weights import (
+    FUSION_W_VEC as W_VEC,
+)
+
 RRF_K = 60
 TOP_FUSED = 30
 TOP_FINAL = 6
 
-W_VEC = 0.50
-W_GRAPH = 0.40
-W_EXACT = 0.10
 Z_CLIP = 2.0
 
 

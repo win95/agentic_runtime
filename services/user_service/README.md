@@ -64,5 +64,7 @@ on `/executions` — see docs/user-service.md.
 ## What is deliberately NOT in the base
 
 Refresh tokens, password reset, email verification, OAuth login,
-per-user cost caps, rate limiting on login, CORS. Each is a small
-follow-up on top of this base, not a redesign.
+per-user cost caps, CORS. Each is a small follow-up on top of this
+base, not a redesign. (Rate limiting on login/register is IN the
+base since 2026-11-16: 5/min per email+IP on login, 5/min per IP on
+register — see `services/user_service/rate_limit.py`.)

@@ -54,13 +54,17 @@ Direction C: one agent per FLOW, not per node.
   with two ``FLOW:`` declarations, or an "or ``FLOW:``" alternative,
   is no choice at all — the parser does not silently take the first
   token.
-- The write gate is structural, not prompt-only. ``resume_nodes``
-  (``create-booking``) are flow boundaries: the booking-create flow is
-  enterable only when the session has prior turns, and its tools are
-  only ``create_booking`` + the report step — the booking-quote flow
-  does not HAVE ``create_booking`` at all, so the agent cannot call
-  it before the guest confirms. The router enforces the prior-turns
-  condition; the tool allowlist enforces the rest.
+- The write gate is structural, not prompt-only. Resume nodes
+  (``create-booking``, marked ``resume: true`` in the skill map) are
+  flow boundaries: the booking-create flow is enterable only when the
+  session has prior turns, and its tools are only ``create_booking``
+  + the report step — the booking-quote flow does not HAVE
+  ``create_booking`` at all, so the agent cannot call it before the
+  guest confirms. The router enforces the prior-turns condition; the
+  tool allowlist enforces the rest. Node order inside a flow is data
+  too: a node's ``requires`` list is enforced by the flow's tool-call
+  cap (``ToolCallCap``), so ``confirm_payment`` cannot run before a
+  successful ``record_payment`` — in this turn or a prior one.
 - The code-logic fixes from the v4b root-cause synthesis live here
   too, shared with the legacy compiler: the per-flow tool-call budget
   (``MAX_TOOL_CALLS_PER_FLOW``, default 10 — a 6-node flow legitimately
@@ -77,8 +81,9 @@ Direction C: one agent per FLOW, not per node.
   steering the model mid-turn.
 
 ``FLOW_PILOT_MISSIONS`` is the rollout scope — hotel only, for now.
-The node compiler (``runtime/subgraph/node.py``) stays as the
-fallback path; a run uses ONE.
+The legacy node compiler (``runtime/subgraph/node.py``) and the Phase 3a
+plan gate were deleted 2026-11-16: the flow compiler is the only
+subgraph path, and free-form missions run without a gate.
 """
 
 from __future__ import annotations
@@ -169,11 +174,15 @@ class Flow:
     ``id`` is the entry node id — it is also the token the router
     declares (``FLOW: booking-dates``). ``resume_gated`` marks flows
     whose entry is a resume node: enterable only with prior turns.
+    ``tool_requires`` maps a tool to the tools that must have
+    succeeded before it may be called (from the nodes' ``requires``
+    field) — the flow's tool-call cap enforces it.
     """
 
     id: str
     nodes: list = field(default_factory=list)
     resume_gated: bool = False
+    tool_requires: dict[str, frozenset[str]] = field(default_factory=dict)
 
     @property
     def tools(self) -> list[str]:
@@ -186,9 +195,33 @@ class Flow:
         return seen
 
 
+def _tool_requires(nodes: list) -> dict[str, frozenset[str]]:
+    """A flow's tool prerequisites, from its nodes' ``requires`` fields.
+
+    Each node's tools require that node's ``requires`` list. A
+    prerequisite naming a tool outside this flow can still be
+    satisfied by a prior turn of the session (the cap seeds its
+    succeeded set from session history); one naming a tool that
+    never runs anywhere is a map bug, logged here so it is visible.
+    """
+    out: dict[str, set[str]] = {}
+    flow_tools = {t for node in nodes for t in (node.tools or [])}
+    for node in nodes:
+        for req in node.requires or []:
+            if req not in flow_tools:
+                logger.debug(
+                    "Flow: node %r requires %r, which is not a tool of "
+                    "this flow — it can only be satisfied by a prior turn",
+                    node.id, req,
+                )
+        for tool in node.tools or []:
+            out.setdefault(tool, set()).update(node.requires or [])
+    return {tool: frozenset(reqs) for tool, reqs in out.items() if reqs}
+
+
 def derive_flows(
     skill_map: SkillMap,
-    resume_nodes: frozenset[str] = frozenset(),
+    resume_nodes: frozenset[str] | None = None,
 ) -> list[Flow]:
     """Group a map's nodes into flows.
 
@@ -198,7 +231,14 @@ def derive_flows(
     rule. Each flow walks the map in list order until a terminal node
     (inclusive) or a resume node (exclusive). Unreachable nodes become
     single-node flows so every node belongs to exactly one flow.
+
+    ``resume_nodes`` defaults to the map itself: nodes with
+    ``resume: true`` (an explicit set still overrides, for tests).
+    Each flow also carries ``tool_requires`` from its nodes'
+    ``requires`` fields, so node order is data the cap enforces.
     """
+    if resume_nodes is None:
+        resume_nodes = frozenset(n.id for n in skill_map.nodes if n.resume)
     start = skill_map.node_by_id(skill_map.start)
     entries: list[str] = []
     if start is not None:
@@ -235,7 +275,14 @@ def derive_flows(
                 break
             cur = next_in_order(skill_map, node.id)
         if nodes:
-            flows.append(Flow(id=entry, nodes=nodes, resume_gated=entry in resume_nodes))
+            flows.append(
+                Flow(
+                    id=entry,
+                    nodes=nodes,
+                    resume_gated=entry in resume_nodes,
+                    tool_requires=_tool_requires(nodes),
+                )
+            )
     for node in skill_map.nodes:
         # The start node is the router, never a flow member.
         if node.id == skill_map.start:
@@ -250,6 +297,7 @@ def derive_flows(
                     id=node.id,
                     nodes=[node],
                     resume_gated=node.id in resume_nodes,
+                    tool_requires=_tool_requires([node]),
                 )
             )
             covered.add(node.id)
@@ -386,7 +434,8 @@ def build_flow_subgraph(
     callbacks=None,
     trace_metadata: dict | None = None,
     trace_tags: list[str] | None = None,
-    resume_nodes: frozenset[str] = frozenset(),
+    resume_nodes: frozenset[str] | None = None,
+    prior_successful_tools: frozenset[str] = frozenset(),
     flow_executor=None,
     max_steps: int = MAX_FLOW_STEPS,
     max_tool_calls_per_flow: int = MAX_TOOL_CALLS_PER_FLOW,
@@ -397,6 +446,12 @@ def build_flow_subgraph(
     (re-route for a second request) or END at the step cap. The
     router picks a flow once per flow boundary; a flow already visited
     this turn is never re-entered.
+
+    ``resume_nodes`` defaults to the map's ``resume: true`` nodes.
+    ``prior_successful_tools`` seeds every flow cap's satisfied set
+    with the tools that already succeeded in prior turns of this
+    session, so a ``requires`` prerequisite recorded last turn still
+    counts this turn.
 
     ``flow_executor`` is a test seam: ``executor(flow, state,
     messages)`` returning the new message list, replacing the real
@@ -434,7 +489,13 @@ def build_flow_subgraph(
             # escape HookMiddleware, which converts inner exceptions
             # into error ToolMessages — a swallowed raise would leave
             # the model looping on error messages instead of stopping.
-            cap = ToolCallCap(max_calls=max_tool_calls_per_flow)
+            # It also enforces the flow's tool prerequisites, from the
+            # map's ``requires`` fields.
+            cap = ToolCallCap(
+                max_calls=max_tool_calls_per_flow,
+                tool_requires=flow.tool_requires,
+                prior_successful_tools=prior_successful_tools,
+            )
             cap_cache[flow.id] = cap
             agent_cache[flow.id] = build_deep_agent(
                 flow_tools,
