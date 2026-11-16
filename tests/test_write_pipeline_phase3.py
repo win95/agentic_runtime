@@ -5,7 +5,12 @@ from unittest.mock import patch
 from langchain_core.messages import AIMessage, ToolMessage
 
 from runtime.reply_grounding import apply_reply_grounding
-from runtime.session_write_pending import get_pending, merge_tool_result, reset_pending_store_for_tests
+from runtime.session_write_pending import (
+    get_pending,
+    merge_tool_result,
+    reset_pending_store_for_tests,
+    save_pending,
+)
 from runtime.tool_preconditions import check_write_preconditions
 from runtime.tools.registry import ToolEntry
 from runtime.write_idempotency import (
@@ -85,6 +90,12 @@ def test_pending_and_automated_write():
         assert args["room_type"] == "deluxe"
         assert args["guest_id"] == "guest-001"
 
+        save_pending(
+            "sess-1",
+            "booking_create",
+            status="confirmed",
+            payload=get_pending("sess-1", "booking_create")["payload"],
+        )
         ans, errs, _ = try_automated_write(
             pipe,
             session_id="sess-1",
@@ -119,6 +130,12 @@ def test_pending_and_automated_write():
             "booking_create",
             "check_room_availability",
             {"guests": 2, "available": True},
+        )
+        save_pending(
+            "sess-1",
+            "booking_create",
+            status="confirmed",
+            payload=get_pending("sess-1", "booking_create")["payload"],
         )
         ans2, errs2, _ = try_automated_write(
             pipe,
@@ -158,6 +175,46 @@ def test_idempotent_replay():
     )
     invoke_idempotent_write(t, {"guest_id": "g1"}, idempotency_key=key2)
     assert t.calls == 2
+
+
+def test_idempotent_write_survives_fresh_process_cache(db_session, monkeypatch):
+    from app.models import WriteIdempotencyResult
+    from runtime import write_idempotency as wi
+
+    def _store_db(key: str, result: dict) -> None:
+        db_session.merge(
+            WriteIdempotencyResult(idempotency_key=key, result=dict(result))
+        )
+        db_session.commit()
+
+    def _load_db(key: str) -> dict | None:
+        row = db_session.get(WriteIdempotencyResult, key)
+        if row is None:
+            return None
+        return dict(row.result or {})
+
+    monkeypatch.setattr(wi, "_store_db", _store_db)
+    monkeypatch.setattr(wi, "_load_from_db", _load_db)
+    reset_idempotency_cache_for_tests()
+
+    class Stub:
+        calls = 0
+
+        def invoke(self, args):
+            Stub.calls += 1
+            return {"booking_id": "BK-durable", "ok": True}
+
+    key = write_idempotency_key(
+        write_attempt_id="attempt-d",
+        execution_id="e-d",
+        write_tool="create_booking",
+    )
+    invoke_idempotent_write(Stub(), {"guest_id": "g1"}, idempotency_key=key)
+    reset_idempotency_cache_for_tests()
+    invoke_idempotent_write(Stub(), {"guest_id": "g1"}, idempotency_key=key)
+    assert Stub.calls == 1
+    row = db_session.get(WriteIdempotencyResult, key)
+    assert row is not None
 
 
 def test_record_payment_precondition_missing_booking():

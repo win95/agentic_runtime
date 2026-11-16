@@ -184,6 +184,24 @@ def test_reception_skill_map_contract():
     assert pipeline.confirm_node == "confirm-booking"
 
 
+def test_derive_flows_reception_nine_flows_twenty_six_nodes():
+    skill_map = parse_skill_map(_frontmatter(), "reception")
+    assert len(skill_map.nodes) == 26
+    flows = derive_flows(skill_map)
+    assert len(flows) == 9
+    assert {f.id for f in flows} == {
+        "booking-dates",
+        "create-booking",
+        "booking-payment",
+        "task-details",
+        "quote-inquiry",
+        "policy-search",
+        "booking-lookup",
+        "booking-change",
+        "task-status",
+    }
+
+
 def test_reception_quote_and_policy_flows_derived():
     skill_map = parse_skill_map(_frontmatter(), "reception")
     flows = {f.id: f for f in derive_flows(skill_map)}

@@ -260,6 +260,16 @@ class SessionGuestScope(Base):
     )
 
 
+class WriteIdempotencyResult(Base):
+    """Cached successful write-tool payload keyed by idempotency key."""
+
+    __tablename__ = "write_idempotency_results"
+
+    idempotency_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    result: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
 class SessionWritePending(Base):
     """Pending quoted write for a session (quote -> confirm -> execute)."""
 

@@ -148,13 +148,22 @@ def try_claim_execution(db: Session, execution_id: str) -> models.Execution | No
     return db.get(models.Execution, execution_id)
 
 
-def execution_is_stale(execution: models.Execution) -> bool:
+def execution_stale_threshold_seconds() -> int:
+    """RUNNING reclaim must be below Celery visibility_timeout (P4/B2)."""
     from app.config import settings
 
+    vis = settings.resolved_celery_visibility_timeout
+    stale = settings.execution_stale_running_seconds
+    if stale >= vis:
+        return max(60, vis - 120)
+    return stale
+
+
+def execution_is_stale(execution: models.Execution) -> bool:
     if execution.status != "RUNNING" or execution.started_at is None:
         return False
     age = datetime.now(timezone.utc).replace(tzinfo=None) - execution.started_at
-    return age.total_seconds() > settings.execution_stale_running_seconds
+    return age.total_seconds() > execution_stale_threshold_seconds()
 
 
 def reap_stale_running_executions(db: Session, *, limit: int = 50) -> dict:
@@ -162,7 +171,7 @@ def reap_stale_running_executions(db: Session, *, limit: int = 50) -> dict:
     from app.config import settings
 
     cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
-        seconds=settings.execution_stale_running_seconds
+        seconds=execution_stale_threshold_seconds()
     )
     rows = (
         db.query(models.Execution)

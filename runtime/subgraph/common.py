@@ -17,6 +17,7 @@ import logging
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
 
+from runtime.guest_output import GUEST_REPLY_TOOL_NAME
 from runtime.skills.map_plan import SkillMap
 
 logger = logging.getLogger(__name__)
@@ -142,6 +143,10 @@ class ToolCallCap(AgentMiddleware):
         name = str(tool_call.get("name") or "")
         args = dict(tool_call.get("args") or {})
         tool_call_id = str(tool_call.get("id") or "")
+        if GUEST_REPLY_TOOL_NAME in self._succeeded:
+            raise ToolCallBudgetExceededError(
+                "reply_to_guest already succeeded; end this flow"
+            )
         self.calls += 1
         if self.calls > self.max_calls:
             self.exceeded = True

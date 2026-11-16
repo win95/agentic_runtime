@@ -1,10 +1,9 @@
 """Redis-backed sliding-window rate limit with bounded in-process fallback.
 
 Shared store (the Celery broker Redis, ``CELERY_BROKER_URL``): the
-limit is global across API processes when Redis is healthy. When Redis
-is unavailable the check uses a bounded in-process window (fail closed
-per process — stricter than fail-open, but guests can still chat on
-other replicas). Two concurrent requests at the boundary can both pass.
+limit is global across API processes when Redis is healthy. When Redis is unavailable the check fails open (requests are allowed)
+so one unhealthy broker does not block guest chat cluster-wide. Two
+concurrent requests at the boundary can both pass when Redis is up.
 """
 
 from __future__ import annotations
@@ -77,11 +76,9 @@ def check_guest_rate_limit(user_id: str) -> None:
         )
     except Exception:
         logger.warning(
-            "guest rate limit unavailable — using bounded in-process fallback",
+            "guest rate limit unavailable — fail-open (allowing request)",
             exc_info=True,
         )
-        if not _check_fallback(user_id, GUEST_CHAT_LIMIT, GUEST_CHAT_WINDOW_SECONDS):
-            raise HTTPException(status_code=429, detail="Too many requests — slow down")
         return
     if not allowed:
         raise HTTPException(status_code=429, detail="Too many requests — slow down")

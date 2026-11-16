@@ -7,6 +7,7 @@ import logging
 from dataclasses import dataclass, field
 
 from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.tools import StructuredTool
 
 from runtime.scope import get_bound_guest_id
 from runtime.session_write_pending import get_pending, merge_tool_result, save_pending
@@ -159,6 +160,89 @@ def _resolve_arg_path(tools: dict, path: list) -> object | None:
     return cur
 
 
+CONFIRM_GUEST_BOOKING_TOOL_NAME = "confirm_guest_booking"
+
+
+def _requested_room_type(tools: dict) -> str | None:
+    for data in (tools or {}).values():
+        if not isinstance(data, dict):
+            continue
+        for key in ("room_type", "requested_room_type"):
+            val = data.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+        guests = data.get("guests")
+        if isinstance(guests, dict):
+            rt = guests.get("room_type")
+            if isinstance(rt, str) and rt.strip():
+                return rt.strip()
+    return None
+
+
+def _pick_rate_row(rates: list, room_type: str | None) -> dict | None:
+    if not isinstance(rates, list) or not rates:
+        return None
+    if room_type:
+        for row in rates:
+            if isinstance(row, dict) and row.get("room_type") == room_type:
+                return row
+    first = rates[0]
+    return first if isinstance(first, dict) else None
+
+
+def mark_pipeline_confirmed(session_id: str, pipeline_id: str) -> dict:
+    pending = get_pending(session_id, pipeline_id)
+    if pending is None:
+        return {"error": "no quoted data in session for this pipeline"}
+    if pending.get("status") == "written":
+        return {"error": "booking already written for this quote"}
+    save_pending(
+        session_id,
+        pipeline_id,
+        status="confirmed",
+        payload=pending.get("payload") or {},
+        idempotency_key=pending.get("idempotency_key"),
+    )
+    return {"confirmed": True, "pipeline_id": pipeline_id}
+
+
+def make_confirm_guest_booking_tool(
+    session_id: str,
+    pipeline_id: str,
+) -> StructuredTool:
+    def _confirm() -> str:
+        payload = mark_pipeline_confirmed(session_id, pipeline_id)
+        return json.dumps(payload, ensure_ascii=False)
+
+    return StructuredTool.from_function(
+        name=CONFIRM_GUEST_BOOKING_TOOL_NAME,
+        description=(
+            "Record that the guest explicitly confirmed the quoted booking "
+            "in this conversation. Call once after they agree, before the "
+            "create step runs."
+        ),
+        func=_confirm,
+    )
+
+
+def confirm_guest_booking_tool() -> StructuredTool:
+    """Registry stub; real instances are session-scoped per flow agent."""
+
+    def _missing() -> str:
+        return json.dumps(
+            {
+                "error": "confirm_guest_booking requires an active session context",
+            },
+            ensure_ascii=False,
+        )
+
+    return StructuredTool.from_function(
+        name=CONFIRM_GUEST_BOOKING_TOOL_NAME,
+        description="Confirm a quoted write pipeline (session-scoped in flow agents).",
+        func=_missing,
+    )
+
+
 def build_write_args(
     pipeline: WritePipeline,
     pending_payload: dict,
@@ -175,6 +259,15 @@ def build_write_args(
         if field in args:
             continue
         path = pipeline.arg_paths.get(field)
+        if field == "room_type":
+            requested = _requested_room_type(tools)
+            rates_data = tools.get("get_room_rates") if isinstance(tools, dict) else None
+            if isinstance(rates_data, dict):
+                rates = rates_data.get("rates")
+                row = _pick_rate_row(rates if isinstance(rates, list) else [], requested)
+                if row and row.get("room_type"):
+                    args[field] = row["room_type"]
+                    continue
         if path:
             val = _resolve_arg_path(tools, path)
             if val is not None:
@@ -213,10 +306,26 @@ def try_automated_write(
             "no quoted data in session"
         )
         return "", errors, None
-    if session_turns < 1 and pending.get("status") != "confirmed":
+    status = str(pending.get("status") or "")
+    if status == "written":
+        payload = pending.get("payload") or {}
+        prior = payload.get("write_result")
+        if isinstance(prior, dict) and not prior.get("error"):
+            booking_id = prior.get("booking_id")
+            answer = (
+                f"Your booking has been created"
+                + (f" (reference {booking_id})." if booking_id else ".")
+            )
+            return answer, errors, prior
         errors.append(
             f"Automated write for pipeline '{pipeline.id}' refused: "
-            "awaiting guest confirmation from a prior turn"
+            "already written"
+        )
+        return "", errors, None
+    if status not in ("confirmed",):
+        errors.append(
+            f"Automated write for pipeline '{pipeline.id}' refused: "
+            "guest confirmation required (confirm_guest_booking)"
         )
         return "", errors, None
     args = build_write_args(
@@ -232,6 +341,19 @@ def try_automated_write(
     if tool is None:
         errors.append(f"Automated write tool '{pipeline.write_tool}' is not available")
         return "", errors, None
+    from runtime.tool_preconditions import check_write_preconditions
+
+    pre = check_write_preconditions(
+        pipeline.write_tool,
+        args,
+        session_id=session_id,
+        execution_id=execution_id,
+    )
+    if pre:
+        errors.append(
+            f"Automated write for pipeline '{pipeline.id}' refused: {pre}"
+        )
+        return "", errors, None
     payload = pending.get("payload") or {}
     write_attempt_id = (
         payload.get("write_attempt_id") or pending.get("write_attempt_id") or ""
@@ -241,13 +363,6 @@ def try_automated_write(
         execution_id=execution_id,
         write_tool=pipeline.write_tool,
         action="execute",
-    )
-    save_pending(
-        session_id,
-        pipeline.id,
-        status="confirmed",
-        payload=payload,
-        idempotency_key=idem,
     )
     result = invoke_idempotent_write(tool, args, idempotency_key=idem)
     if isinstance(result, dict) and result.get("error"):

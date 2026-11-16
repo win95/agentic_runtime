@@ -81,6 +81,7 @@ def test_select_hooks_from_seed_yamls():
     assert select_hooks(hotel) == [
         "audit",
         "enforce_layer",
+        "enforce_write_preconditions",
         "block_dangerous_tool_call",
         "guard_destructive_target",
         "deny_builtin_tools",

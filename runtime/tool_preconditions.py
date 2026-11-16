@@ -19,7 +19,14 @@ _CONFIG_PATH = (
 )
 
 _GUEST_READ_TOOLS = frozenset(
-    {"find_guest", "get_booking", "list_payments", "get_task", "search_policy_documents"}
+    {
+        "find_guest",
+        "get_booking",
+        "list_payments",
+        "get_task",
+        "search_policy_documents",
+        "read_policy_document",
+    }
 )
 
 

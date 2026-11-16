@@ -78,7 +78,7 @@ def test_tools_db_read_only_mirrors_registry(client, db_session):
 
     demo_data.seed_tools_demo(db_session)
     rows = {row["name"]: row for row in client.get("/tools/db").json()}
-    assert len(rows) == 14
+    assert len(rows) == 16
     assert rows["search_fault_history"]["read_only"] is True
     assert rows["delete_mission"]["read_only"] is False
     assert rows["dispatch_execution"]["read_only"] is False

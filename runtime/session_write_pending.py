@@ -9,6 +9,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 _MEMORY: dict[tuple[str, str], dict] = {}
+_MEMORY_MAX = 1024
 
 
 def _key(session_id: str, pipeline_id: str) -> tuple[str, str]:
@@ -47,7 +48,7 @@ def get_pending(session_id: str, pipeline_id: str) -> dict | None:
         finally:
             db.close()
     except Exception as exc:  # noqa: BLE001 — memory fallback
-        logger.debug("Pending DB read failed (%s); using memory", exc)
+        logger.warning("Pending DB read failed (%s); using memory", exc)
         return _MEMORY.get(_key(session_id, pipeline_id))
 
 
@@ -66,7 +67,11 @@ def save_pending(
         "idempotency_key": idempotency_key,
         "write_attempt_id": payload.get("write_attempt_id"),
     }
-    _MEMORY[_key(session_id, pipeline_id)] = record
+    key = _key(session_id, pipeline_id)
+    if len(_MEMORY) >= _MEMORY_MAX and key not in _MEMORY:
+        oldest = next(iter(_MEMORY))
+        _MEMORY.pop(oldest, None)
+    _MEMORY[key] = record
     if not session_id or not pipeline_id:
         return
     try:
@@ -100,7 +105,7 @@ def save_pending(
         finally:
             db.close()
     except Exception as exc:  # noqa: BLE001
-        logger.debug("Pending DB write failed (%s); memory only", exc)
+        logger.warning("Pending DB write failed (%s); memory only", exc)
 
 
 def merge_tool_result(

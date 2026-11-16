@@ -152,6 +152,9 @@ class Settings(BaseSettings):
     celery_visibility_timeout_seconds: int = 0  # 0 => execution_timeout + 600
     # Mark RUNNING executions stale after this many seconds (reaper / reclaim).
     execution_stale_running_seconds: int = 7200
+    # Flow subgraph: each flow may run multiple model+tool steps; 80 is
+    # above the historical 50 default to tolerate multi-tool flows
+    # without changing the small-model router contract.
     graph_recursion_limit: int = 80
     llm_request_timeout_seconds: int = 120
     llm_request_max_retries: int = 2

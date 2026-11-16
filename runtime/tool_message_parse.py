@@ -54,12 +54,16 @@ def tool_content_dict(message: Any, *, id_index: dict[str, str] | None = None) -
                     if isinstance(parsed, dict):
                         return parsed
         return None
-    if isinstance(content, str) and content.strip().startswith("{"):
-        try:
-            parsed = json.loads(content)
-        except (TypeError, ValueError):
-            return None
-        return parsed if isinstance(parsed, dict) else None
+    if isinstance(content, str):
+        text = content.strip()
+        if text.startswith("{"):
+            try:
+                parsed = json.loads(text)
+            except (TypeError, ValueError):
+                return None
+            return parsed if isinstance(parsed, dict) else None
+        if text:
+            return {"text": text}
     return None
 
 

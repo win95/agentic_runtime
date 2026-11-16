@@ -13,6 +13,7 @@ EMPTY_EVIDENCE_CATEGORIES = frozenset(
     {
         "llm_unavailable",
         "agent_runtime_unavailable",
+        "internal_bug",
         "router_aborted",
         "flow_aborted",
     }
@@ -63,7 +64,9 @@ def classify_agent_failure(exc: BaseException) -> ExecutionDiagnostic:
         return ExecutionDiagnostic("llm_unavailable", str(exc))
     if isinstance(exc, RateLimitError):
         return ExecutionDiagnostic("llm_rate_limited", str(exc))
-    return ExecutionDiagnostic("agent_runtime_unavailable", str(exc))
+    if isinstance(exc, (TypeError, KeyError, AttributeError)):
+        return ExecutionDiagnostic("internal_bug", type(exc).__name__)
+    return ExecutionDiagnostic("agent_runtime_unavailable", type(exc).__name__)
 
 
 def diagnostic_explains_empty_evidence(errors: list[str] | None) -> bool:

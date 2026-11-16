@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import jwt
 import pytest
 from fastapi import HTTPException
@@ -28,11 +30,12 @@ def test_write_idempotency_key_scopes_to_attempt_and_execution():
     assert k2 != k3
 
 
-def test_jwt_without_role_gets_403_not_404():
+def test_jwt_without_role_gets_404_not_403():
+    """P0: missing role is least-privilege user; forbidden mission is 404."""
     user = {"sub": "u1"}
     with pytest.raises(HTTPException) as exc:
         require_mission_for_role(user, "fault_analysis")
-    assert exc.value.status_code == 403
+    assert exc.value.status_code == 404
 
 
 def test_try_claim_execution_atomic(db_session):
@@ -51,14 +54,27 @@ def test_try_claim_execution_atomic(db_session):
     assert again is None
 
 
-def test_rate_limit_fallback_fails_closed_per_process(monkeypatch):
+def test_rate_limit_fallback_fail_open_when_redis_down(monkeypatch):
+    """P2: broker outage must not block guest chat on this process."""
     reset_guest_rate_limit()
     monkeypatch.setattr(
         "app.core.rate_limit._redis_client",
         lambda: (_ for _ in ()).throw(ConnectionError("redis down")),
     )
-    for _ in range(20):
+    for _ in range(25):
         check_guest_rate_limit("guest-a")
-    with pytest.raises(HTTPException) as exc:
-        check_guest_rate_limit("guest-a")
-    assert exc.value.status_code == 429
+
+
+def test_stale_running_reset_to_queued_for_reclaim(db_session):
+    ex = models.Execution(
+        id="exec_stale_1",
+        mission_id="hotel_reception",
+        mission_version=1,
+        input={},
+        status="RUNNING",
+        started_at=datetime.now(timezone.utc).replace(tzinfo=None)
+        - timedelta(seconds=99999),
+    )
+    db_session.add(ex)
+    db_session.commit()
+    assert execution_service.execution_is_stale(ex)

@@ -18,13 +18,10 @@ Direction C: one agent per FLOW, not per node.
   list order until a terminal node (inclusive) or a resume node
   (exclusive — a resume node starts its own flow, see below). Nodes
   the walk never reaches become single-node flows, so every map node
-  belongs to exactly one flow. For hotel_reception that gives 8 flows:
-  booking-quote (booking-dates, check-availability, quote-price,
-  confirm-booking), booking-create (create-booking, report-booking),
-  booking-payment (booking-payment, collect-payment, confirm-payment,
-  report-payment), task (task-details, find-staff, create-task,
-  assign-task, report-task), and the four single-node lookups
-  (policy-lookup, booking-lookup, booking-change, task-status).
+  belongs to exactly one flow. The reception map has 26 nodes and
+  derives 9 flows (quote, booking-dates, booking-payment, task,
+  quote-inquiry, policy-search, booking-lookup, booking-change,
+  task-status, plus resume-gated create-booking).
 - The router runs once per flow boundary, not once per node: a plain
   model call (the map's start node) declares ``FLOW: <flow-id>`` — or
   ``FLOW: END`` / ``FLOW: WAIT``. The choice set is 7-8 flow ids with
@@ -99,7 +96,7 @@ from typing_extensions import TypedDict
 
 from runtime.context_budget import ROUTE_INSTRUCTION_TOKENS, estimate_tokens
 from runtime.deep_agent import MAX_INPUT_JSON_BYTES, build_deep_agent, outcome_from_messages
-from runtime.guest_locale import detect_guest_locale, guest_reply_reprompt
+from runtime.guest_locale import detect_guest_locale
 from runtime.guest_output import extract_flow_guest_reply, guest_reply_tool
 from runtime.guest_result import apply_guest_result_to_state
 from runtime.llm_factory import build_chat_model
@@ -107,8 +104,11 @@ from runtime.observability_resilience import (
     filter_observability_errors,
     invoke_with_observability_fallback,
 )
+from runtime.session_write_pending import get_pending
 from runtime.write_pipeline_runner import (
+    CONFIRM_GUEST_BOOKING_TOOL_NAME,
     capture_quote_tools,
+    make_confirm_guest_booking_tool,
     mark_awaiting_confirm,
     pipeline_for_write_node,
     try_automated_write,
@@ -756,13 +756,23 @@ def build_flow_subgraph(
     model_cache: dict[str, object] = {}
     cap_cache: dict[str, ToolCallCap] = {}
 
-    def flow_agent(flow: Flow):
-        if flow.id not in agent_cache:
+    def flow_agent(flow: Flow, session_id: str = ""):
+        need_session_confirm = any(
+            pipe.confirm_node in {n.id for n in flow.nodes} for pipe in pipelines
+        )
+        cache_key = (flow.id, session_id) if need_session_confirm else flow.id
+        if cache_key not in agent_cache:
             node_tools = list(flow.tools)
             write_pipe = pipeline_for_write_node(pipelines, flow.id)
             if write_pipe and write_pipe.write_tool in node_tools:
                 node_tools = [t for t in node_tools if t != write_pipe.write_tool]
             flow_tools = [guest_reply_tool(), *tools_for_node(tools, node_tools)]
+            for pipe in pipelines:
+                if pipe.confirm_node in {n.id for n in flow.nodes}:
+                    if session_id:
+                        flow_tools.append(
+                            make_confirm_guest_booking_tool(session_id, pipe.id)
+                        )
             tool_names = ", ".join([*(flow.tools or []), "reply_to_guest"]) or "reply_to_guest"
             steps = "\n".join(
                 f"{i + 1}. {node.id}: {node.goal}"
@@ -792,7 +802,7 @@ def build_flow_subgraph(
                 prior_successful_tools=prior_successful_tools,
             )
             cap_cache[flow.id] = cap
-            agent_cache[flow.id] = build_deep_agent(
+            agent_cache[cache_key] = build_deep_agent(
                 flow_tools,
                 system_prompt=(
                     f"{system_prompt}\n\nYou are executing ONE flow of a "
@@ -812,7 +822,7 @@ def build_flow_subgraph(
                 middleware=[cap, *(middleware or [])],
                 backend=backend,
             )
-        return agent_cache[flow.id]
+        return agent_cache[cache_key]
 
     def _route_tool_and_allowed(state: dict) -> tuple[dict, frozenset[str]]:
         eligible = eligible_flow_ids(flows, state)
@@ -997,7 +1007,7 @@ def build_flow_subgraph(
             if flow_executor is not None:
                 new_messages = flow_executor(flow, state, isolated)
             else:
-                agent = flow_agent(flow)
+                agent = flow_agent(flow, session_id=session_id)
                 cap_cache[flow.id].reset()
                 payload: dict = {"messages": isolated}
                 if files:
@@ -1032,40 +1042,13 @@ def build_flow_subgraph(
             added = new_messages[len(isolated) :] if len(new_messages) >= len(isolated) else []
             agent = agent_cache.get(flow.id)
 
-            reprompt_cb = None
-            if agent is not None and flow_executor is None:
-
-                def _reprompt() -> str | None:
-                    from runtime.guest_output import reply_from_tool_calls
-
-                    guest_msg = str(
-                        (state.get("input_data") or {}).get("message") or ""
-                    )
-                    locale = detect_guest_locale(guest_msg)
-                    reprompt_msgs = isolated + added + [
-                        HumanMessage(content=guest_reply_reprompt(locale))
-                    ]
-                    payload = {"messages": reprompt_msgs}
-                    if config:
-                        result = invoke_with_observability_fallback(
-                            agent.invoke, payload, config=config
-                        )
-                    else:
-                        result = invoke_with_observability_fallback(
-                            agent.invoke, payload
-                        )
-                    new_added = (result.get("messages") or [])[len(reprompt_msgs) :]
-                    return reply_from_tool_calls(new_added) or None
-
-                reprompt_cb = _reprompt
-
             answer, _guard_notes = extract_flow_guest_reply(
                 added,
                 context_blobs=context_blobs,
                 session_id=state.get("session_id") or "",
                 input_data=state.get("input_data") or {},
                 tools_by_name=tools_by_name,
-                reprompt_invoke=reprompt_cb,
+                reprompt_invoke=None,
             )
             for note in _guard_notes:
                 logger.info("Flow %s guest-output guard: %s", flow.id, note)
@@ -1075,7 +1058,11 @@ def build_flow_subgraph(
                 for pipe in pipelines:
                     if set(pipe.quote_tools) & flow_tool_set:
                         capture_quote_tools(session_id, pipe, new_messages)
-                    if pipe.confirm_node in flow_node_ids and answer:
+                    pending_payload = (get_pending(session_id, pipe.id) or {}).get(
+                        "payload"
+                    ) or {}
+                    quoted = set((pending_payload.get("tools") or {}).keys())
+                    if quoted >= set(pipe.quote_tools) and pipe.quote_tools:
                         mark_awaiting_confirm(session_id, pipe)
             if steps >= max_steps:
                 errors.append(f"Plan step cap ({max_steps} nodes) reached at flow '{flow.id}'")

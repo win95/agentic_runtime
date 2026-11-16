@@ -147,19 +147,23 @@ def _redact_internal_identifiers(text: str, sensitive: set[str]) -> tuple[str, b
     cleaned = text
     for token in sorted(sensitive, key=len, reverse=True):
         if token and token in cleaned:
-            cleaned = cleaned.replace(token, "")
+            cleaned = cleaned.replace(token, "[your account]")
             changed = True
     for m in _GUEST_ID_IN_TEXT.finditer(cleaned):
         val = m.group(1) or m.group(2)
-        if val:
-            cleaned = cleaned.replace(val, "")
+        if val and val not in sensitive:
+            cleaned = cleaned.replace(val, "[your account]")
             changed = True
-    without_uuid, n_uuid = _UUID_IN_TEXT.subn("", cleaned)
-    if n_uuid:
+    def _uuid_repl(_match: re.Match) -> str:
+        nonlocal changed
         changed = True
-        cleaned = without_uuid
+        return "your reference"
+
+    cleaned = _UUID_IN_TEXT.sub(_uuid_repl, cleaned)
     cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    cleaned = re.sub(r"\(\s*\)", "", cleaned)
     cleaned = re.sub(r"\s+([,.!?])", r"\1", cleaned)
+    cleaned = re.sub(r"\s+\.", ".", cleaned)
     return cleaned.strip(), changed
 
 

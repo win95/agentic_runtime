@@ -377,7 +377,11 @@ def test_load_mcp_tools_registers_hotel_tools(
         assert entry.permission == "mcp"
         assert entry.read_only is False
     # Capability gate: the hotel mission sees all 14; fault_analysis none.
-    assert {t.name for t in registry.get_langchain_tools(HOTEL_CONTEXT)} == HOTEL_TOOLS
+    guest_channel = {"reply_to_guest", "confirm_guest_booking"}
+    assert (
+        {t.name for t in registry.get_langchain_tools(HOTEL_CONTEXT)}
+        == HOTEL_TOOLS | guest_channel
+    )
     assert not ({t.name for t in registry.get_langchain_tools(FAULT_CONTEXT)}
                 & HOTEL_TOOLS)
     # Sync entry point: the runtime invokes the agent synchronously, so

@@ -50,13 +50,25 @@ def run_execution(self, execution_id: str) -> dict:
                     execution_id,
                 )
                 return {"execution_id": execution_id, "status": "RUNNING"}
-            execution.status = "FAILED"
+            execution.status = "QUEUED"
             execution.error = "stale RUNNING — reclaiming for retry"
-            execution.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            execution.started_at = None
+            execution.finished_at = None
+            execution.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
             db.commit()
             execution = db.get(models.Execution, execution_id)
             if execution is None:
                 return {"execution_id": execution_id, "status": "FAILED"}
+
+        if execution.status == "FAILED" and execution.error and "reclaiming" in (
+            execution.error or ""
+        ):
+            execution.status = "QUEUED"
+            execution.started_at = None
+            execution.finished_at = None
+            execution.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            db.commit()
+            execution = db.get(models.Execution, execution_id)
 
         claimed = exec_svc.try_claim_execution(db, execution_id)
         if claimed is None:
@@ -217,6 +229,21 @@ def run_execution(self, execution_id: str) -> dict:
                 self.max_retries,
                 exc,
             )
+            try:
+                execution = db.get(models.Execution, execution_id)
+                if (
+                    execution is not None
+                    and execution.status not in ("CANCELLED", "SUCCEEDED")
+                ):
+                    execution.status = "QUEUED"
+                    execution.started_at = None
+                    execution.finished_at = None
+                    execution.updated_at = datetime.now(timezone.utc).replace(
+                        tzinfo=None
+                    )
+                    db.commit()
+            except Exception:  # noqa: BLE001 — retry must still be raised
+                db.rollback()
             raise self.retry(exc=exc, countdown=60) from exc
         # Retries exhausted — persist FAILED.
         try:
