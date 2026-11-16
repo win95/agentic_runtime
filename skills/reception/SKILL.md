@@ -3,6 +3,18 @@ name: reception
 description: Phục vụ khách với vai trò lễ tân — nhận đặt phòng và xác nhận với khách trong chat trước mọi thao tác ghi, trả lời chính sách chỉ dựa trên tài liệu, giao việc cho buồng phòng hoặc kỹ thuật — theo một bản đồ (map); không bao giờ bịa tình trạng phòng, giá, chính sách hay nhân viên.
 keywords: booking reservation hotel room checkin checkout cancel reception guest housekeeping policy
 map:
+  pipelines:
+    - id: booking_create
+      quote_tools: [check_room_availability, get_room_rates]
+      confirm_node: confirm-booking
+      write_node: create-booking
+      write_tool: create_booking
+      write_arg_fields: [guest_id, room_type, check_in, check_out, guests]
+      arg_paths:
+        room_type: [get_room_rates, rates, 0, room_type]
+        check_in: [get_room_rates, check_in]
+        check_out: [get_room_rates, check_out]
+        guests: [check_room_availability, guests]
   start: route
   nodes:
     - id: route

@@ -8,6 +8,7 @@ import re
 from langchain_core.messages import AIMessage
 from langchain_core.tools import StructuredTool
 
+from runtime.reply_grounding import apply_reply_grounding
 from runtime.scope import get_bound_guest_id
 
 GUEST_REPLY_TOOL_NAME = "reply_to_guest"
@@ -163,9 +164,12 @@ def extract_flow_guest_reply(
     raw = reply_from_tool_calls(messages)
     if raw is None:
         raw = fallback_text or ""
-    return guard_guest_reply(
+    cleaned, notes = guard_guest_reply(
         raw,
         context_blobs=context_blobs,
         session_id=session_id,
         input_data=input_data,
     )
+    cleaned, gnotes = apply_reply_grounding(cleaned, messages)
+    notes.extend(gnotes)
+    return cleaned, notes

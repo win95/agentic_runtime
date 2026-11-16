@@ -105,6 +105,12 @@ from runtime.observability_resilience import (
     filter_observability_errors,
     invoke_with_observability_fallback,
 )
+from runtime.write_pipeline_runner import (
+    capture_quote_tools,
+    mark_awaiting_confirm,
+    pipeline_for_write_node,
+    try_automated_write,
+)
 from runtime.security import wrap_data
 from runtime.skills.map_plan import SkillMap
 from runtime.subgraph.common import (
@@ -695,6 +701,7 @@ class FlowState(TypedDict, total=False):
     flow_messages: list
     flow_trace: list[dict]
     flow_answers: list[str]
+    execution_id: str
 
 
 def build_flow_subgraph(
@@ -737,7 +744,9 @@ def build_flow_subgraph(
     -> AIMessage``, replacing the bound route model call.
     """
     flows = derive_flows(skill_map, resume_nodes=resume_nodes)
+    pipelines = list(skill_map.pipelines or [])
     by_id = {flow.id: flow for flow in flows}
+    tools_by_name = {getattr(t, "name", ""): t for t in tools}
     route_base_model: object | None = None
     start = skill_map.node_by_id(skill_map.start)
     when_by_entry = {b.goto: b.when for b in (start.branches if start else [])}
@@ -747,7 +756,11 @@ def build_flow_subgraph(
 
     def flow_agent(flow: Flow):
         if flow.id not in agent_cache:
-            flow_tools = [guest_reply_tool(), *tools_for_node(tools, flow.tools)]
+            node_tools = list(flow.tools)
+            write_pipe = pipeline_for_write_node(pipelines, flow.id)
+            if write_pipe and write_pipe.write_tool in node_tools:
+                node_tools = [t for t in node_tools if t != write_pipe.write_tool]
+            flow_tools = [guest_reply_tool(), *tools_for_node(tools, node_tools)]
             tool_names = ", ".join([*(flow.tools or []), "reply_to_guest"]) or "reply_to_guest"
             steps = "\n".join(
                 f"{i + 1}. {node.id}: {node.goal}"
@@ -944,6 +957,40 @@ def build_flow_subgraph(
             ]
             config = _config()
             errors = list(state.get("errors") or [])
+            session_id = state.get("session_id") or ""
+            session_turns = len((state.get("session_history") or {}).get("turns") or [])
+            auto_pipe = pipeline_for_write_node(pipelines, flow.id)
+            if auto_pipe and session_id:
+                auto_answer, auto_errs, _raw = try_automated_write(
+                    auto_pipe,
+                    session_id=session_id,
+                    execution_id=state.get("execution_id") or "",
+                    tools_by_name=tools_by_name,
+                    session_turns=session_turns,
+                )
+                if auto_answer or auto_errs:
+                    append_unique_errors(errors, auto_errs)
+                    return {
+                        "messages": history + [instruction],
+                        "current": flow.id,
+                        "visited": list(state.get("visited") or []) + [flow.id],
+                        "declared_flow": None,
+                        "route_next": None,
+                        "steps": steps,
+                        "errors": errors,
+                        "answer": auto_answer or state.get("answer") or "",
+                        "flow_messages": list(state.get("flow_messages") or []),
+                        "flow_trace": list(state.get("flow_trace") or [])
+                        + [
+                            {
+                                "flow": flow.id,
+                                "steps_completed": ["automated_write"],
+                                "steps_missing": [],
+                            }
+                        ],
+                        "flow_answers": prior_answers
+                        + ([auto_answer] if auto_answer else []),
+                    }
             if flow_executor is not None:
                 new_messages = flow_executor(flow, state, isolated)
             else:
@@ -989,6 +1036,14 @@ def build_flow_subgraph(
             )
             for note in _guard_notes:
                 logger.info("Flow %s guest-output guard: %s", flow.id, note)
+            if session_id:
+                flow_tool_set = set(flow.tools or [])
+                flow_node_ids = {n.id for n in flow.nodes}
+                for pipe in pipelines:
+                    if set(pipe.quote_tools) & flow_tool_set:
+                        capture_quote_tools(session_id, pipe, new_messages)
+                    if pipe.confirm_node in flow_node_ids and answer:
+                        mark_awaiting_confirm(session_id, pipe)
             if steps >= max_steps:
                 errors.append(f"Plan step cap ({max_steps} nodes) reached at flow '{flow.id}'")
             return {
@@ -1043,6 +1098,7 @@ def run_flow_subgraph(
     trace_metadata: dict | None = None,
     trace_tags: list[str] | None = None,
     session_id: str | None = None,
+    execution_id: str | None = None,
 ) -> dict:
     """Invoke a compiled flow subgraph for one mission input.
 
@@ -1072,6 +1128,7 @@ def run_flow_subgraph(
         "input_data": input_data,
         "session_history": session_history or {},
         "session_id": session_id or "",
+        "execution_id": execution_id or "",
         "history_block": history_block,
         "answer": "",
         "flow_messages": [],

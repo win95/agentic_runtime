@@ -36,6 +36,8 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 
+from runtime.write_pipeline_runner import WritePipeline, parse_pipelines
+
 logger = logging.getLogger(__name__)
 
 
@@ -85,6 +87,7 @@ class SkillMap:
     skill_name: str
     start: str
     nodes: list[MapNode] = field(default_factory=list)
+    pipelines: list[WritePipeline] = field(default_factory=list)
 
     @property
     def node_ids(self) -> list[str]:
@@ -262,7 +265,8 @@ def parse_skill_map(
         start = nodes[0].id
     else:
         start = start.strip()
-    return SkillMap(skill_name=skill_name, start=start, nodes=nodes)
+    pipelines = parse_pipelines(raw.get("pipelines"), skill_name)
+    return SkillMap(skill_name=skill_name, start=start, nodes=nodes, pipelines=pipelines)
 
 
 def render_plan(skill_map: SkillMap) -> str:

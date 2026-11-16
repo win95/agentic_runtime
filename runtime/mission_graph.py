@@ -708,6 +708,7 @@ def deep_agent_node(state: MissionState) -> dict:
                 trace_metadata=trace_metadata,
                 trace_tags=trace_tags,
                 session_id=state.get("session_id"),
+                execution_id=state.get("execution_id"),
                 callbacks=[handler],
             )
         else:
