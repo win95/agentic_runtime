@@ -2,51 +2,42 @@
 
 from __future__ import annotations
 
-import json
 import re
 from typing import Any
 
 from langchain_core.messages import ToolMessage
+
+from runtime.guest_locale import localized_setting
+from runtime.tool_message_parse import collect_tool_results, tool_call_id_index, tool_content_dict
 
 POLICY_SEARCH_TOOL = "search_policy_documents"
 POLICY_READ_TOOL = "read_policy_document"
 POLICY_TOOLS = frozenset({POLICY_SEARCH_TOOL, POLICY_READ_TOOL})
 
 _TOKEN_RE = re.compile(r"[\w]{3,}", re.UNICODE)
+_DIGITS = re.compile(r"\d+")
 
 
-def policy_unavailable_reply() -> str:
-    from app.config import settings
-
-    return (settings.policy_unavailable_reply_template or "").strip()
-
-
-def _tool_content_dict(message: Any) -> dict | None:
-    if not isinstance(message, ToolMessage):
-        return None
-    content = getattr(message, "content", "")
-    if isinstance(content, dict):
-        return content
-    if isinstance(content, str) and content.strip().startswith("{"):
-        try:
-            parsed = json.loads(content)
-        except (TypeError, ValueError):
-            return None
-        return parsed if isinstance(parsed, dict) else None
-    return None
+def policy_unavailable_reply(*, locale: str = "en") -> str:
+    return localized_setting("policy_unavailable_reply_template", locale)
 
 
 def _messages_tool_names(messages: list) -> set[str]:
+    from runtime.tool_message_parse import tool_message_name
+
     names: set[str] = set()
+    id_index = tool_call_id_index(messages)
     for message in messages or []:
         for call in getattr(message, "tool_calls", None) or []:
             if isinstance(call, dict) and call.get("name"):
                 names.add(str(call["name"]))
     for message in messages or []:
         if isinstance(message, ToolMessage):
-            n = getattr(message, "name", None)
+            n = tool_message_name(message, id_index)
             if n:
-                names.add(str(n))
+                names.add(n)
+    for name, _ in collect_tool_results(messages):
+        names.add(name)
     return names
 
 
@@ -54,12 +45,13 @@ def collect_policy_corpus(messages: list) -> tuple[list[str], dict[str, Any]]:
     """Text snippets from successful policy tool calls in this turn."""
     corpus: list[str] = []
     meta: dict[str, Any] = {"last_search_count": None, "read_ok": False}
+    id_index = tool_call_id_index(messages)
     for message in messages or []:
         if not isinstance(message, ToolMessage):
             continue
         if getattr(message, "status", None) == "error":
             continue
-        data = _tool_content_dict(message)
+        data = tool_content_dict(message, id_index=id_index)
         if not isinstance(data, dict) or data.get("error"):
             continue
         if "documents" in data and isinstance(data.get("count"), int):
@@ -154,22 +146,68 @@ def maybe_extend_policy_corpus(
 
 def _sentence_support_score(sentence: str, corpus: list[str]) -> float:
     words = {w.casefold() for w in _TOKEN_RE.findall(sentence)}
-    if len(words) < 2:
-        return 1.0
     blob = " ".join(corpus).casefold()
     if not blob.strip():
         return 0.0
+    if len(words) < 2:
+        return 1.0
     hits = sum(1 for w in words if w in blob)
-    return hits / len(words)
+    ratio = hits / len(words)
+    if ratio >= 0.12:
+        return ratio
+    sent_digits = set(_DIGITS.findall(sentence))
+    if sent_digits and sent_digits.issubset(set(_DIGITS.findall(blob))):
+        return 0.5
+    return ratio
+
+
+def _split_sentences(text: str) -> list[str]:
+    return [s.strip() for s in re.split(r"(?<=[.!?])\s+", text) if s.strip()]
+
+
+def _compose_from_corpus(corpus: list[str], guest_message: str, *, max_chars: int = 700) -> str:
+    """Select document sentences relevant to the guest question (claim-level)."""
+    sentences: list[str] = []
+    for part in corpus:
+        sentences.extend(_split_sentences(part))
+    if not sentences:
+        return _best_corpus_excerpt(corpus, max_chars=max_chars)
+    qtokens = {t.casefold() for t in _TOKEN_RE.findall(guest_message)}
+    scored: list[tuple[float, str]] = []
+    for sentence in sentences:
+        stoks = {t.casefold() for t in _TOKEN_RE.findall(sentence)}
+        overlap = len(stoks & qtokens) / max(len(qtokens), 1) if qtokens else 0.0
+        scored.append((overlap, sentence))
+    scored.sort(
+        key=lambda pair: (
+            -pair[0],
+            -len(_DIGITS.findall(pair[1])),
+            -len(pair[1]),
+        )
+    )
+    chosen: list[str] = []
+    for sc, sentence in scored:
+        if sc > 0 and sentence not in chosen:
+            chosen.append(sentence)
+        if len(chosen) >= 5:
+            break
+    for _, sentence in scored:
+        if _DIGITS.search(sentence) and sentence not in chosen:
+            chosen.append(sentence)
+        if len(chosen) >= 6:
+            break
+    if not chosen:
+        chosen = [s for _, s in scored[:4]]
+    text = " ".join(chosen).strip()
+    if len(text) > max_chars:
+        text = text[: max_chars - 1].rsplit(" ", 1)[0] + "…"
+    return text or _best_corpus_excerpt(corpus, max_chars=max_chars)
 
 
 def _best_corpus_excerpt(corpus: list[str], *, max_chars: int = 600) -> str:
     if not corpus:
-        return policy_unavailable_reply()
-    text = corpus[0]
-    for part in corpus:
-        if len(part) > len(text):
-            text = part
+        return ""
+    text = max(corpus, key=len)
     text = re.sub(r"\s+", " ", text).strip()
     if len(text) <= max_chars:
         return text
@@ -182,6 +220,7 @@ def apply_policy_grounding(
     *,
     guest_message: str = "",
     tools_by_name: dict | None = None,
+    guest_locale: str = "en",
 ) -> tuple[str, list[str]]:
     """Ground policy answers in retrieved documents, or refuse to invent content."""
     notes: list[str] = []
@@ -195,15 +234,15 @@ def apply_policy_grounding(
     notes.extend(extend_notes)
     if not corpus:
         notes.append("policy: no grounded document text — unavailable reply")
-        return policy_unavailable_reply(), notes
+        return policy_unavailable_reply(locale=guest_locale), notes
     if not (reply or "").strip():
-        notes.append("policy: empty reply — using document excerpt")
-        return _best_corpus_excerpt(corpus), notes
-    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", reply) if s.strip()]
+        notes.append("policy: empty reply — composed from document")
+        return _compose_from_corpus(corpus, guest_message), notes
+    sentences = _split_sentences(reply)
     kept: list[str] = []
     weak = False
     for sentence in sentences:
-        if _sentence_support_score(sentence, corpus) >= 0.2:
+        if _sentence_support_score(sentence, corpus) >= 0.12:
             kept.append(sentence)
         else:
             weak = True
@@ -211,5 +250,5 @@ def apply_policy_grounding(
         notes.append("policy: dropped ungrounded sentences")
     if kept:
         return " ".join(kept), notes
-    notes.append("policy: reply not supported by documents — excerpt fallback")
-    return _best_corpus_excerpt(corpus), notes
+    notes.append("policy: reply not supported by documents — composed from document")
+    return _compose_from_corpus(corpus, guest_message), notes

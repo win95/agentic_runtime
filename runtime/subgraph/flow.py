@@ -99,11 +99,8 @@ from typing_extensions import TypedDict
 
 from runtime.context_budget import ROUTE_INSTRUCTION_TOKENS, estimate_tokens
 from runtime.deep_agent import MAX_INPUT_JSON_BYTES, build_deep_agent, outcome_from_messages
-from runtime.guest_output import (
-    GUEST_REPLY_REPROMPT,
-    extract_flow_guest_reply,
-    guest_reply_tool,
-)
+from runtime.guest_locale import detect_guest_locale, guest_reply_reprompt
+from runtime.guest_output import extract_flow_guest_reply, guest_reply_tool
 from runtime.guest_result import apply_guest_result_to_state
 from runtime.llm_factory import build_chat_model
 from runtime.observability_resilience import (
@@ -805,9 +802,10 @@ def build_flow_subgraph(
                     f"tools: {tool_names}, reply_to_guest. Do not call any "
                     f"other tool. Call the tools for a step as needed. "
                     f"When ready, call reply_to_guest with the message for "
-                    f"the guest (do not rely on free text alone). If you "
-                    f"need information from the guest, ask via "
-                    f"reply_to_guest and stop — that ends this flow's turn."
+                    f"the guest in the guest's language (do not rely on "
+                    f"free text alone). If you need information from the "
+                    f"guest, ask via reply_to_guest and stop — that ends "
+                    f"this flow's turn."
                 ),
                 skills=skills,
                 model_config=model_config,
@@ -1040,8 +1038,12 @@ def build_flow_subgraph(
                 def _reprompt() -> str | None:
                     from runtime.guest_output import reply_from_tool_calls
 
+                    guest_msg = str(
+                        (state.get("input_data") or {}).get("message") or ""
+                    )
+                    locale = detect_guest_locale(guest_msg)
                     reprompt_msgs = isolated + added + [
-                        HumanMessage(content=GUEST_REPLY_REPROMPT)
+                        HumanMessage(content=guest_reply_reprompt(locale))
                     ]
                     payload = {"messages": reprompt_msgs}
                     if config:

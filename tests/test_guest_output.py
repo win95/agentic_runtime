@@ -3,6 +3,7 @@
 from langchain_core.messages import AIMessage
 
 from app.config import settings
+from runtime.reply_grounding import apply_reply_grounding, quote_reply_from_tools
 from runtime.guest_output import (
     GUEST_REPLY_TOOL_NAME,
     _dedupe_paragraphs,
@@ -61,10 +62,24 @@ def test_finalize_guest_reply_uses_generic_fallback_without_tool():
         [AIMessage(content="assistant text only, no tool")],
         context_blobs=[],
         session_id="s1",
-        input_data={"channel": "guest_api"},
+        input_data={"channel": "guest_api", "message": "Xin chào"},
     )
-    assert answer == settings.guest_reply_generic_fallback
+    assert answer == settings.guest_reply_generic_fallback_vi.strip()
     assert any("generic fallback" in n for n in notes)
+
+
+def test_guard_redacts_uuid_and_guest_id():
+    gid = "45815266-39bc-46d5-a98c-fc3319a1d71d"
+    reply = f"Booking summary for guest {gid}."
+    cleaned, notes = guard_guest_reply(
+        reply,
+        context_blobs=[],
+        session_id="sess-1",
+        input_data={"guest_id": gid, "channel": "guest_api"},
+    )
+    assert gid not in cleaned
+    assert "-" not in cleaned or "45815266" not in cleaned
+    assert any("redacted" in n for n in notes)
 
 
 def test_finalize_guest_reply_prefers_reply_to_guest():
@@ -82,6 +97,64 @@ def test_finalize_guest_reply_prefers_reply_to_guest():
     ]
     answer, _ = finalize_guest_reply(msgs, context_blobs=[])
     assert answer == "Tool channel answer."
+
+
+def test_quote_reply_from_tools_includes_price_and_availability():
+    import json
+
+    from langchain_core.messages import ToolMessage
+
+    messages = [
+        ToolMessage(
+            content=json.dumps(
+                {
+                    "available": True,
+                    "room_types": [
+                        {
+                            "name": "Deluxe",
+                            "available_rooms": 2,
+                            "price_per_night": 2500000,
+                            "currency": "VND",
+                        }
+                    ],
+                    "check_in": "2026-03-01",
+                    "check_out": "2026-03-03",
+                    "nights": 2,
+                }
+            ),
+            tool_call_id="a",
+            name="check_room_availability",
+        ),
+        ToolMessage(
+            content=json.dumps(
+                {
+                    "rates": [
+                        {
+                            "name": "Deluxe",
+                            "price_per_night": 2500000,
+                            "total_price": 5000000,
+                            "currency": "VND",
+                            "nights": 2,
+                        }
+                    ],
+                    "nights": 2,
+                }
+            ),
+            tool_call_id="b",
+            name="get_room_rates",
+        ),
+    ]
+    quote = quote_reply_from_tools(messages, guest_locale="vi")
+    assert "2500000" in quote
+    assert "5000000" in quote
+    assert "còn phòng" in quote.lower() or "Deluxe" in quote
+    patched, notes = apply_reply_grounding(
+        "Please confirm your booking now.",
+        messages,
+        guest_locale="vi",
+    )
+    assert "2500000" in patched
+    assert any("quote" in n.lower() for n in notes)
 
 
 def test_dedupe_near_duplicate_paragraphs():

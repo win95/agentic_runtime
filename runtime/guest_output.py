@@ -7,6 +7,11 @@ import re
 
 from langchain_core.tools import StructuredTool
 
+from runtime.guest_locale import (
+    detect_guest_locale,
+    guest_language_instruction,
+    localized_setting,
+)
 from runtime.policy_grounding import apply_policy_grounding
 from runtime.reply_grounding import apply_reply_grounding, grounded_reply_from_tools
 from runtime.scope import get_bound_guest_id
@@ -19,6 +24,9 @@ _NGRAM_WORDS = 8
 _OVERLAP_RATIO = 0.35
 _GUEST_ID_IN_TEXT = re.compile(
     r'"guest_id"\s*:\s*"([^"]+)"|\'guest_id\'\s*:\s*\'([^\']+)\''
+)
+_UUID_IN_TEXT = re.compile(
+    r"\b[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}\b"
 )
 # Same delimiter shape as runtime.security.wrap_data — not model-specific phrases.
 _DATA_BLOCK_RE = re.compile(r"<data\b[^>]*>.*?</data>", re.IGNORECASE | re.DOTALL)
@@ -33,9 +41,9 @@ def guest_reply_tool() -> StructuredTool:
     return StructuredTool.from_function(
         name=GUEST_REPLY_TOOL_NAME,
         description=(
-            "Deliver your final message to the guest. Call exactly once "
-            "when you are ready to answer — do not put the guest reply "
-            "only in free-form assistant text."
+            "Deliver your final message to the guest in their language. "
+            "Call exactly once when you are ready to answer — do not put "
+            "the guest reply only in free-form assistant text."
         ),
         func=_record,
     )
@@ -118,23 +126,41 @@ def _remove_overlap_sentences(text: str, context_blobs: list[str]) -> str:
     return " ".join(kept).strip() if kept else text[:400].strip()
 
 
-def _allowed_guest_ids(session_id: str | None, input_data: dict | None) -> set[str]:
-    allowed: set[str] = set()
+def _context_identifier_values(
+    session_id: str | None, input_data: dict | None
+) -> set[str]:
+    values: set[str] = set()
+    for key in ("guest_id", "execution_id", "session_id", "user_id", "tenant_id"):
+        raw = (input_data or {}).get(key)
+        if isinstance(raw, str) and raw.strip():
+            values.add(raw.strip())
+    if isinstance(session_id, str) and session_id.strip():
+        values.add(session_id.strip())
     bound = get_bound_guest_id(session_id or "")
-    if isinstance(bound, str) and bound:
-        allowed.add(bound)
-    data = input_data or {}
-    gid = data.get("guest_id")
-    if isinstance(gid, str) and gid:
-        allowed.add(gid)
-    return allowed
+    if isinstance(bound, str) and bound.strip():
+        values.add(bound.strip())
+    return values
 
 
-def _guest_ids_in_text(text: str) -> set[str]:
-    ids: set[str] = set()
-    for m in _GUEST_ID_IN_TEXT.finditer(text or ""):
-        ids.add(m.group(1) or m.group(2))
-    return {g for g in ids if g}
+def _redact_internal_identifiers(text: str, sensitive: set[str]) -> tuple[str, bool]:
+    changed = False
+    cleaned = text
+    for token in sorted(sensitive, key=len, reverse=True):
+        if token and token in cleaned:
+            cleaned = cleaned.replace(token, "")
+            changed = True
+    for m in _GUEST_ID_IN_TEXT.finditer(cleaned):
+        val = m.group(1) or m.group(2)
+        if val:
+            cleaned = cleaned.replace(val, "")
+            changed = True
+    without_uuid, n_uuid = _UUID_IN_TEXT.subn("", cleaned)
+    if n_uuid:
+        changed = True
+        cleaned = without_uuid
+    cleaned = re.sub(r"\s{2,}", " ", cleaned)
+    cleaned = re.sub(r"\s+([,.!?])", r"\1", cleaned)
+    return cleaned.strip(), changed
 
 
 def guard_guest_reply(
@@ -153,23 +179,15 @@ def guard_guest_reply(
     cleaned = _remove_overlap_sentences(cleaned, context_blobs)
     if cleaned != before:
         notes.append("Guest reply trimmed: removed prompt/context echo")
-    allowed_guests = _allowed_guest_ids(session_id, input_data)
-    if allowed_guests:
-        mentioned = _guest_ids_in_text(cleaned)
-        out_of_scope = mentioned - allowed_guests
-        if out_of_scope:
-            for gid in sorted(out_of_scope):
-                cleaned = cleaned.replace(gid, "[guest]")
-            notes.append(
-                "Guest reply redacted out-of-scope guest identifiers"
-            )
+    sensitive = _context_identifier_values(session_id, input_data)
+    cleaned, redacted = _redact_internal_identifiers(cleaned, sensitive)
+    if redacted:
+        notes.append("Guest reply redacted internal identifiers")
     return cleaned.strip(), notes
 
 
-def generic_guest_fallback() -> str:
-    from app.config import settings
-
-    return (settings.guest_reply_generic_fallback or "").strip()
+def generic_guest_fallback(*, guest_locale: str) -> str:
+    return localized_setting("guest_reply_generic_fallback", guest_locale)
 
 
 def finalize_guest_reply(
@@ -196,15 +214,17 @@ def finalize_guest_reply(
         if built:
             raw = built
             notes.append("Guest reply from structured tool results")
-    if not (raw or "").strip():
-        raw = generic_guest_fallback()
-        notes.append("Guest reply generic fallback")
     guest_message = str((input_data or {}).get("message") or "")
+    guest_locale = detect_guest_locale(guest_message)
+    if not (raw or "").strip():
+        raw = generic_guest_fallback(guest_locale=guest_locale)
+        notes.append("Guest reply generic fallback")
     raw, pnotes = apply_policy_grounding(
         raw,
         messages,
         guest_message=guest_message,
         tools_by_name=tools_by_name,
+        guest_locale=guest_locale,
     )
     notes.extend(pnotes)
     cleaned, gnotes = guard_guest_reply(
@@ -214,7 +234,9 @@ def finalize_guest_reply(
         input_data=input_data,
     )
     notes.extend(gnotes)
-    cleaned, gnotes2 = apply_reply_grounding(cleaned, messages)
+    cleaned, gnotes2 = apply_reply_grounding(
+        cleaned, messages, guest_locale=guest_locale
+    )
     notes.extend(gnotes2)
     return cleaned.strip(), notes
 
