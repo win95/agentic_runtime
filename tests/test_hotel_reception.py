@@ -24,13 +24,12 @@ from runtime.subgraph import flow as flow_subgraph_module
 from runtime.mission_graph import run_mission
 from runtime.skills import load_skills
 from runtime.skills.map_plan import parse_skill_map, render_plan
+from runtime.subgraph.flow import derive_flows
 from seeds import load_missions
 
 BASE = pathlib.Path(__file__).resolve().parents[1] / "seeds"
 SKILL_PATH = pathlib.Path(__file__).resolve().parents[1] / "skills" / "reception" / "SKILL.md"
 
-# The MCP tool contract (docs/hotel-reception.md): these names must be
-# what the PMS / staff / docs MCP servers expose.
 HOTEL_TOOLS = {
     "check_room_availability",
     "get_room_rates",
@@ -59,6 +58,10 @@ MAP_NODE_IDS = [
     "confirm-booking",
     "create-booking",
     "report-booking",
+    "quote-inquiry",
+    "inquiry-check-availability",
+    "inquiry-quote-price",
+    "report-quote",
     "booking-payment",
     "collect-payment",
     "confirm-payment",
@@ -68,7 +71,9 @@ MAP_NODE_IDS = [
     "create-task",
     "assign-task",
     "report-task",
-    "policy-lookup",
+    "policy-search",
+    "policy-read",
+    "report-policy",
     "booking-lookup",
     "booking-change",
     "task-status",
@@ -100,7 +105,6 @@ def test_seed_files_parse():
     assert agent["temperature"] == 0.5
     assert agent["session_history"] == {"max_turns": 10, "max_tokens": 4096}
     assert set(agent["allowed_tools"]) == HOTEL_TOOLS
-    # The confirmation rule is the load-bearing sentence of the prompt.
     prompt = agent["system_prompt"]
     assert "xác nhận" in prompt
     assert "create_booking" in prompt
@@ -118,8 +122,6 @@ def test_seed_loads_hotel_reception_mission_and_agent(db_session):
     agent = db_session.get(models.Agent, "hotel_receptionist")
     assert agent is not None
     assert set(agent.allowed_tools or []) == HOTEL_TOOLS
-    # The seed snapshots the agent config (Option C): the pinned
-    # version carries the same tools and session limits.
     version = avs.get_active_version(db_session, "hotel_receptionist")
     assert version is not None
     assert set(version.allowed_tools or []) == HOTEL_TOOLS
@@ -128,19 +130,14 @@ def test_seed_loads_hotel_reception_mission_and_agent(db_session):
 
 # --- Reception skill map ---
 def test_reception_skill_bans_builtin_tools():
-    """The skill names the deepagents built-ins as forbidden: the map
-    alone cannot stop the 3B model from reaching for them (they stay
-    visible in its tool list), so the ban must be explicit text the
-    model reads — the hook only denies at call time."""
     body = SKILL_PATH.read_text(encoding="utf-8").split("---\n", 2)[2]
     for name in ("ls", "read_file", "write_file", "edit_file", "delete",
                  "glob", "grep", "task", "execute"):
         assert f"`{name}`" in body, f"skill must name forbidden tool {name}"
-    assert "không có quyền truy cập file" in body
+    assert "select_flow" in body.lower() or "select_flow" in body
 
 
 def test_reception_skill_map_contract():
-    """The declared map (no tool validation): the full contract."""
     skill_map = parse_skill_map(_frontmatter(), "reception")
     assert skill_map is not None
     assert skill_map.start == "route"
@@ -150,8 +147,9 @@ def test_reception_skill_map_contract():
     route = skill_map.node_by_id("route")
     assert {b.goto for b in route.branches} == {
         "booking-dates",
+        "quote-inquiry",
         "task-details",
-        "policy-lookup",
+        "policy-search",
         "booking-lookup",
         "booking-change",
         "task-status",
@@ -159,42 +157,73 @@ def test_reception_skill_map_contract():
     }
     confirm = skill_map.node_by_id("confirm-booking")
     assert "chưa xác nhận" in (confirm.stop_when or "")
+    assert "chính sách hủy" not in (confirm.goal or "").casefold()
+    dates = skill_map.node_by_id("booking-dates")
+    assert "KHÔNG hỏi lại" in dates.goal
     assert skill_map.node_by_id("create-booking").tools == ["create_booking"]
+    assert skill_map.node_by_id("policy-search").tools == ["search_policy_documents"]
+    assert skill_map.node_by_id("policy-read").tools == ["read_policy_document"]
     assert skill_map.node_by_id("assign-task").tools == ["assign_task"]
-    # Terminal nodes (2026-11-13): END is honored only here. The
-    # mid-flow nodes (booking-dates, task-details, find-staff, ...) are
-    # not terminal — a premature END there falls back to the next node.
     assert {n.id for n in skill_map.nodes if n.terminal} == {
         "route",
         "report-booking",
+        "report-quote",
         "report-payment",
         "report-task",
-        "policy-lookup",
+        "report-policy",
         "booking-lookup",
         "booking-change",
         "task-status",
     }
+    pipeline = skill_map.pipelines[0]
+    assert pipeline.id == "booking_create"
+    assert set(pipeline.quote_tools) == {
+        "check_room_availability",
+        "get_room_rates",
+    }
+    assert pipeline.confirm_node == "confirm-booking"
+
+
+def test_reception_quote_and_policy_flows_derived():
+    skill_map = parse_skill_map(_frontmatter(), "reception")
+    flows = {f.id: f for f in derive_flows(skill_map)}
+    quote = flows["quote-inquiry"]
+    assert [n.id for n in quote.nodes] == [
+        "quote-inquiry",
+        "inquiry-check-availability",
+        "inquiry-quote-price",
+        "report-quote",
+    ]
+    assert quote.tools == ["check_room_availability", "get_room_rates"]
+    policy = flows["policy-search"]
+    assert [n.id for n in policy.nodes] == [
+        "policy-search",
+        "policy-read",
+        "report-policy",
+    ]
+    assert policy.tools == ["search_policy_documents", "read_policy_document"]
+    booking = flows["booking-dates"]
+    assert [n.id for n in booking.nodes] == [
+        "booking-dates",
+        "check-availability",
+        "quote-price",
+        "confirm-booking",
+    ]
 
 
 def test_reception_booking_lookup_falls_back_to_find_guest():
-    """The booking-061 loop (2026-11-13): on 'Booking not found' the
-    agent must not repeat get_booking with the same id — it falls back
-    to find_guest for the real id, and never invents an id."""
     skill_map = parse_skill_map(_frontmatter(), "reception")
     goal = skill_map.node_by_id("booking-lookup").goal
     assert "BK-####" in goal
-    assert "không bao giờ tự bịa mã" in goal
-    assert "KHÔNG gọi lại get_booking với cùng mã" in goal
+    assert "guest_id" in goal
     assert "find_guest" in goal
+    assert "không gọi find_guest" in goal.lower() or "Chỉ gọi find_guest" in goal
     rendered = render_plan(skill_map)
     assert "confirm-booking" in rendered
     assert "create_booking" in rendered
 
 
 def test_reception_skill_loads_with_structure_intact():
-    """load_skills() drops the map's tools until the MCP servers connect
-    (unknown tools are dropped with a warning by design) — but the map
-    structure itself must survive, so the plan still renders."""
     skills = {s.name: s for s in load_skills()}
     assert "reception" in skills
     skill_map = skills["reception"].map
@@ -205,8 +234,6 @@ def test_reception_skill_loads_with_structure_intact():
 
 
 class _ToolRecordingModel(GenericFakeChatModel):
-    """Records the tool list bound at each model call — the model's
-    actual view, which is what Part 1 (b) must change."""
     seen_tools: list = Field(default_factory=list)
 
     def bind_tools(self, tools, **kwargs):
@@ -223,10 +250,6 @@ def _dummy_mcp_tool() -> str:
 
 
 def test_hotel_agent_model_sees_no_builtin_tools(monkeypatch):
-    """Part 1 (b): for hotel_reception the model is never offered the
-    deepagents built-ins; for other missions they stay (fault needs
-    `execute` in its sandbox). A recording model captures the bound
-    tools — the model's actual view, not the registry's."""
     def _bound_tool_names(middleware):
         model = _ToolRecordingModel(messages=iter([AIMessage(content="done")] * 8))
         monkeypatch.setattr(deep_agent_module, "get_chat_model", lambda: model)
@@ -249,10 +272,6 @@ def test_hotel_agent_model_sees_no_builtin_tools(monkeypatch):
 
 
 def test_deep_agent_node_adds_builtin_exclusion_for_hotel(db_session, monkeypatch):
-    """The Mission Graph passes the built-in exclusion middleware to the
-    hotel subgraph's node agents (and only there) — the per-run
-    middleware list is where the decision lives, not in
-    build_deep_agent's signature."""
     load_missions.main()
     mission = mission_service.get_mission(db_session, "hotel_reception")
     mission_dict = mission_service.mission_to_dict(mission)

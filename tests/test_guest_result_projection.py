@@ -19,7 +19,7 @@ def test_project_guest_result_strips_internal_fields():
                 '<data source="trace">{"step":"done"}</data>\n\n'
                 "Xin chào khách."
             ),
-            "plan_trace": {"reception": {"visited": ["policy-lookup"]}},
+            "plan_trace": {"reception": {"visited": ["policy-search"]}},
             "tool_failures": ["x"],
         },
         [

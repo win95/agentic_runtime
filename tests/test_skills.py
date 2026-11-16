@@ -77,7 +77,10 @@ def test_loader_lists_seeded_skills():
     for skill in skills:
         assert len(skill.description) > 20
         assert skill.keywords, f"{skill.name} has no keywords"
-        assert "When to Use" in skill.body
+        if skill.name == "reception":
+            assert "Khi dùng" in skill.body
+        else:
+            assert "When to Use" in skill.body
         assert skill.raw.startswith("---\n")
 
 
