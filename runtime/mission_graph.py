@@ -882,11 +882,25 @@ def deep_agent_node(state: MissionState) -> dict:
             # Additive only: validate_results checks the declared
             # output-schema keys and ignores extra keys.
             result["plan_trace"] = plan_trace
+        from runtime.guest_result import apply_guest_result_to_state
+        from runtime.subgraph.flow import append_unique_errors as _dedupe_errors
+
+        merged_evidence = list(state.get("evidence") or []) + list(
+            outcome.get("evidence") or []
+        )
+        result, merged_evidence = apply_guest_result_to_state(
+            result,
+            merged_evidence,
+            execution_input=input_data,
+            session_id=state.get("session_id"),
+        )
+        diag_errors: list[str] = []
+        _dedupe_errors(diag_errors, list(graph_errors))
         return {
-            "evidence": outcome.get("evidence") or [],
+            "evidence": merged_evidence if merged_evidence else (outcome.get("evidence") or []),
             "result": result,
             "notes": notes,
-            "errors": list(graph_errors),
+            "errors": diag_errors,
             "agent_version": agent_version.version if agent_version is not None else None,
             "agent_version_drift": agent_version_drift,
             "hook_events": hook_events,
@@ -1030,6 +1044,8 @@ def _errors_explain_empty_evidence(errors: list[str]) -> bool:
         "Turn ended without",
         "Turn completed flows",
         "ending turn",
+        "Deep agent unavailable",
+        "Connection error",
     )
     return any(any(m in line for m in markers) for line in diag)
 
@@ -1056,6 +1072,11 @@ def validate_results(state: MissionState) -> dict:
     out-of-scope data must not reach the result.
     """
     errors = list(state.get("errors") or [])
+    from runtime.subgraph.flow import append_unique_errors
+
+    deduped_errors: list[str] = []
+    append_unique_errors(deduped_errors, errors)
+    errors = deduped_errors
     evidence = state.get("evidence") or []
     result = dict(state.get("result") or {})
     mission = state.get("mission") or {}

@@ -99,7 +99,12 @@ from typing_extensions import TypedDict
 
 from runtime.context_budget import ROUTE_INSTRUCTION_TOKENS, estimate_tokens
 from runtime.deep_agent import MAX_INPUT_JSON_BYTES, build_deep_agent, outcome_from_messages
-from runtime.guest_output import extract_flow_guest_reply, guest_reply_tool
+from runtime.guest_output import (
+    GUEST_REPLY_REPROMPT,
+    extract_flow_guest_reply,
+    guest_reply_tool,
+)
+from runtime.guest_result import apply_guest_result_to_state
 from runtime.llm_factory import build_chat_model
 from runtime.observability_resilience import (
     filter_observability_errors,
@@ -1027,12 +1032,39 @@ def build_flow_subgraph(
                         )
                     ]
             added = new_messages[len(isolated) :] if len(new_messages) >= len(isolated) else []
+            agent = agent_cache.get(flow.id)
+
+            reprompt_cb = None
+            if agent is not None and flow_executor is None:
+
+                def _reprompt() -> str | None:
+                    from runtime.guest_output import reply_from_tool_calls
+
+                    reprompt_msgs = isolated + added + [
+                        HumanMessage(content=GUEST_REPLY_REPROMPT)
+                    ]
+                    payload = {"messages": reprompt_msgs}
+                    if config:
+                        result = invoke_with_observability_fallback(
+                            agent.invoke, payload, config=config
+                        )
+                    else:
+                        result = invoke_with_observability_fallback(
+                            agent.invoke, payload
+                        )
+                    new_added = (result.get("messages") or [])[len(reprompt_msgs) :]
+                    return reply_from_tool_calls(new_added) or None
+
+                reprompt_cb = _reprompt
+
             answer, _guard_notes = extract_flow_guest_reply(
                 added,
                 context_blobs=context_blobs,
                 session_id=state.get("session_id") or "",
                 input_data=state.get("input_data") or {},
                 fallback_text=_flow_answer(added),
+                tools_by_name=tools_by_name,
+                reprompt_invoke=reprompt_cb,
             )
             for note in _guard_notes:
                 logger.info("Flow %s guest-output guard: %s", flow.id, note)
@@ -1153,6 +1185,14 @@ def run_flow_subgraph(
     answer = (result.get("answer") or "").strip()
     if answer:
         outcome["summary"] = answer
+        outcome["evidence"] = [
+            {
+                "source": "guest",
+                "kind": "guest_reply",
+                "summary": answer,
+                "stub": False,
+            }
+        ]
     else:
         # No flow produced a guest-facing reply: never fall back to
         # the raw message list — a flow agent's reply can be a bare
@@ -1175,5 +1215,19 @@ def run_flow_subgraph(
                 "Turn completed flows but produced no guest-facing reply"
             )
     if graph_errors:
-        outcome["errors"] = graph_errors + list(outcome.get("errors") or [])
+        merged = graph_errors + list(outcome.get("errors") or [])
+        deduped: list[str] = []
+        append_unique_errors(deduped, merged)
+        outcome["errors"] = deduped
+    guest_input = input_data or {}
+    if guest_input.get("channel") == "guest_api":
+        result_payload = {**outcome, "answer": answer}
+        new_result, new_evidence = apply_guest_result_to_state(
+            result_payload,
+            outcome.get("evidence") or [],
+            execution_input=guest_input,
+            session_id=session_id,
+        )
+        outcome.update(new_result)
+        outcome["evidence"] = new_evidence
     return outcome

@@ -13,6 +13,7 @@ from app.core.security import (
     require_own_execution,
 )
 from app.services import execution_service
+from runtime.guest_result import is_guest_api_execution, project_guest_result
 
 router = APIRouter(
     prefix="/executions",
@@ -34,9 +35,18 @@ def get_result(
     result = execution_service.get_execution_result(db, execution_id)
     if result is None:
         raise HTTPException(status_code=404, detail="Result not ready yet")
+    output = dict(result.output or {})
+    evidence = list(result.evidence or [])
+    if is_guest_api_execution(execution.input):
+        output, evidence = project_guest_result(
+            output,
+            evidence,
+            session_id=execution.session_id,
+            execution_input=execution.input,
+        )
     return schemas.ExecutionResultRead(
         execution_id=result.execution_id,
-        output=result.output,
-        evidence=result.evidence,
+        output=output,
+        evidence=evidence,
         created_at=result.created_at,
     )
