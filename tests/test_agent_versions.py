@@ -64,10 +64,15 @@ def _patch_capability_repositories(monkeypatch):
 
 def test_manifest_covers_all_built_in_tools():
     manifest, digest = avs.compute_tool_manifest()
-    assert len(manifest) == 14
+    assert len(manifest) == 16
     assert {e["name"] for e in manifest} == ADMIN_TOOLS | {
-        "calculate_failure_rate", "get_maintenance_records", "get_sensor_data",
-        "query_asset_relationships", "search_fault_history",
+        "calculate_failure_rate",
+        "confirm_guest_booking",
+        "get_maintenance_records",
+        "get_sensor_data",
+        "query_asset_relationships",
+        "reply_to_guest",
+        "search_fault_history",
         "search_technical_documents",
     }
     entry = next(e for e in manifest if e["name"] == "get_sensor_data")
@@ -88,7 +93,7 @@ def test_create_version_idempotent_then_new_on_change(db_session):
         # follows settings.llm_model (item 9, 2026-11-11).
         assert same.model == settings.llm_model and same.temperature == 0.0
         assert set(same.allowed_tools) == ADMIN_TOOLS
-        assert len(same.tool_manifest) == 14
+        assert len(same.tool_manifest) == 16
         assert len(same.manifest_sha256) == 64
         assert len(avs.list_versions(db, "admin_bot")) == 1
 
@@ -343,7 +348,7 @@ def test_versions_router(db_session, client):
     assert [v["version"] for v in versions] == [2, 1]
     assert versions[0]["is_active"] is True
     assert versions[0]["temperature"] == 0.7
-    assert len(versions[0]["tool_manifest"]) == 14
+    assert len(versions[0]["tool_manifest"]) == 16
 
     resp = client.get("/agents/admin_bot/versions/1")
     assert resp.status_code == 200
@@ -411,7 +416,9 @@ def _no_version_state(mission):
 def test_no_version_fault_branch_uses_code_constant(monkeypatch):
     _fake_reachable_registry_with_other_text(monkeypatch)
     monkeypatch.setattr(
-        mission_graph_module, "_resolve_agent_version", lambda agent_id: (None, False)
+        mission_graph_module,
+        "_resolve_agent_version",
+        lambda agent_id: (None, False, False),
     )
     seen: dict = {}
     _fake_agent(monkeypatch, seen)
@@ -429,7 +436,9 @@ def test_no_version_fault_branch_uses_code_constant(monkeypatch):
 def test_no_version_admin_branch_uses_code_constant(monkeypatch):
     _fake_reachable_registry_with_other_text(monkeypatch)
     monkeypatch.setattr(
-        mission_graph_module, "_resolve_agent_version", lambda agent_id: (None, False)
+        mission_graph_module,
+        "_resolve_agent_version",
+        lambda agent_id: (None, False, False),
     )
     seen: dict = {}
     _fake_agent(monkeypatch, seen)

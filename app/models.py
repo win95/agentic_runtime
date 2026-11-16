@@ -260,6 +260,31 @@ class SessionGuestScope(Base):
     )
 
 
+class WriteIdempotencyResult(Base):
+    """Cached successful write-tool payload keyed by idempotency key."""
+
+    __tablename__ = "write_idempotency_results"
+
+    idempotency_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    result: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+
+
+class SessionWritePending(Base):
+    """Pending quoted write for a session (quote -> confirm -> execute)."""
+
+    __tablename__ = "session_write_pending"
+
+    session_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    pipeline_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="quoted")
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    idempotency_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=_utcnow, onupdate=_utcnow
+    )
+
+
 class LongTermMemory(Base):
     """One trimmed turn, kept for keyword retrieval (long-term memory).
 

@@ -148,6 +148,40 @@ class Settings(BaseSettings):
     # Runtime
     checkpoint_enabled: bool = False
     execution_timeout_seconds: int = 3600
+    # Celery: must exceed worst-case task runtime so unacked work is not redelivered early.
+    celery_visibility_timeout_seconds: int = 0  # 0 => execution_timeout + 600
+    # Mark RUNNING executions stale after this many seconds (reaper / reclaim).
+    execution_stale_running_seconds: int = 7200
+    # Flow subgraph: each flow may run multiple model+tool steps; 80 is
+    # above the historical 50 default to tolerate multi-tool flows
+    # without changing the small-model router contract.
+    graph_recursion_limit: int = 80
+    llm_request_timeout_seconds: int = 120
+    llm_request_max_retries: int = 2
+    guest_default_locale: str = "en"
+    # Guest channel: when reply_to_guest is missing after reprompt (locale templates).
+    guest_reply_generic_fallback: str = (
+        "We could not deliver a reply at this time. "
+        "Please try again or contact the front desk."
+    )
+    guest_reply_generic_fallback_vi: str = (
+        "Hiện chưa gửi được phản hồi. "
+        "Vui lòng thử lại hoặc liên hệ lễ tân để được hỗ trợ."
+    )
+    policy_unavailable_reply_template: str = (
+        "The requested policy information is not available in our documents. "
+        "Please contact the front desk for assistance."
+    )
+    policy_unavailable_reply_template_vi: str = (
+        "Chưa tìm thấy thông tin chính sách phù hợp trong tài liệu. "
+        "Vui lòng liên hệ lễ tân để được hỗ trợ."
+    )
+    guest_quote_booking_offer: str = (
+        "If you would like to book, let us know and we can proceed."
+    )
+    guest_quote_booking_offer_vi: str = (
+        "Nếu anh/chị muốn đặt phòng, vui lòng cho biết để chúng tôi hỗ trợ tiếp."
+    )
 
     # Batch ingest (Option B): files in a local inbox dir, or in the
     # MinIO ingest-inbox bucket when ingest_use_minio is true. Beat
@@ -175,6 +209,12 @@ class Settings(BaseSettings):
     def resolved_embedding_model_query(self) -> str:
         """Embedding model for query-time work (empty override = shared)."""
         return self.embedding_model_query or self.embedding_model
+
+    @property
+    def resolved_celery_visibility_timeout(self) -> int:
+        if self.celery_visibility_timeout_seconds > 0:
+            return self.celery_visibility_timeout_seconds
+        return self.execution_timeout_seconds + 600
 
 
 settings = Settings()

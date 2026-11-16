@@ -38,10 +38,11 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    try:
-        init_db()
-    except Exception as exc:  # DB down in dev — API still starts
-        logger.warning("init_db failed (DB may be unavailable): %s", exc)
+    if settings.database_url.startswith("sqlite"):
+        try:
+            init_db()
+        except Exception as exc:  # DB down in dev — API still starts
+            logger.warning("init_db failed (DB may be unavailable): %s", exc)
     if setup_langsmith():
         logger.info("LangSmith tracing enabled (project=%s)", settings.langsmith_project)
     else:

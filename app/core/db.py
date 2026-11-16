@@ -31,11 +31,20 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 
 
 def init_db() -> None:
-    """Create tables if they do not exist (dev/scaffold convenience).
+    """Schema is owned by Alembic — do not create tables on Postgres.
 
-    Production should use migrations instead of create_all.
+    SQLite-only convenience for local scripts/tests that are not
+    migrated; production and CI Postgres must run ``alembic upgrade head``.
     """
-    Base.metadata.create_all(bind=engine)
+    url = settings.database_url
+    if url.startswith("sqlite"):
+        Base.metadata.create_all(bind=engine)
+        return
+    import logging
+
+    logging.getLogger(__name__).debug(
+        "init_db skipped for non-SQLite URL (use Alembic migrations)"
+    )
 
 
 def get_session() -> Session:

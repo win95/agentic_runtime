@@ -44,13 +44,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import jwt
-import requests
 from sqlalchemy import inspect
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from _api import api_base, api_key  # noqa: E402  (loads .env at import)
+from _api import api_base, api_key, request, set_quiet  # noqa: E402
 from agent_config_check import Report  # noqa: E402
 
 from app.config import settings  # noqa: E402
@@ -106,8 +105,18 @@ def _user_headers(sub: str) -> dict:
 
 
 def _req(method: str, path: str, *, headers: dict | None = None, **kwargs):
-    return requests.request(
-        method, f"{_base()}{path}", headers=headers, timeout=TIMEOUT, **kwargs
+    json_body = kwargs.pop("json", None)
+    data = kwargs.pop("data", None)
+    files = kwargs.pop("files", None)
+    return request(
+        method,
+        path,
+        headers=headers,
+        base_url=_base(),
+        json_body=json_body,
+        data=data,
+        files=files,
+        timeout=TIMEOUT,
     )
 
 
@@ -145,7 +154,7 @@ def check_environment(report: Report, db) -> bool:
             f"{health.status_code} {health.text[:120]}",
         )
         ready = health.status_code == 200
-    except requests.RequestException as exc:
+    except Exception as exc:  # noqa: BLE001 — connection errors
         report.check(False, "API health is 200", f"unreachable: {exc}")
         ready = False
 
@@ -732,7 +741,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="keep the rows/objects/points this run creates")
     parser.add_argument("--documents-only", action="store_true")
     parser.add_argument("--ingest-only", action="store_true")
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="disable HTTP request/response logging (MANUAL_LOG=0)",
+    )
     args = parser.parse_args(argv)
+    if args.quiet:
+        set_quiet(True)
 
     report = Report()
     cleanup: dict = {

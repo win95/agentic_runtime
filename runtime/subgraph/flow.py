@@ -18,13 +18,10 @@ Direction C: one agent per FLOW, not per node.
   list order until a terminal node (inclusive) or a resume node
   (exclusive — a resume node starts its own flow, see below). Nodes
   the walk never reaches become single-node flows, so every map node
-  belongs to exactly one flow. For hotel_reception that gives 8 flows:
-  booking-quote (booking-dates, check-availability, quote-price,
-  confirm-booking), booking-create (create-booking, report-booking),
-  booking-payment (booking-payment, collect-payment, confirm-payment,
-  report-payment), task (task-details, find-staff, create-task,
-  assign-task, report-task), and the four single-node lookups
-  (policy-lookup, booking-lookup, booking-change, task-status).
+  belongs to exactly one flow. The reception map has 26 nodes and
+  derives 9 flows (quote, booking-dates, booking-payment, task,
+  quote-inquiry, policy-search, booking-lookup, booking-change,
+  task-status, plus resume-gated create-booking).
 - The router runs once per flow boundary, not once per node: a plain
   model call (the map's start node) declares ``FLOW: <flow-id>`` — or
   ``FLOW: END`` / ``FLOW: WAIT``. The choice set is 7-8 flow ids with
@@ -97,11 +94,29 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
+from runtime.context_budget import ROUTE_INSTRUCTION_TOKENS, estimate_tokens
 from runtime.deep_agent import MAX_INPUT_JSON_BYTES, build_deep_agent, outcome_from_messages
+from runtime.guest_locale import detect_guest_locale
+from runtime.guest_output import extract_flow_guest_reply, guest_reply_tool
+from runtime.guest_result import apply_guest_result_to_state
 from runtime.llm_factory import build_chat_model
+from runtime.observability_resilience import (
+    filter_observability_errors,
+    invoke_with_observability_fallback,
+)
+from runtime.session_write_pending import get_pending
+from runtime.write_pipeline_runner import (
+    CONFIRM_GUEST_BOOKING_TOOL_NAME,
+    capture_quote_tools,
+    make_confirm_guest_booking_tool,
+    mark_awaiting_confirm,
+    pipeline_for_write_node,
+    try_automated_write,
+)
 from runtime.security import wrap_data
 from runtime.skills.map_plan import SkillMap
 from runtime.subgraph.common import (
+    GuestReplyCompleteError,
     ToolCallBudgetExceededError,
     ToolCallCap,
     last_text,
@@ -127,6 +142,18 @@ MAX_FLOW_STEPS = 12
 # turn) create. 10 covers the observed paths with headroom; the
 # budget still bounds a looping agent.
 MAX_TOOL_CALLS_PER_FLOW = 10
+
+ROUTE_TOOL_NAME = "select_flow"
+ROUTE_REPROMPT = (
+    "Your route choice was missing or invalid. Call the select_flow "
+    "tool exactly once with a single flow_id from the allowed list "
+    "(END or WAIT only when appropriate). Do not guess a flow."
+)
+ROUTER_CLARIFICATION_REPLY = (
+    "I am not sure I understood your request yet. Could you tell me "
+    "whether you need help with a booking, payment, a lookup, or "
+    "something else?"
+)
 
 # The route node's declaration. Tolerant by design (the v4b root
 # cause): the first token after FLOW: is the choice — bold markers
@@ -333,6 +360,262 @@ def parse_flow(text: str | None) -> str | None:
     return match.group(1) if match else None
 
 
+def route_tool_spec(flow_ids: list[str]) -> dict:
+    """OpenAI-style tool schema for structured flow selection."""
+    enum = sorted(set(flow_ids)) + ["END", "WAIT"]
+    return {
+        "type": "function",
+        "function": {
+            "name": ROUTE_TOOL_NAME,
+            "description": (
+                "Pick exactly one flow to run next for this guest turn."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "flow_id": {
+                        "type": "string",
+                        "enum": enum,
+                        "description": (
+                            "One flow id from the catalog, END when "
+                            "nothing remains, or WAIT when more guest "
+                            "information is needed before routing."
+                        ),
+                    }
+                },
+                "required": ["flow_id"],
+            },
+        },
+    }
+
+
+def _allowed_route_ids(flow_ids: list[str]) -> frozenset[str]:
+    return frozenset(flow_ids) | {"END", "WAIT"}
+
+
+def eligible_flow_ids(flows: list[Flow], state: dict) -> list[str]:
+    """Flow ids the router may still enter this turn (excludes visited)."""
+    visited = set(state.get("visited") or [])
+    return [flow.id for flow in flows if flow.id not in visited]
+
+
+def append_unique_errors(errors: list[str], lines: list[str]) -> None:
+    """Extend ``errors`` with new lines, without duplicates."""
+    seen = set(errors)
+    for line in lines or []:
+        if line not in seen:
+            errors.append(line)
+            seen.add(line)
+
+
+def parse_route_tool_call(message, allowed: frozenset[str]) -> str | None:
+    """Flow id from a select_flow tool call, validated against ``allowed``."""
+    for call in getattr(message, "tool_calls", None) or []:
+        if isinstance(call, dict):
+            name = call.get("name")
+            args = call.get("args") or {}
+        else:
+            name = getattr(call, "name", None)
+            args = getattr(call, "args", None) or {}
+        if name != ROUTE_TOOL_NAME or not isinstance(args, dict):
+            continue
+        flow_id = args.get("flow_id")
+        if not isinstance(flow_id, str) or not flow_id.strip():
+            continue
+        choice = flow_id.strip()
+        if choice in allowed:
+            return choice
+    return None
+
+
+def parse_route_declaration(
+    message,
+    allowed: frozenset[str],
+    *,
+    reply_text: str | None = None,
+) -> str | None:
+    """Structured tool call first, then tolerant FLOW: text."""
+    from_tool = parse_route_tool_call(message, allowed)
+    if from_tool is not None:
+        return from_tool
+    text = reply_text
+    if text is None:
+        text = last_text([message])
+    declared = parse_flow(text)
+    if declared is None:
+        return None
+    return declared if declared in allowed else None
+
+
+def flow_summary_line(flow: Flow, when: str | None, *, desc_limit: int) -> str:
+    """One catalog line: id plus a single-line description from map data."""
+    desc = (when or "").strip()
+    if not desc and flow.nodes:
+        desc = (flow.nodes[0].goal or "").strip()
+    if desc:
+        desc = " ".join(desc.split())
+        if desc_limit > 0 and len(desc) > desc_limit:
+            desc = desc[: max(0, desc_limit - 3)] + "..."
+    if desc:
+        return f"- {flow.id}: {desc}"
+    return f"- {flow.id}"
+
+
+def build_compact_flow_catalog(
+    flows: list[Flow],
+    when_by_entry: dict[str, str],
+    max_tokens: int,
+) -> str:
+    """Flow list compiled from the skill map, trimmed to ``max_tokens``."""
+    if max_tokens < 1:
+        return ""
+    for desc_limit in (160, 120, 80, 48, 24, 0):
+        lines = [
+            flow_summary_line(
+                flow,
+                when_by_entry.get(flow.id),
+                desc_limit=desc_limit,
+            )
+            for flow in flows
+        ]
+        text = "\n".join(lines)
+        if estimate_tokens(text) <= max_tokens:
+            return text
+    lines = [f"- {flow.id}" for flow in flows]
+    while len(lines) > 1 and estimate_tokens("\n".join(lines)) > max_tokens:
+        lines.pop()
+    return "\n".join(lines)
+
+
+def build_route_instruction(
+    state: dict,
+    flows: list[Flow],
+    when_by_entry: dict[str, str],
+    *,
+    max_tokens: int = ROUTE_INSTRUCTION_TOKENS,
+) -> str:
+    """Human prompt for the route model (catalog budget enforced)."""
+    input_json = json.dumps(state.get("input_data") or {}, ensure_ascii=False)[
+        :MAX_INPUT_JSON_BYTES
+    ]
+    prefix = [
+        "Route the guest's request to ONE flow. Read the conversation: "
+        "what flows already did this turn is in their replies — route "
+        "only what is still unhandled.",
+        f"Execution input:\n{wrap_data('execution_input', input_json)}",
+    ]
+    history_block = state.get("history_block") or ""
+    if history_block:
+        prefix.append(f"Session history (prior turns):\n{history_block}")
+    visited = state.get("visited") or []
+    suffix = [
+        "Already visited this turn: "
+        + (", ".join(visited) if visited else "none")
+        + " — do not pick a visited flow again.",
+        (
+            "Call the select_flow tool once with your single choice "
+            "(a flow id, END, or WAIT). "
+            "Backward compatibility: you may instead end with one line "
+            "FLOW: <id> or FLOW: END or FLOW: WAIT."
+        ),
+    ]
+    fixed = "\n\n".join(prefix + ["Flows (choose one):\n{CATALOG}", *suffix])
+    catalog_when = dict(when_by_entry)
+    for flow in flows:
+        if flow.id not in catalog_when and flow.resume_gated:
+            catalog_when[flow.id] = (
+                "the guest confirmed a booking in a previous turn "
+                "(only when the session has prior turns)"
+            )
+    catalog_budget = max(48, max_tokens - estimate_tokens(fixed.replace("{CATALOG}", "")))
+    catalog = build_compact_flow_catalog(flows, catalog_when, catalog_budget)
+    return fixed.replace("{CATALOG}", catalog)
+
+
+def route_instruction_token_count(
+    state: dict,
+    flows: list[Flow],
+    when_by_entry: dict[str, str],
+    *,
+    max_tokens: int = ROUTE_INSTRUCTION_TOKENS,
+) -> int:
+    return estimate_tokens(
+        build_route_instruction(state, flows, when_by_entry, max_tokens=max_tokens)
+    )
+
+
+def classify_route_choice(
+    declared: str | None,
+    state: dict,
+    by_id: dict[str, Flow],
+    *,
+    max_steps: int,
+    steps: int,
+    at_route: bool,
+    reply_text: str = "",
+) -> tuple[str | None, list[str], bool]:
+    """Validate a route declaration.
+
+    Returns ``(route_next, failure_reasons, ok)``. ``failure_reasons`` is
+    empty when ``ok``; callers record them only after a reprompt fails.
+    """
+    if at_route and steps >= max_steps:
+        return (
+            "END",
+            [f"Plan step cap ({max_steps} nodes) reached at 'route'"],
+            False,
+        )
+
+    if declared is None:
+        if _is_ambiguous_flow_declaration(reply_text):
+            return (
+                None,
+                [
+                    "Router declared an ambiguous flow (more than "
+                    "one FLOW: line, or 'or FLOW:'); ending turn"
+                ],
+                False,
+            )
+        return (
+            None,
+            ["Router declared no flow (no FLOW: line); ending turn"],
+            False,
+        )
+
+    if declared in ("END", "WAIT"):
+        return "END", [], True
+
+    if declared not in by_id:
+        return (
+            None,
+            [f"Router declared unknown flow '{declared}'; ending turn"],
+            False,
+        )
+
+    if declared in (state.get("visited") or []):
+        return (
+            None,
+            [
+                f"Router declared flow '{declared}' already visited "
+                "this turn; ending turn"
+            ],
+            False,
+        )
+
+    if by_id[declared].resume_gated:
+        session_turns = len((state.get("session_history") or {}).get("turns") or [])
+        if session_turns == 0:
+            return (
+                None,
+                [
+                    f"Router declared resume-gated flow '{declared}' "
+                    "on a fresh turn; ending turn"
+                ],
+                False,
+            )
+    return declared, [], True
+
+
 def use_flow_subgraph(mission_id: str | None, mapped_skills) -> bool:
     """True when the mission is a flow pilot and has a mapped skill."""
     return mission_id in FLOW_PILOT_MISSIONS and bool(mapped_skills)
@@ -415,11 +698,13 @@ class FlowState(TypedDict, total=False):
     errors: list[str]
     input_data: dict
     session_history: dict
+    session_id: str
     history_block: str
     answer: str
     flow_messages: list
     flow_trace: list[dict]
     flow_answers: list[str]
+    execution_id: str
 
 
 def build_flow_subgraph(
@@ -437,6 +722,7 @@ def build_flow_subgraph(
     resume_nodes: frozenset[str] | None = None,
     prior_successful_tools: frozenset[str] = frozenset(),
     flow_executor=None,
+    route_invoker=None,
     max_steps: int = MAX_FLOW_STEPS,
     max_tool_calls_per_flow: int = MAX_TOOL_CALLS_PER_FLOW,
 ):
@@ -456,19 +742,39 @@ def build_flow_subgraph(
     ``flow_executor`` is a test seam: ``executor(flow, state,
     messages)`` returning the new message list, replacing the real
     Deep Agent call. Production passes None.
+
+    ``route_invoker`` is a test seam: ``(messages, tool_spec, config)
+    -> AIMessage``, replacing the bound route model call.
     """
     flows = derive_flows(skill_map, resume_nodes=resume_nodes)
+    pipelines = list(skill_map.pipelines or [])
     by_id = {flow.id: flow for flow in flows}
+    tools_by_name = {getattr(t, "name", ""): t for t in tools}
+    route_base_model: object | None = None
     start = skill_map.node_by_id(skill_map.start)
     when_by_entry = {b.goto: b.when for b in (start.branches if start else [])}
     agent_cache: dict[str, object] = {}
     model_cache: dict[str, object] = {}
     cap_cache: dict[str, ToolCallCap] = {}
 
-    def flow_agent(flow: Flow):
-        if flow.id not in agent_cache:
-            flow_tools = tools_for_node(tools, flow.tools)
-            tool_names = ", ".join(flow.tools) or "none"
+    def flow_agent(flow: Flow, session_id: str = ""):
+        need_session_confirm = any(
+            pipe.confirm_node in {n.id for n in flow.nodes} for pipe in pipelines
+        )
+        cache_key = (flow.id, session_id) if need_session_confirm else flow.id
+        if cache_key not in agent_cache:
+            node_tools = list(flow.tools)
+            write_pipe = pipeline_for_write_node(pipelines, flow.id)
+            if write_pipe and write_pipe.write_tool in node_tools:
+                node_tools = [t for t in node_tools if t != write_pipe.write_tool]
+            flow_tools = [guest_reply_tool(), *tools_for_node(tools, node_tools)]
+            for pipe in pipelines:
+                if pipe.confirm_node in {n.id for n in flow.nodes}:
+                    if session_id:
+                        flow_tools.append(
+                            make_confirm_guest_booking_tool(session_id, pipe.id)
+                        )
+            tool_names = ", ".join([*(flow.tools or []), "reply_to_guest"]) or "reply_to_guest"
             steps = "\n".join(
                 f"{i + 1}. {node.id}: {node.goal}"
                 + (
@@ -497,70 +803,71 @@ def build_flow_subgraph(
                 prior_successful_tools=prior_successful_tools,
             )
             cap_cache[flow.id] = cap
-            agent_cache[flow.id] = build_deep_agent(
+            agent_cache[cache_key] = build_deep_agent(
                 flow_tools,
                 system_prompt=(
                     f"{system_prompt}\n\nYou are executing ONE flow of a "
                     f"plan: flow '{flow.id}'. Work through these steps in "
                     f"order, skipping any that do not apply to this "
                     f"request:\n{steps}{extra}\n\nYou have ONLY these "
-                    f"tools: {tool_names}. Do not call any other tool. "
-                    f"Call the tools for a step as needed, then answer "
-                    f"the guest in your reply. If you need information "
-                    f"from the guest, ask in your reply and stop — your "
-                    f"reply ends this flow's turn."
+                    f"tools: {tool_names}, reply_to_guest. Do not call any "
+                    f"other tool. Call the tools for a step as needed. "
+                    f"When ready, call reply_to_guest with the message for "
+                    f"the guest in the guest's language (do not rely on "
+                    f"free text alone). If you need information from the "
+                    f"guest, ask via reply_to_guest and stop — that ends "
+                    f"this flow's turn."
                 ),
                 skills=skills,
                 model_config=model_config,
                 middleware=[cap, *(middleware or [])],
                 backend=backend,
             )
-        return agent_cache[flow.id]
+        return agent_cache[cache_key]
 
-    def route_model():
-        if "model" not in model_cache:
-            model_cache["model"] = build_chat_model(model_config)
-        return model_cache["model"]
+    def _route_tool_and_allowed(state: dict) -> tuple[dict, frozenset[str]]:
+        eligible = eligible_flow_ids(flows, state)
+        return route_tool_spec(eligible), _allowed_route_ids(eligible)
 
-    def route_instruction(state: dict) -> str:
-        input_json = json.dumps(state.get("input_data") or {}, ensure_ascii=False)[
-            :MAX_INPUT_JSON_BYTES
-        ]
-        parts = [
-            "Route the guest's request to ONE flow. Read the "
-            "conversation: what the flows already did this turn is in "
-            "their replies — route only what is still unhandled.",
-            f"Execution input:\n{wrap_data('execution_input', input_json)}",
-        ]
-        history_block = state.get("history_block") or ""
-        if history_block:
-            parts.append(f"Session history (prior turns):\n{history_block}")
-        choices = []
-        for flow in flows:
-            when = when_by_entry.get(flow.id)
-            if when is None and flow.resume_gated:
-                when = (
-                    "the guest confirmed a booking in a previous turn "
-                    "(only when the session has prior turns)"
-                )
-            choices.append(f"- {flow.id} ({when})" if when else f"- {flow.id}")
-        parts.append("Flows (choose one):\n" + "\n".join(choices))
-        visited = state.get("visited") or []
-        parts.append(
-            "Already visited this turn: "
-            + (", ".join(visited) if visited else "none")
-            + " — do not pick a visited flow again."
+    def _invoke_route(
+        messages: list,
+        config: dict,
+        *,
+        route_tool: dict,
+    ) -> AIMessage:
+        if route_invoker is not None:
+            return route_invoker(messages, route_tool, config)
+        nonlocal route_base_model
+        if route_base_model is None:
+            route_base_model = build_chat_model(model_config)
+        bound = route_base_model.bind_tools(
+            [route_tool],
+            tool_choice=ROUTE_TOOL_NAME,
         )
-        parts.append(
-            "Finish with exactly one final line that names your single "
-            "choice. Write the word FLOW, a colon and a space, then your "
-            "choice: one flow id from the list above, or the word END when "
-            "nothing remains to do, or the word WAIT when you need more "
-            "information from the guest before routing. Put that line once "
-            "at the very end — never repeat this format and never offer "
-            "two choices."
+        if config:
+            reply = bound.invoke(messages, config=config)
+        else:
+            reply = bound.invoke(messages)
+        if not isinstance(reply, AIMessage):
+            reply = AIMessage(content=last_text([reply]))
+        return reply
+
+    def _route_attempt(messages: list, config: dict, state: dict, steps: int):
+        route_tool, allowed_ids = _route_tool_and_allowed(state)
+        reply = _invoke_route(messages, config, route_tool=route_tool)
+        new_messages = messages + [reply]
+        reply_text = last_text(new_messages)
+        declared = parse_route_declaration(reply, allowed_ids, reply_text=reply_text)
+        route_next, reasons, ok = classify_route_choice(
+            declared,
+            state,
+            by_id,
+            max_steps=max_steps,
+            steps=steps,
+            at_route=True,
+            reply_text=reply_text,
         )
-        return "\n\n".join(parts)
+        return reply, new_messages, declared, route_next, reasons, ok
 
     def flow_instruction(state: dict, flow: Flow) -> str:
         input_json = json.dumps(state.get("input_data") or {}, ensure_ascii=False)[
@@ -588,53 +895,37 @@ def build_flow_subgraph(
     def make_route_fn():
         def _run_route(state: dict) -> dict:
             steps = int(state.get("steps") or 0) + 1
+            eligible_ids = set(eligible_flow_ids(flows, state))
+            route_flows = [f for f in flows if f.id in eligible_ids]
             messages = list(state.get("messages") or []) + [
-                HumanMessage(content=route_instruction(state))
+                HumanMessage(
+                    content=build_route_instruction(
+                        state, route_flows, when_by_entry
+                    )
+                )
             ]
             config = _config()
-            model = route_model()
-            reply = model.invoke(messages, config=config) if config else model.invoke(messages)
-            new_messages = messages + [reply]
-            reply_text = last_text(new_messages)
-            declared = parse_flow(reply_text)
             errors = list(state.get("errors") or [])
-            # The router decides here; the edge function only reads
-            # route_next. Every invalid case ends the turn with an
-            # error recorded — there is no "next in order" fallback:
-            # in a flat list of independent flows there is no
-            # meaningful next, and a silent walk is how a failed
-            # report-booking created a task the guest never asked for.
-            route_next: str | None = None
-            if declared is None:
-                if _is_ambiguous_flow_declaration(reply_text):
-                    errors.append(
-                        "Router declared an ambiguous flow (more than "
-                        "one FLOW: line, or 'or FLOW:'); ending turn"
-                    )
+            answer = state.get("answer") or ""
+            _, new_messages, declared, route_next, reasons, ok = _route_attempt(
+                messages, config, state, steps
+            )
+            if not ok:
+                if reasons and reasons[0].startswith("Plan step cap"):
+                    append_unique_errors(errors, reasons)
+                    route_next = "END"
                 else:
-                    errors.append("Router declared no flow (no FLOW: line); ending turn")
-            elif declared in ("END", "WAIT"):
-                route_next = "END"
-            elif declared not in by_id:
-                errors.append(f"Router declared unknown flow '{declared}'; ending turn")
-            elif declared in (state.get("visited") or []):
-                errors.append(
-                    f"Router declared flow '{declared}' already visited this turn; ending turn"
-                )
-            elif by_id[declared].resume_gated:
-                session_turns = len((state.get("session_history") or {}).get("turns") or [])
-                if session_turns == 0:
-                    errors.append(
-                        f"Router declared resume-gated flow '{declared}' "
-                        "on a fresh turn; ending turn"
+                    reprompt_messages = new_messages + [
+                        HumanMessage(content=ROUTE_REPROMPT)
+                    ]
+                    _, new_messages, declared, route_next, reasons2, ok2 = _route_attempt(
+                        reprompt_messages, config, state, steps
                     )
-                else:
-                    route_next = declared
-            else:
-                route_next = declared
-            if steps >= max_steps:
-                errors.append(f"Plan step cap ({max_steps} nodes) reached at 'route'")
-                route_next = "END"
+                    if not ok2:
+                        append_unique_errors(errors, reasons2)
+                        route_next = "END"
+                        if not answer:
+                            answer = ROUTER_CLARIFICATION_REPLY
             return {
                 "messages": new_messages,
                 "current": "route",
@@ -643,6 +934,7 @@ def build_flow_subgraph(
                 "route_next": route_next,
                 "steps": steps,
                 "errors": errors,
+                "answer": answer,
             }
 
         return _run_route
@@ -673,41 +965,130 @@ def build_flow_subgraph(
                     )
                 )
             isolated.append(instruction)
+            context_blobs = [
+                isolated[0].content if isolated else "",
+                instruction.content,
+            ]
             config = _config()
             errors = list(state.get("errors") or [])
+            session_id = state.get("session_id") or ""
+            session_turns = len((state.get("session_history") or {}).get("turns") or [])
+            auto_pipe = pipeline_for_write_node(pipelines, flow.id)
+            if auto_pipe and session_id:
+                auto_answer, auto_errs, _raw = try_automated_write(
+                    auto_pipe,
+                    session_id=session_id,
+                    execution_id=state.get("execution_id") or "",
+                    tools_by_name=tools_by_name,
+                    session_turns=session_turns,
+                )
+                if auto_answer or auto_errs:
+                    append_unique_errors(errors, auto_errs)
+                    return {
+                        "messages": history + [instruction],
+                        "current": flow.id,
+                        "visited": list(state.get("visited") or []) + [flow.id],
+                        "declared_flow": None,
+                        "route_next": None,
+                        "steps": steps,
+                        "errors": errors,
+                        "answer": auto_answer or state.get("answer") or "",
+                        "flow_messages": list(state.get("flow_messages") or []),
+                        "flow_trace": list(state.get("flow_trace") or [])
+                        + [
+                            {
+                                "flow": flow.id,
+                                "steps_completed": ["automated_write"],
+                                "steps_missing": [],
+                            }
+                        ],
+                        "flow_answers": prior_answers
+                        + ([auto_answer] if auto_answer else []),
+                    }
             if flow_executor is not None:
                 new_messages = flow_executor(flow, state, isolated)
             else:
-                agent = flow_agent(flow)
+                agent = flow_agent(flow, session_id=session_id)
                 cap_cache[flow.id].reset()
                 payload: dict = {"messages": isolated}
                 if files:
                     payload["files"] = files
+                cap = cap_cache[flow.id]
                 try:
                     if config:
-                        result = agent.invoke(payload, config=config)
-                    else:
-                        result = agent.invoke(payload)
-                    new_messages = result.get("messages") or []
-                except ToolCallBudgetExceededError as exc:
-                    # The flow agent spent its tool-call budget: stop
-                    # the flow here instead of letting the model burn
-                    # the recursion limit on further calls. The
-                    # diagnostic is an error, not the guest's answer.
-                    errors.append(
-                        f"Tool-call budget ({max_tool_calls_per_flow} calls) "
-                        f"exceeded at flow '{flow.id}': {exc}"
-                    )
-                    new_messages = isolated + [
-                        AIMessage(
-                            content=(
-                                f"Flow '{flow.id}' stopped: the tool-call "
-                                f"budget for this flow is exhausted."
-                            )
+                        result = invoke_with_observability_fallback(
+                            agent.invoke, payload, config=config
                         )
-                    ]
+                    else:
+                        result = invoke_with_observability_fallback(
+                            agent.invoke, payload
+                        )
+                    new_messages = result.get("messages") or []
+                except GuestReplyCompleteError:
+                    new_messages = isolated
+                except ToolCallBudgetExceededError as exc:
+                    if cap.guest_reply_message:
+                        new_messages = isolated
+                        logger.info(
+                            "Flow %s: ignoring tool budget tail after guest reply",
+                            flow.id,
+                        )
+                    else:
+                        errors.append(
+                            f"Tool-call budget ({max_tool_calls_per_flow} calls) "
+                            f"exceeded at flow '{flow.id}': {exc}"
+                        )
+                        new_messages = isolated + [
+                            AIMessage(
+                                content=(
+                                    f"Flow '{flow.id}' stopped: the tool-call "
+                                    f"budget for this flow is exhausted."
+                                )
+                            )
+                        ]
             added = new_messages[len(isolated) :] if len(new_messages) >= len(isolated) else []
-            answer = _flow_answer(added)
+            reply_messages = (
+                new_messages[len(isolated) :]
+                if len(new_messages) > len(isolated)
+                else added
+            )
+            cap = cap_cache.get(flow.id)
+            if cap is not None and cap.guest_reply_message:
+                reply_messages = added + [
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "id": "guest-reply-cap",
+                                "name": "reply_to_guest",
+                                "args": {"message": cap.guest_reply_message},
+                            }
+                        ],
+                    )
+                ]
+
+            answer, _guard_notes = extract_flow_guest_reply(
+                reply_messages,
+                context_blobs=context_blobs,
+                session_id=state.get("session_id") or "",
+                input_data=state.get("input_data") or {},
+                tools_by_name=tools_by_name,
+                reprompt_invoke=None,
+            )
+            for note in _guard_notes:
+                logger.info("Flow %s guest-output guard: %s", flow.id, note)
+            if session_id:
+                flow_tool_set = set(flow.tools or [])
+                flow_node_ids = {n.id for n in flow.nodes}
+                for pipe in pipelines:
+                    if set(pipe.quote_tools) & flow_tool_set:
+                        capture_quote_tools(session_id, pipe, new_messages)
+                    pending_payload = (get_pending(session_id, pipe.id) or {}).get(
+                        "payload"
+                    ) or {}
+                    quoted = set((pending_payload.get("tools") or {}).keys())
+                    if quoted >= set(pipe.quote_tools) and pipe.quote_tools:
+                        mark_awaiting_confirm(session_id, pipe)
             if steps >= max_steps:
                 errors.append(f"Plan step cap ({max_steps} nodes) reached at flow '{flow.id}'")
             return {
@@ -757,10 +1138,12 @@ def run_flow_subgraph(
     input_data: dict,
     session_history: dict | None = None,
     history_block: str = "",
-    callbacks=None,
+    callbacks=None,  # noqa: ARG001 — forwarded via invoke config below
     skill_maps: list[SkillMap] | None = None,
     trace_metadata: dict | None = None,
     trace_tags: list[str] | None = None,
+    session_id: str | None = None,
+    execution_id: str | None = None,
 ) -> dict:
     """Invoke a compiled flow subgraph for one mission input.
 
@@ -789,6 +1172,8 @@ def run_flow_subgraph(
         "errors": [],
         "input_data": input_data,
         "session_history": session_history or {},
+        "session_id": session_id or "",
+        "execution_id": execution_id or "",
         "history_block": history_block,
         "answer": "",
         "flow_messages": [],
@@ -802,7 +1187,9 @@ def run_flow_subgraph(
         config["metadata"] = trace_metadata
     if trace_tags:
         config["tags"] = trace_tags
-    result = compiled.invoke(initial, config=config) if config else compiled.invoke(initial)
+    result = invoke_with_observability_fallback(
+        compiled.invoke, initial, config=config if config else None
+    )
     flow_messages = result.get("flow_messages") or []
     outcome = outcome_from_messages(flow_messages, skill_maps=skill_maps)
     # The answer channel, not the message list: the summary is the
@@ -811,6 +1198,14 @@ def run_flow_subgraph(
     answer = (result.get("answer") or "").strip()
     if answer:
         outcome["summary"] = answer
+        outcome["evidence"] = [
+            {
+                "source": "guest",
+                "kind": "guest_reply",
+                "summary": answer,
+                "stub": False,
+            }
+        ]
     else:
         # No flow produced a guest-facing reply: never fall back to
         # the raw message list — a flow agent's reply can be a bare
@@ -823,7 +1218,29 @@ def run_flow_subgraph(
     # flows with tool calls, so the path is reported separately.
     outcome["visited_nodes"] = list(result.get("visited") or [])
     outcome["flow_trace"] = list(result.get("flow_trace") or [])
-    graph_errors = list(result.get("errors") or [])
+    graph_errors = filter_observability_errors(list(result.get("errors") or []))
+    if not answer:
+        visited = list(result.get("visited") or [])
+        if not visited:
+            graph_errors.append("Turn ended without executing any flow")
+        elif not graph_errors:
+            graph_errors.append(
+                "Turn completed flows but produced no guest-facing reply"
+            )
     if graph_errors:
-        outcome["errors"] = graph_errors + outcome["errors"]
+        merged = graph_errors + list(outcome.get("errors") or [])
+        deduped: list[str] = []
+        append_unique_errors(deduped, merged)
+        outcome["errors"] = deduped
+    guest_input = input_data or {}
+    if guest_input.get("channel") == "guest_api":
+        result_payload = {**outcome, "answer": answer}
+        new_result, new_evidence = apply_guest_result_to_state(
+            result_payload,
+            outcome.get("evidence") or [],
+            execution_input=guest_input,
+            session_id=session_id,
+        )
+        outcome.update(new_result)
+        outcome["evidence"] = new_evidence
     return outcome

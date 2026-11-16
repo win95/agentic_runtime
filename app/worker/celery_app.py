@@ -23,12 +23,15 @@ celery_app = Celery(
     include=["app.worker.tasks"],
 )
 
+_visibility = settings.resolved_celery_visibility_timeout
 celery_app.conf.update(
     task_acks_late=True,
     worker_prefetch_multiplier=1,
     task_time_limit=settings.execution_timeout_seconds + 300,
     task_soft_time_limit=settings.execution_timeout_seconds,
     result_expires=86400,
+    broker_transport_options={"visibility_timeout": _visibility},
+    redis_backend_transport_options={"visibility_timeout": _visibility},
     # Beat: every 60s dispatch executions for due schedules (see
     # app.worker.tasks.run_due_schedules). The schedule lives in code;
     # beat's local state file only remembers last-run times, and losing
@@ -55,6 +58,10 @@ celery_app.conf.update(
         "sandbox-reap-idle": {
             "task": "app.worker.tasks.reap_idle_sandboxes",
             "schedule": float(settings.sandbox_idle_ttl_seconds),
+        },
+        "reap-stale-executions": {
+            "task": "app.worker.tasks.reap_stale_executions",
+            "schedule": 300.0,
         },
     },
 )

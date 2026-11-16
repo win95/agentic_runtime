@@ -77,10 +77,7 @@ def approve(
     row = permission_service.get_request(db, request_id)
     if row is None:
         raise HTTPException(status_code=404, detail="Permission request not found")
-    approved = permission_service.approve_request(
-        db, request_id, note=payload.note if payload else None
-    )
-    if approved is None:
+    if row.status != "pending":
         raise HTTPException(status_code=409, detail="Permission request is not pending")
     execution = (
         execution_service.get_execution(db, row.execution_id)
@@ -90,8 +87,7 @@ def approve(
     if execution is None:
         raise HTTPException(
             status_code=422,
-            detail="Original execution not found; approval stands, "
-            "re-dispatch manually within the window",
+            detail="Original execution not found; cannot re-dispatch",
         )
     try:
         new_execution, problems = execution_service.create_execution(
@@ -108,8 +104,17 @@ def approve(
     if new_execution is None:
         raise HTTPException(
             status_code=422,
-            detail=f"Re-dispatch failed: {problems}; approval stands, "
-            "re-dispatch manually within the window",
+            detail=f"Re-dispatch failed: {problems}; approve again after fixing",
+        )
+    approved = permission_service.approve_request(
+        db, request_id, note=payload.note if payload else None
+    )
+    if approved is None:
+        execution_service.cancel_execution(db, new_execution.id)
+        raise HTTPException(
+            status_code=409,
+            detail="Permission request is no longer pending; "
+            "re-dispatched run was cancelled",
         )
     return _to_read(approved, redispatched_execution_id=new_execution.id)
 

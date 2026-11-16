@@ -188,7 +188,7 @@ def load_session_history(
     # history window.
     prior_actions: list[str] = []
     seen_actions: set[str] = set()
-    for _, result in pairs:
+    for execution, result in pairs:
         output = (result.output or {}) if result is not None else {}
         for name in output.get("actions_taken") or []:
             if isinstance(name, str) and name and name not in seen_actions:

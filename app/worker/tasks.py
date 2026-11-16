@@ -38,13 +38,46 @@ def run_execution(self, execution_id: str) -> dict:
         if execution.status == "CANCELLED":
             logger.info("Execution %s was cancelled before start", execution_id)
             return {"execution_id": execution_id, "status": "CANCELLED"}
-        if execution.status not in ("QUEUED", "RUNNING", "FAILED"):
-            # Already finished (SUCCEEDED) — idempotent no-op.
+        if execution.status in ("SUCCEEDED", "CANCELLED"):
             return {"execution_id": execution_id, "status": execution.status}
 
-        execution.status = "RUNNING"
-        execution.started_at = datetime.now(timezone.utc).replace(tzinfo=None)
-        db.commit()
+        from app.services import execution_service as exec_svc
+
+        if execution.status == "RUNNING":
+            if not exec_svc.execution_is_stale(execution):
+                logger.info(
+                    "Execution %s already RUNNING (another worker); skipping",
+                    execution_id,
+                )
+                return {"execution_id": execution_id, "status": "RUNNING"}
+            execution.status = "QUEUED"
+            execution.error = "stale RUNNING — reclaiming for retry"
+            execution.started_at = None
+            execution.finished_at = None
+            execution.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            db.commit()
+            execution = db.get(models.Execution, execution_id)
+            if execution is None:
+                return {"execution_id": execution_id, "status": "FAILED"}
+
+        if execution.status == "FAILED" and execution.error and "reclaiming" in (
+            execution.error or ""
+        ):
+            execution.status = "QUEUED"
+            execution.started_at = None
+            execution.finished_at = None
+            execution.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
+            db.commit()
+            execution = db.get(models.Execution, execution_id)
+
+        claimed = exec_svc.try_claim_execution(db, execution_id)
+        if claimed is None:
+            db.refresh(execution)
+            if execution.status in ("SUCCEEDED", "CANCELLED", "RUNNING"):
+                return {"execution_id": execution_id, "status": execution.status}
+            logger.error("Execution %s could not be claimed", execution_id)
+            return {"execution_id": execution_id, "status": execution.status}
+        execution = claimed
 
         mission = db.get(models.Mission, execution.mission_id)
         if mission is None:
@@ -196,6 +229,21 @@ def run_execution(self, execution_id: str) -> dict:
                 self.max_retries,
                 exc,
             )
+            try:
+                execution = db.get(models.Execution, execution_id)
+                if (
+                    execution is not None
+                    and execution.status not in ("CANCELLED", "SUCCEEDED")
+                ):
+                    execution.status = "QUEUED"
+                    execution.started_at = None
+                    execution.finished_at = None
+                    execution.updated_at = datetime.now(timezone.utc).replace(
+                        tzinfo=None
+                    )
+                    db.commit()
+            except Exception:  # noqa: BLE001 — retry must still be raised
+                db.rollback()
             raise self.retry(exc=exc, countdown=60) from exc
         # Retries exhausted — persist FAILED.
         try:
@@ -333,5 +381,17 @@ def reap_idle_sandboxes() -> dict:
         if result["failed"]:
             logger.warning("Sandbox reap failed for: %s", result["failed"])
         return result
+    finally:
+        db.close()
+
+
+@celery_app.task(name="app.worker.tasks.reap_stale_executions", max_retries=0)
+def reap_stale_executions() -> dict:
+    """Beat task: fail executions stuck in RUNNING beyond the stale threshold."""
+    from app.services import execution_service
+
+    db = SessionLocal()
+    try:
+        return execution_service.reap_stale_running_executions(db)
     finally:
         db.close()

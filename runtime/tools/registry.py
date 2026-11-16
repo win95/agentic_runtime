@@ -247,6 +247,18 @@ def _guest_scoped_tool(tool, session_id: str, mission_id: str = ""):
         scope_unknown = bound is SCOPE_UNKNOWN
         if scope_unknown:
             bound = None
+        from runtime.tool_preconditions import guest_read_tool_names
+
+        if scope_unknown:
+            entry = registry.get(name)
+            read_ok = name in guest_read_tool_names() or (
+                entry is not None and entry.read_only
+            )
+            if not read_ok:
+                return _refusal(
+                    "could not verify this session's guest scope; "
+                    f"{name} refused"
+                )
         if name == "find_guest":
             result = tool.invoke(kwargs)
             if not isinstance(result, dict) or result.get("error"):

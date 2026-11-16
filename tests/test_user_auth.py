@@ -21,15 +21,15 @@ from app.services import execution_service
 SECRET = "test-secret"
 
 MISSION_PAYLOAD = {
-    "id": "fault_analysis",
-    "name": "Fault Analysis",
+    "id": "hotel_reception",
+    "name": "Hotel reception",
     "version": 1,
-    "objective": "Analyze equipment faults and identify root causes.",
+    "objective": "Assist hotel guests.",
     "input_schema": {"type": "object"},
     "output_schema": {"type": "object"},
-    "execution_config": {"mode": "hybrid", "agent_id": "fault_investigator"},
-    "capabilities": ["fault_history"],
-    "agent_id": "fault_investigator",
+    "execution_config": {"mode": "hybrid", "agent_id": "hotel_receptionist"},
+    "capabilities": [],
+    "agent_id": "hotel_receptionist",
 }
 
 

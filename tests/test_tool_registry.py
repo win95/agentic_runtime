@@ -23,6 +23,8 @@ EXPECTED_TOOLS = {
     "delete_mission",
     "dispatch_execution",
     "cancel_execution",
+    "reply_to_guest",
+    "confirm_guest_booking",
 }
 
 FAULT_CONTEXT = {

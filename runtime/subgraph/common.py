@@ -17,6 +17,7 @@ import logging
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import ToolMessage
 
+from runtime.guest_output import GUEST_REPLY_TOOL_NAME
 from runtime.skills.map_plan import SkillMap
 
 logger = logging.getLogger(__name__)
@@ -35,6 +36,14 @@ DEFAULT_TOOL_CALL_BUDGET = 5
 
 class ToolCallBudgetExceededError(Exception):
     """An agent spent its per-execution tool-call budget."""
+
+
+class GuestReplyCompleteError(Exception):
+    """The guest channel tool succeeded; the flow agent must stop."""
+
+    def __init__(self, message: str = ""):
+        self.guest_message = (message or "").strip()
+        super().__init__(self.guest_message or "guest reply delivered")
 
 
 def _call_key(name: str, args: dict) -> tuple[str, str]:
@@ -125,21 +134,27 @@ class ToolCallCap(AgentMiddleware):
         self.calls = 0
         self.exceeded = False
         self._failed: dict[tuple[str, str], str] = {}
+        self._success_snippet: dict[tuple[str, str], str] = {}
         self._succeeded: set[str] = set(self._prior)
+        self.guest_reply_message: str | None = None
 
     def reset(self) -> None:
         self.calls = 0
         self.exceeded = False
         self._failed = {}
+        self._success_snippet = {}
         # Prior-turn successes survive the reset: they are session
         # facts, not per-execution state.
         self._succeeded = set(self._prior)
+        self.guest_reply_message = None
 
     def wrap_tool_call(self, request, handler):
         tool_call = request.tool_call or {}
         name = str(tool_call.get("name") or "")
         args = dict(tool_call.get("args") or {})
         tool_call_id = str(tool_call.get("id") or "")
+        if GUEST_REPLY_TOOL_NAME in self._succeeded:
+            raise GuestReplyCompleteError(self.guest_reply_message or "")
         self.calls += 1
         if self.calls > self.max_calls:
             self.exceeded = True
@@ -154,6 +169,17 @@ class ToolCallCap(AgentMiddleware):
                     f"and it failed ({self._failed[key]}). Do not repeat it — "
                     f"call a different tool, use different arguments, or ask "
                     f"the guest for the missing information first."
+                ),
+                tool_call_id=tool_call_id,
+                status="error",
+            )
+        if key in self._success_snippet:
+            return ToolMessage(
+                content=(
+                    f"You already called '{name}' with these exact arguments "
+                    f"successfully in this flow. Use that prior result and "
+                    f"conclude your guest reply — do not call it again.\n"
+                    f"Prior result: {self._success_snippet[key]}"
                 ),
                 tool_call_id=tool_call_id,
                 status="error",
@@ -176,6 +202,18 @@ class ToolCallCap(AgentMiddleware):
             self._failed[key] = error
         else:
             self._succeeded.add(name)
+            snippet = ""
+            content = getattr(result, "content", result)
+            if isinstance(content, str):
+                snippet = content
+            elif isinstance(content, dict):
+                snippet = json.dumps(content, ensure_ascii=False, default=str)
+            self._success_snippet[key] = str(snippet)[:1500]
+            if name == GUEST_REPLY_TOOL_NAME:
+                msg = args.get("message")
+                if isinstance(msg, str) and msg.strip():
+                    self.guest_reply_message = msg.strip()
+                raise GuestReplyCompleteError(self.guest_reply_message or "")
         return result
 
 

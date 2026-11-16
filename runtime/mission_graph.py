@@ -27,6 +27,11 @@ from langgraph.graph import END, START, StateGraph
 from app.config import settings
 from infra.mlflow_setup import setup_mlflow_tracing
 from runtime.capabilities.fault_analysis import build_fault_analysis_graph
+from runtime.observability_resilience import (
+    filter_observability_errors,
+    invoke_with_observability_fallback,
+    is_observability_transport_error,
+)
 from runtime.security import detect_injection_signals
 from runtime.state import MissionState
 
@@ -702,6 +707,9 @@ def deep_agent_node(state: MissionState) -> dict:
                 skill_maps=[s.map for s in mapped_skills],
                 trace_metadata=trace_metadata,
                 trace_tags=trace_tags,
+                session_id=state.get("session_id"),
+                execution_id=state.get("execution_id"),
+                callbacks=[handler],
             )
         else:
             if agent_version is not None:
@@ -860,6 +868,7 @@ def deep_agent_node(state: MissionState) -> dict:
         if "recommendations" in required_keys and not result.get("recommendations"):
             result["recommendations"] = _recommendations_from_summary(summary)
         tool_failures = outcome.get("errors") or []
+        graph_errors = _execution_diagnostic_errors(tool_failures)
         if tool_failures:
             # Business-level tool refusals (a delete refused, a cancel
             # on a finished execution) are outcomes the agent handled
@@ -873,18 +882,43 @@ def deep_agent_node(state: MissionState) -> dict:
             # Additive only: validate_results checks the declared
             # output-schema keys and ignores extra keys.
             result["plan_trace"] = plan_trace
+        from runtime.guest_result import apply_guest_result_to_state
+        from runtime.subgraph.flow import append_unique_errors as _dedupe_errors
+
+        merged_evidence = list(state.get("evidence") or []) + list(
+            outcome.get("evidence") or []
+        )
+        result, merged_evidence = apply_guest_result_to_state(
+            result,
+            merged_evidence,
+            execution_input=input_data,
+            session_id=state.get("session_id"),
+        )
+        diag_errors: list[str] = []
+        _dedupe_errors(diag_errors, list(graph_errors))
         return {
-            "evidence": outcome.get("evidence") or [],
+            "evidence": merged_evidence if merged_evidence else (outcome.get("evidence") or []),
             "result": result,
             "notes": notes,
-            "errors": [],
+            "errors": diag_errors,
             "agent_version": agent_version.version if agent_version is not None else None,
             "agent_version_drift": agent_version_drift,
             "hook_events": hook_events,
         }
     except Exception as exc:  # noqa: BLE001 — model/package problems are state
-        logger.warning("Deep agent unavailable: %s", exc)
-        return {"errors": [f"Deep agent unavailable: {exc}"]}
+        if is_observability_transport_error(exc):
+            logger.warning("Deep agent observability failed (ignored): %s", exc)
+            return {
+                "evidence": [],
+                "result": dict(state.get("result") or {}),
+                "notes": state.get("notes") or [],
+                "errors": [],
+            }
+        from runtime.execution_diagnostics import classify_agent_failure
+
+        diagnostic = classify_agent_failure(exc)
+        logger.warning("Deep agent failed (%s): %s", diagnostic.category, exc)
+        return {"errors": [diagnostic.to_json()]}
 
 
 def _root_causes_from_evidence(evidence: list | None) -> list[str]:
@@ -984,6 +1018,43 @@ def _allowed_tool_names(mission: dict) -> set[str] | None:
     return allowed or None
 
 
+def _execution_diagnostic_errors(errors: list[str] | None) -> list[str]:
+    """Graph / router failures that belong in validation errors.
+
+    Tool-outcome lines (``Tool '…' reported failure``) stay in
+    ``result.tool_failures`` only — they are agent-handled refusals,
+    not missing-evidence failures.
+    """
+    if not errors:
+        return []
+    out: list[str] = []
+    for line in errors:
+        if line.startswith("Tool '") and " reported failure" in line:
+            continue
+        out.append(line)
+    return filter_observability_errors(out)
+
+
+def _errors_explain_empty_evidence(errors: list[str]) -> bool:
+    """True when existing errors already explain why evidence is empty."""
+    from runtime.execution_diagnostics import diagnostic_explains_empty_evidence
+
+    if diagnostic_explains_empty_evidence(errors):
+        return True
+    diag = _execution_diagnostic_errors(errors)
+    if not diag:
+        return False
+    markers = (
+        "Router ",
+        "Plan step cap",
+        "Tool-call budget",
+        "Turn ended without",
+        "Turn completed flows",
+        "ending turn",
+    )
+    return any(any(m in line for m in markers) for line in diag)
+
+
 def validate_results(state: MissionState) -> dict:
     """Check evidence, output schema and success criteria.
 
@@ -1006,12 +1077,17 @@ def validate_results(state: MissionState) -> dict:
     out-of-scope data must not reach the result.
     """
     errors = list(state.get("errors") or [])
+    from runtime.subgraph.flow import append_unique_errors
+
+    deduped_errors: list[str] = []
+    append_unique_errors(deduped_errors, errors)
+    errors = deduped_errors
     evidence = state.get("evidence") or []
     result = dict(state.get("result") or {})
     mission = state.get("mission") or {}
     required_keys = list((mission.get("output_schema") or {}).get("properties", {}).keys())
 
-    if not evidence:
+    if not evidence and not _errors_explain_empty_evidence(errors):
         errors.append("No evidence collected")
     if "evidence" not in result:
         result["evidence"] = evidence
@@ -1305,8 +1381,21 @@ def run_mission(
             graph = (
                 build_mission_graph(checkpointer=checkpointer) if checkpointer else mission_graph
             )
-            config: dict = {"metadata": trace_metadata, "tags": trace_tags}
+            from app.config import settings as app_settings
+
+            config: dict = {
+                "metadata": trace_metadata,
+                "tags": trace_tags,
+                "recursion_limit": app_settings.graph_recursion_limit,
+            }
+            resume = False
             if checkpointer:
                 config["configurable"] = {"thread_id": execution_id}
-            final_state = graph.invoke(initial_state, config=config)
+                try:
+                    snapshot = checkpointer.get_tuple(config)
+                    resume = snapshot is not None and snapshot.checkpoint is not None
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Could not read checkpoint for %s: %s", execution_id, exc)
+            graph_input = None if resume else initial_state
+            final_state = graph.invoke(graph_input, config=config)
     return dict(final_state)

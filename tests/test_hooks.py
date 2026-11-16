@@ -81,6 +81,7 @@ def test_select_hooks_from_seed_yamls():
     assert select_hooks(hotel) == [
         "audit",
         "enforce_layer",
+        "enforce_write_preconditions",
         "block_dangerous_tool_call",
         "guard_destructive_target",
         "deny_builtin_tools",
@@ -627,7 +628,7 @@ def test_fault_analysis_yaml_declares_retrieval():
     # max_chars is NOT declared in the YAML: the hook default applies
     # (12,288 chars from the context budget's 3,072 retrieval tokens).
     assert "max_chars" not in retrieval
-    assert retrieval_max_chars() == 12_288
+    assert retrieval_max_chars() == 32_096
     assert "retrieval_context" in select_hooks(fault)
     # Hybrid wiring (Seams A + B): on for fault_analysis; QueryPlan
     # stays off until the hybrid-only numbers are in.

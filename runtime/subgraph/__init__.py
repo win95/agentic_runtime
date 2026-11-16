@@ -11,6 +11,7 @@ Import the compiler from here; import the shared pieces from
 
 from runtime.subgraph.common import (
     DEFAULT_TOOL_CALL_BUDGET,
+    GuestReplyCompleteError,
     ToolCallBudgetExceededError,
     ToolCallCap,
     last_text,
@@ -35,6 +36,7 @@ __all__ = [
     "MAX_FLOW_STEPS",
     "MAX_TOOL_CALLS_PER_FLOW",
     "Flow",
+    "GuestReplyCompleteError",
     "ToolCallBudgetExceededError",
     "ToolCallCap",
     "build_flow_subgraph",

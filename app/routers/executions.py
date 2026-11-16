@@ -19,6 +19,7 @@ from app.core.security import (
     require_own_execution,
 )
 from app.services import execution_service
+from runtime.execution_error_public import sanitize_from_execution
 
 router = APIRouter(
     prefix="/executions",
@@ -38,7 +39,7 @@ def _to_read(execution) -> schemas.ExecutionRead:
         session_id=execution.session_id,
         user_id=execution.user_id,
         status=execution.status,
-        error=execution.error,
+        error=sanitize_from_execution(execution),
         created_at=execution.created_at,
         started_at=execution.started_at,
         finished_at=execution.finished_at,

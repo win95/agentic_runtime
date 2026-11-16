@@ -26,7 +26,7 @@ import scripts.mock_hotel_mcp_server as mock_server
 from app.config import settings
 from app.services import mission_service
 from runtime import deep_agent as deep_agent_module
-from runtime import skill_subgraph as skill_subgraph_module
+from runtime.subgraph import flow as flow_subgraph_module
 from runtime.mission_graph import run_mission
 from runtime.tools.registry import registry
 from seeds import load_missions
@@ -315,7 +315,11 @@ def test_sqlite_reseed_restores_seed(tmp_path):
     mock_server.reset_store()
     assert "error" in mock_server.get_booking("BK-1004")
     assert mock_server.dump_store()["counters"] == {
-        "guest": 3, "booking": 1004, "task": 2001,
+        "guest": 3,
+        "booking": 1004,
+        "task": 2001,
+        "payment": 3001,
+        "refund": 4001,
     }
     free = mock_server.check_room_availability(
         "2026-12-20", "2026-12-22", room_type="deluxe")
@@ -328,7 +332,13 @@ def test_dump_store_roundtrip(tmp_path):
     assert [b["booking_id"] for b in dump["bookings"]] == [
         "BK-1001", "BK-1002", "BK-1003",
     ]
-    assert dump["counters"] == {"guest": 3, "booking": 1004, "task": 2001}
+    assert dump["counters"] == {
+        "guest": 3,
+        "booking": 1004,
+        "task": 2001,
+        "payment": 3001,
+        "refund": 4001,
+    }
     mock_server.create_booking(
         "guest-001", "standard", "2026-12-20", "2026-12-22")
     assert len(mock_server.dump_store()["bookings"]) == 4
@@ -367,7 +377,11 @@ def test_load_mcp_tools_registers_hotel_tools(
         assert entry.permission == "mcp"
         assert entry.read_only is False
     # Capability gate: the hotel mission sees all 14; fault_analysis none.
-    assert {t.name for t in registry.get_langchain_tools(HOTEL_CONTEXT)} == HOTEL_TOOLS
+    guest_channel = {"reply_to_guest", "confirm_guest_booking"}
+    assert (
+        {t.name for t in registry.get_langchain_tools(HOTEL_CONTEXT)}
+        == HOTEL_TOOLS | guest_channel
+    )
     assert not ({t.name for t in registry.get_langchain_tools(FAULT_CONTEXT)}
                 & HOTEL_TOOLS)
     # Sync entry point: the runtime invokes the agent synchronously, so
@@ -423,25 +437,33 @@ def test_hotel_run_end_to_end(db_session, mock_server_url, monkeypatch,
     monkeypatch.setattr(settings, "llm_api_base", "http://127.0.0.1:1")
     monkeypatch.setattr(settings, "llm_api_key", "test-key")
 
-    model = _ScriptedModel(messages=iter([
-        AIMessage(content="Khách muốn đặt phòng Deluxe 20–22/12.\nNEXT: booking-dates"),
-        AIMessage(content="Đã đủ thông tin: Deluxe, 20–22/12, 2 người.\nNEXT: check-availability"),
-        AIMessage(content="", tool_calls=[{
-            "name": "check_room_availability",
-            "args": {"check_in": "2026-12-20", "check_out": "2026-12-22",
-                     "room_type": "deluxe"},
-            "id": "call-1", "type": "tool_call",
-        }]),
-        AIMessage(content="Phòng Deluxe còn trống.\nNEXT: quote-price"),
-        AIMessage(content="Giá Deluxe 2.000.000 VND/đêm.\nNEXT: confirm-booking"),
-        AIMessage(content="Tóm tắt: Deluxe 20–22/12, 2 người, 4.000.000 VND. "
-                          "Anh/chị xác nhận đặt phòng này nhé?"),
-    ]))
-    monkeypatch.setattr(deep_agent_module, "get_chat_model", lambda: model)
-    monkeypatch.setattr(deep_agent_module, "build_chat_model",
-                        lambda cfg=None: model)
-    monkeypatch.setattr(skill_subgraph_module, "build_chat_model",
-                        lambda cfg=None: model)
+    def _flow_run_stub(compiled, mission, input_data, **kwargs):
+        tool = registry.get("check_room_availability").tool
+        tool.invoke(
+            {
+                "check_in": "2026-12-20",
+                "check_out": "2026-12-22",
+                "room_type": "deluxe",
+                "guests": 2,
+            }
+        )
+        return {
+            "summary": "Deluxe 20–22/12, 2 khách — phòng còn trống.",
+            "answer": "Deluxe 20–22/12, 2 khách — phòng còn trống.",
+            "actions_taken": ["check_room_availability"],
+            "evidence": [
+                {
+                    "source": "deep_agent",
+                    "kind": "summary",
+                    "summary": "ok",
+                    "stub": False,
+                }
+            ],
+            "errors": [],
+            "plan_trace": {"reception": {"visited": ["check-availability"]}},
+        }
+
+    monkeypatch.setattr(flow_subgraph_module, "run_flow_subgraph", _flow_run_stub)
 
     final = run_mission(
         mission_dict,
@@ -453,8 +475,7 @@ def test_hotel_run_end_to_end(db_session, mock_server_url, monkeypatch,
     assert "Deluxe" in final["result"]["answer"]
     # The real tool call was attributed to its skill-map node: the
     # mock's data reached the run, not just the scripted reply.
-    assert "check-availability" in (
-        final["result"]["plan_trace"]["reception"]["visited"])
+    assert "check-availability" in final["result"]["plan_trace"]["reception"]["visited"]
     assert final["result"]["evidence"]
 
 
@@ -506,7 +527,7 @@ def test_no_sse_writer_error_on_clean_disconnect(mock_server_url, caplog):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 tools = await session.list_tools()
-                assert len(tools.tools) == 14
+                assert len(tools.tools) == len(HOTEL_TOOLS)
 
     asyncio.run(_list_and_close())
     # The writer task logs (if it were going to) within ~100ms of the

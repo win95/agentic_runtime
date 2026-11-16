@@ -154,6 +154,21 @@ _DESTRUCTIVE_TARGET_ARGS = {
 }
 
 
+def enforce_write_preconditions(context: HookContext) -> HookDecision | None:
+    """Deny write calls that fail schema/precondition checks (generic)."""
+    from runtime.tool_preconditions import check_write_preconditions
+
+    msg = check_write_preconditions(
+        context.tool_name,
+        context.tool_input or {},
+        session_id=context.session_id,
+        execution_id=context.execution_id,
+    )
+    if msg:
+        return HookDecision(action="deny", message=msg)
+    return None
+
+
 def enforce_layer(context: HookContext) -> HookDecision | None:
     """PreToolUse: the L2 call-time layer gate.
 
@@ -682,6 +697,9 @@ BUILTIN_HOOKS: dict[str, list[tuple[HookEvent, HookHandler]]] = {
         (HookEvent.SUBAGENT_STOP, audit_hook),
     ],
     "enforce_layer": [(HookEvent.PRE_TOOL_USE, enforce_layer)],
+    "enforce_write_preconditions": [
+        (HookEvent.PRE_TOOL_USE, enforce_write_preconditions)
+    ],
     "block_dangerous_tool_call": [(HookEvent.PRE_TOOL_USE, block_dangerous_tool_call)],
     "guard_destructive_target": [(HookEvent.PRE_TOOL_USE, guard_destructive_target)],
     "request_permission": [(HookEvent.PRE_TOOL_USE, request_permission)],

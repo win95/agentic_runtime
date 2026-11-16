@@ -38,6 +38,7 @@ execution:
   hooks:
     - audit
     - enforce_layer
+    - enforce_write_preconditions
     - block_dangerous_tool_call
     - guard_destructive_target
     - deny_builtin_tools

@@ -50,7 +50,8 @@ def _mock_vector_and_graph(monkeypatch):
         lambda docs, embeddings=None, **kw: {"upserted": len(docs), "skipped": 0},
     )
     monkeypatch.setattr(
-        "infra.falkor_client.merge_asset_relations", lambda relations: None
+        "ingest.loaders.load_relations",
+        lambda db, rows, **kwargs: (len(rows), []),
     )
 
 
