@@ -47,7 +47,9 @@ fields print as `***`). Set `MANUAL_LOG=0` or pass `--quiet` on scripts
 that support it (e.g. `documents_ingest.py`) to disable. Truncate long
 bodies with `MANUAL_LOG_MAX_CHARS` (default `4000`). Polling in
 `wait_for()` logs the first poll, status changes only, and the final
-terminal response.
+terminal response. User turns print as `=== Q:` (full text) before the
+`>>>` block; `GET .../result` adds `=== A [execution_id]:` with
+`actions_taken` and terminal `status` after the `<<<` block.
 
 ## Examples
 

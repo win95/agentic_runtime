@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -25,6 +26,12 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+_QUESTION_FIELD_NAMES = ("message", "question", "query", "text", "request")
+_EXEC_ID_RE = re.compile(r"/executions/([^/]+)")
+_Q_BY_EXECUTION: dict[str, str] = {}
+_EXEC_STATUS: dict[str, str] = {}
+_PENDING_QUESTION: str | None = None
 
 
 def load_dotenv(path: Path | None = None) -> Path | None:
@@ -103,6 +110,63 @@ def redact_for_log(value: Any) -> Any:
     return value
 
 
+def extract_question_text(body: Any) -> str | None:
+    """User turn text from common API request body shapes."""
+    if not isinstance(body, dict):
+        return None
+    top = body.get("message")
+    if isinstance(top, str) and top.strip():
+        return top.strip()
+    nested = body.get("input")
+    if isinstance(nested, dict):
+        for key in _QUESTION_FIELD_NAMES:
+            val = nested.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+    for key in _QUESTION_FIELD_NAMES:
+        if key == "message":
+            continue
+        val = body.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return None
+
+
+def extract_answer_from_result(payload: Any) -> tuple[str | None, list | None]:
+    """``(answer_or_summary, actions_taken)`` from GET /executions/.../result."""
+    if not isinstance(payload, dict):
+        return None, None
+    output = payload.get("output")
+    if not isinstance(output, dict):
+        return None, None
+    answer = output.get("answer") or output.get("summary")
+    if isinstance(answer, str):
+        answer = answer.strip() or None
+    else:
+        answer = None
+    actions = output.get("actions_taken")
+    if isinstance(actions, list):
+        actions = [str(a) for a in actions if a]
+    else:
+        actions = None
+    return answer, actions
+
+
+def execution_id_from_path(path_or_url: str) -> str | None:
+    path = path_or_url
+    if "://" in path:
+        path = "/" + path.split("://", 1)[-1].split("/", 1)[-1]
+    match = _EXEC_ID_RE.search(path)
+    return match.group(1) if match else None
+
+
+def reset_turn_log_state_for_tests() -> None:
+    global _PENDING_QUESTION
+    _Q_BY_EXECUTION.clear()
+    _EXEC_STATUS.clear()
+    _PENDING_QUESTION = None
+
+
 def truncate_log_text(text: str, *, limit: int | None = None) -> str:
     limit = log_max_chars() if limit is None else limit
     if limit <= 0 or len(text) <= limit:
@@ -144,9 +208,25 @@ def _resolve_url(path_or_url: str, base_url: str | None) -> str:
     return base + path_or_url
 
 
-def _log_request(method: str, url: str, headers: dict | None, body: Any) -> None:
+def _log_request(
+    method: str,
+    url: str,
+    headers: dict | None,
+    body: Any,
+    *,
+    path_for_ids: str = "",
+) -> None:
+    global _PENDING_QUESTION
     if not manual_log_enabled():
         return
+    question = extract_question_text(body)
+    if question:
+        _PENDING_QUESTION = question
+        eid = execution_id_from_path(path_for_ids or url)
+        if eid and eid in _Q_BY_EXECUTION:
+            print(f"=== Q [{eid}]: {question}")
+        else:
+            print(f"=== Q: {question}")
     print(f">>> {method.upper()} {url}")
     if headers:
         print(_format_json_for_log({"headers": dict(headers)}))
@@ -154,12 +234,52 @@ def _log_request(method: str, url: str, headers: dict | None, body: Any) -> None
         print(_format_json_for_log(body))
 
 
-def _log_response(status: int, elapsed: float, payload: Any) -> None:
+def _log_response(
+    status: int,
+    elapsed: float,
+    payload: Any,
+    *,
+    method: str = "",
+    path_for_ids: str = "",
+) -> None:
+    global _PENDING_QUESTION
     if not manual_log_enabled():
         return
     print(f"<<< HTTP {status} ({elapsed:.3f}s)")
     if payload is not None:
         print(_format_json_for_log(payload))
+
+    path = path_for_ids or ""
+    if (
+        method.upper() == "POST"
+        and "/executions" in path
+        and path.rstrip("/").endswith("/executions")
+        and status in (200, 202)
+        and isinstance(payload, dict)
+    ):
+        eid = payload.get("execution_id")
+        if isinstance(eid, str) and eid and _PENDING_QUESTION:
+            _Q_BY_EXECUTION[eid] = _PENDING_QUESTION
+            print(f"    execution_id={eid}")
+            print(f"=== Q [{eid}]: {_PENDING_QUESTION}")
+            _PENDING_QUESTION = None
+
+    if method.upper() == "GET" and "/result" in path and isinstance(payload, dict):
+        eid = execution_id_from_path(path) or ""
+        answer, actions = extract_answer_from_result(payload)
+        status_word = _EXEC_STATUS.get(eid, "")
+        if eid and eid in _Q_BY_EXECUTION:
+            print(f"=== Q [{eid}]: {_Q_BY_EXECUTION[eid]}")
+        if answer:
+            print(f"=== A [{eid or '?'}]: {answer}")
+        if actions is not None:
+            print(f"    actions_taken={json.dumps(actions, ensure_ascii=False)}")
+        if status_word:
+            print(f"    status={status_word}")
+        elif isinstance(payload.get("output"), dict):
+            err = payload["output"].get("error")
+            if err:
+                print(f"    status=FAILED")
 
 
 def log_http_exchange(
@@ -171,9 +291,12 @@ def log_http_exchange(
     status: int,
     elapsed: float,
     payload: Any,
+    path_for_ids: str = "",
 ) -> None:
-    _log_request(method, url, headers, body)
-    _log_response(status, elapsed, payload)
+    _log_request(method, url, headers, body, path_for_ids=path_for_ids)
+    _log_response(
+        status, elapsed, payload, method=method, path_for_ids=path_for_ids
+    )
 
 
 @dataclass
@@ -216,8 +339,9 @@ def request(
     hdrs = _default_headers(headers)
     do_log = manual_log_enabled() if log is None else log
     body_for_log: Any = json_body if json_body is not None else data
+    path_for_ids = path_or_url
     if do_log:
-        _log_request(method, url, hdrs, body_for_log)
+        _log_request(method, url, hdrs, body_for_log, path_for_ids=path_for_ids)
 
     started = time.monotonic()
     if files is not None:
@@ -244,7 +368,13 @@ def request(
         except (TypeError, ValueError):
             payload = resp.text if resp.text else None
         if do_log:
-            _log_response(resp.status_code, elapsed, payload)
+            _log_response(
+                resp.status_code,
+                elapsed,
+                payload,
+                method=method,
+                path_for_ids=path_for_ids,
+            )
         return ManualHttpResponse(
             status_code=resp.status_code,
             _text=resp.text,
@@ -269,7 +399,13 @@ def request(
             except (TypeError, ValueError):
                 payload = text if text else None
             if do_log:
-                _log_response(resp.status, elapsed, payload)
+                _log_response(
+                    resp.status,
+                    elapsed,
+                    payload,
+                    method=method,
+                    path_for_ids=path_for_ids,
+                )
             return ManualHttpResponse(
                 status_code=resp.status,
                 _text=text,
@@ -285,7 +421,13 @@ def request(
         except (TypeError, ValueError):
             payload = text if text else None
         if do_log:
-            _log_response(exc.code, elapsed, payload)
+            _log_response(
+                exc.code,
+                elapsed,
+                payload,
+                method=method,
+                path_for_ids=path_for_ids,
+            )
         return ManualHttpResponse(
             status_code=exc.code,
             _text=text,
@@ -366,8 +508,11 @@ def wait_for(execution_id: str, timeout: float = 300,
                 status=status,
                 elapsed=elapsed,
                 payload=execution,
+                path_for_ids=path,
             )
         if execution and is_terminal:
+            if isinstance(current, str):
+                _EXEC_STATUS[execution_id] = current
             return execution, time.monotonic() - start
         last_status = current
         poll += 1
@@ -378,8 +523,14 @@ def wait_for(execution_id: str, timeout: float = 300,
     elapsed = time.monotonic() - t0
     if manual_log_enabled():
         log_http_exchange(
-            "GET", url, headers=_default_headers(None), body=None,
-            status=status, elapsed=elapsed, payload=execution,
+            "GET",
+            url,
+            headers=_default_headers(None),
+            body=None,
+            status=status,
+            elapsed=elapsed,
+            payload=execution,
+            path_for_ids=path,
         )
     raise TimeoutError(
         f"execution {execution_id} still {execution and execution.get('status')} "
