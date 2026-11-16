@@ -1,8 +1,15 @@
-"""Build a repeatable MLflow report for the manual hotel-reception runs.
+"""Build a repeatable MLflow report for the manual agent runs.
 
-This is the analysis pipeline behind ``hotel_reception_report.md``: it
-reads what the manual runs already left in MLflow and re-derives every
-number, so the report can be regenerated after any test run.
+This is the analysis pipeline behind
+``scripts/manual/hotel_reception_report.md``: it reads what the manual
+runs already left in MLflow and re-derives every number, so the report
+can be regenerated after any test run.
+
+It works for any agent: ``--agent`` + ``--session-prefix`` select whose
+runs to report (the contract comes from that agent's YAML), and the
+hotel-only sections (booking gate, 3-turn memory) render only when
+those scenarios are in the data. The hotel receptionist is the
+default.
 
 Pipeline stages (each is a function below):
 
@@ -29,10 +36,16 @@ Usage (from the repo root, stack and MLflow running):
         --experiment agentic-runtime --session-prefix sess-hotel- \
         --out reports/hotel-mlflow-report.md \
         --csv reports/hotel-mlflow-traces.csv
+    .venv/bin/python scripts/manual/mlflow_report.py \
+        --agent fault_investigator --session-prefix sess-fault- \
+        --out reports/fault-mlflow-report.md \
+        --csv reports/fault-mlflow-traces.csv
 
 Defaults: experiment ``agentic-runtime``, session prefix ``sess-hotel-``,
-contract tools = the hotel agent's 14 MCP tools (keep in sync with
-``seeds/agents/hotel_receptionist.yaml``), outputs under ``reports/``.
+contract tools = the ``allowed_tools`` of ``seeds/agents/<agent>.yaml``
+(``--agent`` or ``hotel_receptionist``; ``--contract-tools`` overrides;
+the literal ``HOTEL_TOOLS`` below is only the fallback when the YAML
+cannot be read), outputs under ``reports/``.
 
 Only reads MLflow; it never starts executions, never touches the mock
 MCP server, and does not need the API/worker.
@@ -62,8 +75,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _api import load_dotenv  # noqa: E402
 
-# The hotel agent's MCP contract. Kept literal so the report works even
-# when a seed/registry is broken; override with --contract-tools.
+# The hotel agent's MCP contract — FALLBACK ONLY. The live list is loaded
+# from seeds/agents/<agent>.yaml at run time (load_contract_tools); this
+# literal only runs when the YAML cannot be read (warned on stderr).
 HOTEL_TOOLS = (
     "check_room_availability",
     "get_room_rates",
@@ -93,6 +107,8 @@ BUILTIN_TOOLS = (
     "task",
 )
 
+# Hotel booking section only (booking_stats) — other agents never reach
+# it, because render() skips that section without a "booking" scenario.
 WRITE_TOOLS = {"create_booking", "cancel_booking", "change_booking_dates"}
 QUOTE_TOOLS = {"check_room_availability", "get_room_rates"}
 DERAIL_MARKERS = (
@@ -100,8 +116,30 @@ DERAIL_MARKERS = (
     "does not exist",
     "deviation:",
     "subagent",
+    # Legacy node-compiler phrase — kept so old (pre-flow) runs still
+    # classify the same way; the flow-era signature is _is_derailed.
     "plan nodes visited:",
 )
+# One line that only declares a flow ("FLOW: booking-dates", optionally
+# bolded) — the router's control line leaking into the guest answer.
+_FLOW_LINE = re.compile(r"^\*{0,2}FLOW:\*{0,2}\s+\S+", re.IGNORECASE)
+
+
+def _is_derailed(answer: str) -> bool:
+    """True when the final answer went off the rails.
+
+    Either a legacy marker phrase, or the flow-era signature: no answer
+    at all, or an answer that is nothing but the router's FLOW: line
+    (v5: 11/34 answers were literally that). A longer answer that merely
+    mentions a flow is NOT derailed by this rule.
+    """
+    if any(m in answer.lower() for m in DERAIL_MARKERS):
+        return True
+    stripped = answer.strip()
+    if not stripped:
+        return True
+    lines = [ln.strip() for ln in stripped.splitlines() if ln.strip()]
+    return len(lines) == 1 and _FLOW_LINE.match(lines[0]) is not None
 TOOL_NAMES = re.compile(r"\"name\":\s*\"([a-z_]+)\"")
 
 
@@ -136,6 +174,23 @@ def _pct(part: int, whole: int) -> str:
     return f"{100 * part / whole:.0f}%" if whole else "-"
 
 
+def _fmt_num(value) -> str:
+    """A number for a Markdown table cell, or "-" when there is none."""
+    return f"{value:.0f}" if value is not None and not pd.isna(value) else "-"
+
+
+def _tag_column(runs: pd.DataFrame, name: str) -> pd.Series:
+    """A run-tag column as a filled string series.
+
+    ``mlflow.search_runs`` only returns tag columns that at least one
+    run carries — ``runs.get(name, "")`` hands back a bare string when
+    the tag is absent entirely, and ``.fillna`` on that string crashes.
+    """
+    if name in runs.columns:
+        return runs[name].fillna("")
+    return pd.Series("", index=runs.index)
+
+
 def _median(values) -> float | None:
     values = [v for v in values if v is not None and not pd.isna(v)]
     return round(statistics.median(values), 1) if values else None
@@ -156,6 +211,28 @@ def _table(headers: list[str], rows: list[list]) -> str:
 
 def _split(value: str) -> list[str]:
     return [part.strip() for part in value.split(",") if part.strip()]
+
+
+def load_contract_tools(agent_id: str) -> tuple[str, ...] | None:
+    """The MCP contract, from the agent YAML — the source of truth.
+
+    ``seeds/agents/<agent>.yaml`` ``allowed_tools`` is what ``make seed``
+    snapshots into the AgentVersion, so the report classifies tools
+    against the same list the agent actually runs with. Returns None
+    when the YAML is missing or unreadable (caller falls back to the
+    literal ``HOTEL_TOOLS`` and warns). Path is derived from this file,
+    so it works from any cwd.
+    """
+    import yaml
+
+    repo_root = Path(__file__).resolve().parents[2]
+    path = repo_root / "seeds" / "agents" / f"{agent_id}.yaml"
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    tools = tuple(str(t) for t in (data.get("allowed_tools") or []))
+    return tools or None
 
 
 # --- stage 1: discover -------------------------------------------------------
@@ -182,10 +259,10 @@ def load_runs(experiment_id: str, prefix: str, agent: str | None,
     if runs.empty:
         return runs
     runs = runs.copy()
-    runs["session"] = runs.get("tags.session_id", "").fillna("")
+    runs["session"] = _tag_column(runs, "tags.session_id")
     runs = runs[runs["session"].str.startswith(prefix)]
     if agent:
-        runs = runs[runs.get("tags.agent_id", "").fillna("") == agent]
+        runs = runs[_tag_column(runs, "tags.agent_id") == agent]
     runs["start"] = pd.to_datetime(runs["start_time"], utc=True)
     if since is not None:
         runs = runs[runs["start"] >= since]
@@ -195,10 +272,14 @@ def load_runs(experiment_id: str, prefix: str, agent: str | None,
 def load_traces(experiment_id: str, max_results: int) -> pd.DataFrame:
     import mlflow
 
+    # Newest first: with more traces than max_results, the cap drops the
+    # OLDEST runs — the ones this report is least likely about — instead
+    # of silently dropping the newest (the old ASC order did that).
+    # main() warns loudly when the cap is hit.
     return mlflow.search_traces(
         locations=[experiment_id],
         max_results=max_results,
-        order_by=["timestamp ASC"],
+        order_by=["timestamp DESC"],
     )
 
 
@@ -245,9 +326,11 @@ def collect(runs: pd.DataFrame, traces: pd.DataFrame, *, prefix: str,
                     nested += 1
 
             tools = [n for n in names if n in contract or n in builtin]
-            usage = _as_dict(trace.get("trace_metadata"))
+            trace_meta = _as_dict(trace.get("trace_metadata"))
             try:
-                usage = json.loads(usage.get("mlflow.trace.tokenUsage") or "{}")
+                usage = json.loads(
+                    trace_meta.get("mlflow.trace.tokenUsage") or "{}"
+                )
             except (TypeError, ValueError):
                 usage = {}
 
@@ -305,7 +388,7 @@ def collect(runs: pd.DataFrame, traces: pd.DataFrame, *, prefix: str,
                 "agent_version": response.get("agent_version"),
                 "drift": response.get("agent_version_drift"),
                 "answer": answer,
-                "derailed": any(m in answer.lower() for m in DERAIL_MARKERS),
+                "derailed": _is_derailed(answer),
                 "message": message,
                 "history_turns": len(history_turns),
                 "history_text": json.dumps(history_turns, ensure_ascii=False),
@@ -350,6 +433,9 @@ def latency_rows(df: pd.DataFrame) -> list[list]:
     out = []
     for name, group in df.groupby("scenario"):
         values = sorted(v / 1000 for v in group["duration_ms"].dropna())
+        if not values:
+            out.append([name, 0, "-", "-", "-", "-"])
+            continue
         out.append([name, len(values), f"{values[0]:.0f}",
                     f"{_median(values) or 0:.0f}",
                     f"{_quantile(values, 0.9) or 0:.0f}",
@@ -444,7 +530,18 @@ def render(df: pd.DataFrame, meta: dict, *, contract: set[str],
     # and ``probe`` (one-off wiring checks) stay in the CSV but are kept
     # out of the statistics, which would otherwise mix prompt versions.
     off = df[~df["scenario"].isin(excluded)].copy()
-    out = ["# Báo cáo MLflow — manual test hotel reception", ""]
+    scenarios = set(off["scenario"])
+    # Section numbers are assigned in order, so the hotel-only sections
+    # below (§booking, §memory) can be skipped for other agents without
+    # leaving gaps in the numbering.
+    _section_no = [0]
+
+    def section(title: str) -> str:
+        _section_no[0] += 1
+        return f"## {_section_no[0]}. {title}"
+
+    agent_label = meta["agent"] or "hotel reception"
+    out = [f"# Báo cáo MLflow — manual test {agent_label}", ""]
     out.append(f"- Thời điểm tạo: {meta['generated_at']}")
     out.append(f"- Tracking URI: `{meta['tracking_uri']}`")
     out.append(f"- Experiment: `{meta['experiment']}` (id={meta['experiment_id']})")
@@ -455,7 +552,7 @@ def render(df: pd.DataFrame, meta: dict, *, contract: set[str],
                + (f" (loại `{'`, `'.join(sorted(excluded))}`)" if excluded else ""))
     out.append("")
 
-    out += ["## 1. Khối lượng dữ liệu", ""]
+    out += [section("Khối lượng dữ liệu"), ""]
     status = df["status"].value_counts().to_dict()
     versions = df["agent_version"].value_counts().to_dict()
     drift_true = df[df["drift"] == True]  # noqa: E712
@@ -484,7 +581,7 @@ def render(df: pd.DataFrame, meta: dict, *, contract: set[str],
     ]).splitlines()
     out.append("")
 
-    out += ["## 2. Theo kịch bản (phạm vi suite)", ""]
+    out += [section("Theo kịch bản (phạm vi suite)"), ""]
     out.append(_table(
         ["Kịch bản", "n", "OK", "p50 (s)", "token in", "token out",
          "derail", "nhiễu file", "hook feedback"],
@@ -492,17 +589,17 @@ def render(df: pd.DataFrame, meta: dict, *, contract: set[str],
     ))
     out.append("")
 
-    out += ["## 3. Độ trễ (giây)", ""]
+    out += [section("Độ trễ (giây)"), ""]
     out.append(_table(["Kịch bản", "n", "min", "p50", "p90", "max"],
                       latency_rows(off)))
     out.append("")
 
-    out += ["## 4. Token", ""]
+    out += [section("Token"), ""]
     tok_in, tok_out = off["tokens_in"].dropna(), off["tokens_out"].dropna()
     rows = []
     for label, series in (("input", tok_in), ("output", tok_out)):
-        rows.append([label, f"{series.median():.0f}",
-                     f"{series.quantile(0.9):.0f}", f"{series.max():.0f}"])
+        rows.append([label, _fmt_num(series.median()),
+                     _fmt_num(series.quantile(0.9)), _fmt_num(series.max())])
     out.append(_table(["Loại", "median", "p90", "max"], rows))
     out.append("")
     turn_rows = []
@@ -516,7 +613,7 @@ def render(df: pd.DataFrame, meta: dict, *, contract: set[str],
         out += _table(["Lượt", "n", "token in (median)"], turn_rows).splitlines()
         out.append("")
 
-    out += ["## 5. Sử dụng tool", ""]
+    out += [section("Sử dụng tool"), ""]
     rows, unused = tool_rows(off, contract, builtin)
     out.append(_table(["Tool", "Tỷ lệ trace dùng", "Loại"], rows))
     out.append("")
@@ -524,7 +621,7 @@ def render(df: pd.DataFrame, meta: dict, *, contract: set[str],
                f"{', '.join(f'`{n}`' for n in unused) or 'không có'}")
     out.append("")
 
-    out += ["## 6. Nhiễu file-tool (deepagents built-in)", ""]
+    out += [section("Nhiễu file-tool (deepagents built-in)"), ""]
     noisy = off[(off["read_file"] + off["write_file"]) > 0]
     out += _table(["Mục", "Giá trị"], [
         ["Trace có read_file/write_file", f"{len(noisy)}/{len(off)} "
@@ -551,7 +648,7 @@ def render(df: pd.DataFrame, meta: dict, *, contract: set[str],
                       ).splitlines()
         out.append("")
 
-    out += ["## 7. Fan-out tool mỗi lượt model", ""]
+    out += [section("Fan-out tool mỗi lượt model"), ""]
     n_turns, median, mean, maximum, dist = fanout_stats(off)
     out += _table(["n lượt", "median", "mean", "max", "phân bố"], [
         [n_turns, median, mean, maximum,
@@ -559,7 +656,7 @@ def render(df: pd.DataFrame, meta: dict, *, contract: set[str],
     ]).splitlines()
     out.append("")
 
-    out += ["## 8. Prompt gọi tên tool vs giọng khách", ""]
+    out += [section("Prompt gọi tên tool vs giọng khách"), ""]
     style_rows = []
     for explicit, group in off.groupby("explicit"):
         label = "explicit (gọi tên tool)" if explicit else "natural (giọng khách)"
@@ -574,30 +671,36 @@ def render(df: pd.DataFrame, meta: dict, *, contract: set[str],
                   sorted(style_rows)).splitlines()
     out.append("")
 
-    b = booking_stats(off)
-    out += ["## 9. Booking: cổng xác nhận", ""]
-    out += _table(["Lượt", "Số lượng", "Ghi chú"], [
-        ["Session", b["sessions"], ""],
-        ["Lượt hỏi giá", b["quote"],
-         f"sạch {b['clean']}, tự ghi {b['early_write']}, "
-         f"derail {b['derailed']}"],
-        ["Lượt xác nhận/follow-up", b["confirm"],
-         f"có create_booking {b['confirm_booking']}, "
-         f"derail {b['confirm_derailed']}"],
-    ]).splitlines()
-    out.append("")
+    # Hotel-only sections: they render only when those scenarios are in
+    # the data, so the same script reports any agent.
+    if "booking" in scenarios:
+        b = booking_stats(off)
+        out += [section("Booking: cổng xác nhận"), ""]
+        out += _table(["Lượt", "Số lượng", "Ghi chú"], [
+            ["Session", b["sessions"], ""],
+            ["Lượt hỏi giá", b["quote"],
+             f"sạch {b['clean']}, tự ghi {b['early_write']}, "
+             f"derail {b['derailed']}"],
+            ["Lượt xác nhận/follow-up", b["confirm"],
+             f"có create_booking {b['confirm_booking']}, "
+             f"derail {b['confirm_derailed']}"],
+        ]).splitlines()
+        out.append("")
 
-    m = memory_stats(off)
-    out += ["## 10. Memory 3 lượt", ""]
-    out += _table(["Mục", "Giá trị"], [
-        ["Session", m["sessions"]],
-        ["Session có nhắc mã ở lượt sau", f"{m['sessions_hit']}/{m['sessions']}"],
-        ["Lượt sau nhắc đúng mã", f"{m['stated']}/{m['later']}"],
-        ["Rendered history chứa mã", f"{m['history']}/{m['history_total']}"],
-    ]).splitlines()
-    out.append("")
+    if "memory" in scenarios:
+        m = memory_stats(off)
+        out += [section("Memory 3 lượt"), ""]
+        out += _table(["Mục", "Giá trị"], [
+            ["Session", m["sessions"]],
+            ["Session có nhắc mã ở lượt sau",
+             f"{m['sessions_hit']}/{m['sessions']}"],
+            ["Lượt sau nhắc đúng mã", f"{m['stated']}/{m['later']}"],
+            ["Rendered history chứa mã",
+             f"{m['history']}/{m['history_total']}"],
+        ]).splitlines()
+        out.append("")
 
-    out += ["## 11. Ngoại lệ", ""]
+    out += [section("Ngoại lệ"), ""]
     slow = off.nlargest(top, "duration_ms")
     out.append("Chậm nhất:")
     out.append("")
@@ -620,7 +723,7 @@ def render(df: pd.DataFrame, meta: dict, *, contract: set[str],
     out.append("")
 
     nested = off[off["nested_tool_spans"] > 0]
-    out += ["## 12. Ghi chú đọc số liệu", ""]
+    out += [section("Ghi chú đọc số liệu"), ""]
     out.append(
         f"- {len(nested)}/{len(off)} trace có span tool lồng cùng tên "
         f"({int(off['nested_tool_spans'].sum())} span). Đây là instrumentation "
@@ -657,14 +760,18 @@ def main() -> int:
                         help="only runs whose session_id starts with this "
                              "(default: sess-hotel-)")
     parser.add_argument("--agent", default=None,
-                        help="only runs tagged with this agent_id")
+                        help="only runs tagged with this agent_id (also "
+                             "selects the agent YAML for the contract; "
+                             "default: hotel_receptionist)")
     parser.add_argument("--since", default=None,
                         help="only runs started on/after this ISO date")
     parser.add_argument("--exclude-scenarios", default="adhoc,probe",
                         help="comma-separated scenarios kept out of the "
                              "statistics (default: adhoc,probe)")
-    parser.add_argument("--contract-tools", default=",".join(HOTEL_TOOLS),
-                        help="comma-separated MCP tool names")
+    parser.add_argument("--contract-tools", default=None,
+                        help="comma-separated MCP tool names (default: the "
+                             "agent YAML's allowed_tools; --agent selects "
+                             "which YAML)")
     parser.add_argument("--builtin-tools", default=",".join(BUILTIN_TOOLS),
                         help="comma-separated built-in tool names")
     parser.add_argument("--memory-code-regex", default=r"HOTEL-[A-Z0-9]+",
@@ -693,18 +800,45 @@ def main() -> int:
     if args.since:
         since = pd.Timestamp(args.since, tz="UTC")
 
-    contract = set(_split(args.contract_tools))
+    contract: set[str]
+    contract_source: str
+    if args.contract_tools:
+        contract = set(_split(args.contract_tools))
+        contract_source = "--contract-tools"
+    else:
+        agent_id = args.agent or "hotel_receptionist"
+        loaded = load_contract_tools(agent_id)
+        if loaded is not None:
+            contract = set(loaded)
+            contract_source = f"seeds/agents/{agent_id}.yaml"
+        else:
+            # The literal fallback is hotel-only; other agents get an
+            # empty contract (their tools then classify as "other" rather
+            # than silently inheriting the hotel list).
+            if agent_id == "hotel_receptionist":
+                contract = set(HOTEL_TOOLS)
+            else:
+                contract = set()
+            contract_source = "fallback (YAML unreadable)"
+            print(f"warning: could not read seeds/agents/{agent_id}.yaml; "
+                  f"using a {len(contract)}-tool fallback contract",
+                  file=sys.stderr)
     builtin = set(_split(args.builtin_tools))
     excluded = set(_split(args.exclude_scenarios))
     memory_regex = re.compile(args.memory_code_regex)
 
     print(f"MLflow {tracking} · experiment {experiment_name} "
-          f"(id={experiment_id})")
+          f"(id={experiment_id}) · contract: {len(contract)} tools "
+          f"from {contract_source}")
     runs = load_runs(experiment_id, args.session_prefix, args.agent, since,
                      args.max_traces)
     if runs.empty:
         raise SystemExit(f"no runs with session prefix {args.session_prefix!r}")
     traces = load_traces(experiment_id, args.max_traces)
+    if len(traces) >= args.max_traces:
+        print(f"warning: hit --max-traces {args.max_traces}; older traces "
+              f"were dropped, so the report may miss old runs — raise "
+              f"--max-traces to include them", file=sys.stderr)
     df = collect(runs, traces, prefix=args.session_prefix, contract=contract,
                  builtin=builtin, memory_regex=memory_regex)
     if df.empty:
