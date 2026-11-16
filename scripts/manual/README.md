@@ -39,7 +39,15 @@ and later runs see the prior turns (`docs/sessions.md`).
 | `documents_ingest.py` | Covers the two features added in `0da4e6a`. **Document Management** through the real API: multipart upload (v1), metadata/list/download, immutable v2/v3 in MinIO, filename sanitisation, and the fail-closed ACL rules (owner vs grant, write implies read, service key sees only service-owned docs, every denial is a leak-free 404 — never 403). **Ingest + `DOCUMENTED_BY`**: one batch from a temp inbox with one document linked to `O21` and one unlinked; asserts both rows land in the four stores, the Qdrant payload carries `asset_id`, the canonical `(Asset, O21) —DOCUMENTED_BY→ (Document, id)` edge exists (L1), the projection queue drains, `neighbors(O21)` / `linked_documents(O21)` see it in Neo4j, and a forced re-run replays instead of duplicating. `--documents-only` / `--ingest-only` split the halves; `--keep` leaves the rows/objects/points. Needs the live stack (API, Postgres, MinIO, Qdrant, Neo4j, embeddings); the JWT half is SKIPped when `JWT_SECRET` is empty. |
 | `verify_retrieval_live.py` | Runs real questions through the **combined** path — a QueryPlan first (`build_query_plan`), then the hybrid retriever with that plan — against the real Qdrant + Neo4j + LiteLLM embeddings. No API/worker needed; talks to the stores directly. Default: 6 sample questions from the golden set. `--question` runs one ad-hoc question, `--golden-set` runs all 36, `--no-compare` skips the without-plan comparison, `--output` writes the verdicts JSON. Preflight fails fast with exit 2 when the embedding config or Qdrant is missing (same as `make eval-retrieval-live`). See "Notes from the retrieval + QU check" below for what it touches and how to read the output. |
 
-`_api.py` is the shared helper (`.env` loading, JSON calls, poll-until-terminal).
+`_api.py` is the shared helper (`.env` loading, JSON calls,
+poll-until-terminal). By default every HTTP call logs `>>> METHOD URL` with
+a redacted JSON body and `<<< HTTP status (elapsed)` with the response
+(secrets such as `Authorization`, `X-API-Key`, and `password`/`token`
+fields print as `***`). Set `MANUAL_LOG=0` or pass `--quiet` on scripts
+that support it (e.g. `documents_ingest.py`) to disable. Truncate long
+bodies with `MANUAL_LOG_MAX_CHARS` (default `4000`). Polling in
+`wait_for()` logs the first poll, status changes only, and the final
+terminal response.
 
 ## Examples
 
