@@ -1,7 +1,7 @@
 """Shared helper for the manual API test scripts in this directory.
 
-Stdlib only (JSON GET/POST). Loads the repo-root ``.env`` (existing
-environment variables win) so ``API_KEY`` / ``API_BASE_URL`` work
+Stdlib only (JSON GET/POST). Loads the repo-root ``.env`` on first ``api_base()`` / ``api_key()`` use
+(existing environment variables win) so ``API_KEY`` / ``API_BASE_URL`` work
 without exporting them by hand, and wraps the two things every script
 needs: a JSON POST/GET against the API and a poll-until-terminal loop
 for executions.
@@ -32,6 +32,7 @@ _EXEC_ID_RE = re.compile(r"/executions/([^/]+)")
 _Q_BY_EXECUTION: dict[str, str] = {}
 _EXEC_STATUS: dict[str, str] = {}
 _PENDING_QUESTION: str | None = None
+_DOTENV_ATTEMPTED = False
 
 
 def load_dotenv(path: Path | None = None) -> Path | None:
@@ -55,6 +56,21 @@ def load_dotenv(path: Path | None = None) -> Path | None:
                 os.environ[key] = value
         return dotenv
     return None
+
+
+def _ensure_dotenv_loaded() -> None:
+    """Load repo ``.env`` once before reading API settings (not on import)."""
+    global _DOTENV_ATTEMPTED
+    if _DOTENV_ATTEMPTED:
+        return
+    _DOTENV_ATTEMPTED = True
+    load_dotenv()
+
+
+def reset_dotenv_state_for_tests() -> None:
+    """Allow tests to re-exercise lazy ``.env`` loading."""
+    global _DOTENV_ATTEMPTED
+    _DOTENV_ATTEMPTED = False
 
 
 _SENSITIVE_HEADER_NAMES = frozenset(
@@ -185,10 +201,12 @@ def _format_json_for_log(obj: Any) -> str:
 
 
 def api_base() -> str:
+    _ensure_dotenv_loaded()
     return os.environ.get("API_BASE_URL", "http://localhost:8000").rstrip("/")
 
 
 def api_key() -> str:
+    _ensure_dotenv_loaded()
     return os.environ.get("API_KEY", "")
 
 
@@ -574,6 +592,3 @@ def require_worker() -> None:
         sys.exit(f"API not reachable at {api_base()}: {exc}")
     if status != 200:
         sys.exit(f"API /health -> HTTP {status} at {api_base()}")
-
-
-load_dotenv()
