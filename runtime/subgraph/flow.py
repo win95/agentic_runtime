@@ -116,6 +116,7 @@ from runtime.write_pipeline_runner import (
 from runtime.security import wrap_data
 from runtime.skills.map_plan import SkillMap
 from runtime.subgraph.common import (
+    GuestReplyCompleteError,
     ToolCallBudgetExceededError,
     ToolCallCap,
     last_text,
@@ -1012,6 +1013,7 @@ def build_flow_subgraph(
                 payload: dict = {"messages": isolated}
                 if files:
                     payload["files"] = files
+                cap = cap_cache[flow.id]
                 try:
                     if config:
                         result = invoke_with_observability_fallback(
@@ -1022,28 +1024,51 @@ def build_flow_subgraph(
                             agent.invoke, payload
                         )
                     new_messages = result.get("messages") or []
+                except GuestReplyCompleteError:
+                    new_messages = isolated
                 except ToolCallBudgetExceededError as exc:
-                    # The flow agent spent its tool-call budget: stop
-                    # the flow here instead of letting the model burn
-                    # the recursion limit on further calls. The
-                    # diagnostic is an error, not the guest's answer.
-                    errors.append(
-                        f"Tool-call budget ({max_tool_calls_per_flow} calls) "
-                        f"exceeded at flow '{flow.id}': {exc}"
-                    )
-                    new_messages = isolated + [
-                        AIMessage(
-                            content=(
-                                f"Flow '{flow.id}' stopped: the tool-call "
-                                f"budget for this flow is exhausted."
-                            )
+                    if cap.guest_reply_message:
+                        new_messages = isolated
+                        logger.info(
+                            "Flow %s: ignoring tool budget tail after guest reply",
+                            flow.id,
                         )
-                    ]
+                    else:
+                        errors.append(
+                            f"Tool-call budget ({max_tool_calls_per_flow} calls) "
+                            f"exceeded at flow '{flow.id}': {exc}"
+                        )
+                        new_messages = isolated + [
+                            AIMessage(
+                                content=(
+                                    f"Flow '{flow.id}' stopped: the tool-call "
+                                    f"budget for this flow is exhausted."
+                                )
+                            )
+                        ]
             added = new_messages[len(isolated) :] if len(new_messages) >= len(isolated) else []
-            agent = agent_cache.get(flow.id)
+            reply_messages = (
+                new_messages[len(isolated) :]
+                if len(new_messages) > len(isolated)
+                else added
+            )
+            cap = cap_cache.get(flow.id)
+            if cap is not None and cap.guest_reply_message:
+                reply_messages = added + [
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "id": "guest-reply-cap",
+                                "name": "reply_to_guest",
+                                "args": {"message": cap.guest_reply_message},
+                            }
+                        ],
+                    )
+                ]
 
             answer, _guard_notes = extract_flow_guest_reply(
-                added,
+                reply_messages,
                 context_blobs=context_blobs,
                 session_id=state.get("session_id") or "",
                 input_data=state.get("input_data") or {},

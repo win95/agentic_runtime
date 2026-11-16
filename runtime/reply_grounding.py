@@ -166,9 +166,12 @@ def apply_reply_grounding(
     *,
     guest_locale: str = "en",
     regenerate_once: bool = True,  # noqa: ARG001
+    trust_channel: bool = False,
 ) -> tuple[str, list[str]]:
     """Return grounded reply and notes. Falls back to tool-built text."""
     notes: list[str] = []
+    if trust_channel and (reply or "").strip():
+        return reply.strip(), notes
     used_quote_tools = bool(
         {name for name, _ in collect_tool_results(messages)} & _QUOTE_TOOLS
     )

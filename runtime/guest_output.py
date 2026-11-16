@@ -46,24 +46,46 @@ def guest_reply_tool() -> StructuredTool:
             "the guest reply only in free-form assistant text."
         ),
         func=_record,
+        return_direct=True,
     )
+
+
+def _args_dict(raw) -> dict | None:
+    if isinstance(raw, dict):
+        return raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if text.startswith("{"):
+            try:
+                parsed = json.loads(text)
+            except (TypeError, ValueError):
+                return None
+            return parsed if isinstance(parsed, dict) else None
+    return None
+
+
+def _reply_message_from_call(call) -> str | None:
+    if isinstance(call, dict):
+        name = call.get("name")
+        args = _args_dict(call.get("args"))
+    else:
+        name = getattr(call, "name", None)
+        args = _args_dict(getattr(call, "args", None))
+    if name != GUEST_REPLY_TOOL_NAME or not isinstance(args, dict):
+        return None
+    msg = args.get("message")
+    if isinstance(msg, str) and msg.strip():
+        return msg.strip()
+    return None
 
 
 def reply_from_tool_calls(messages: list) -> str | None:
     """Last reply_to_guest tool argument in the message list."""
     for message in reversed(messages or []):
         for call in getattr(message, "tool_calls", None) or []:
-            if isinstance(call, dict):
-                name = call.get("name")
-                args = call.get("args") or {}
-            else:
-                name = getattr(call, "name", None)
-                args = getattr(call, "args", None) or {}
-            if name != GUEST_REPLY_TOOL_NAME or not isinstance(args, dict):
-                continue
-            msg = args.get("message")
-            if isinstance(msg, str) and msg.strip():
-                return msg.strip()
+            text = _reply_message_from_call(call)
+            if text:
+                return text
     return None
 
 
@@ -205,7 +227,9 @@ def finalize_guest_reply(
 ) -> tuple[str, list[str]]:
     """Guest text ONLY from reply_to_guest, then reprompt, then structured/generic fallback."""
     notes: list[str] = []
-    raw = reply_from_tool_calls(messages)
+    channel_raw = reply_from_tool_calls(messages)
+    raw = channel_raw
+    trust_channel = channel_raw is not None
     if raw is None and reprompt_invoke is not None:
         try:
             raw = reprompt_invoke()
@@ -239,7 +263,10 @@ def finalize_guest_reply(
     )
     notes.extend(gnotes)
     cleaned, gnotes2 = apply_reply_grounding(
-        cleaned, messages, guest_locale=guest_locale
+        cleaned,
+        messages,
+        guest_locale=guest_locale,
+        trust_channel=trust_channel,
     )
     notes.extend(gnotes2)
     return cleaned.strip(), notes

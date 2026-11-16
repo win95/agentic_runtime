@@ -38,6 +38,14 @@ class ToolCallBudgetExceededError(Exception):
     """An agent spent its per-execution tool-call budget."""
 
 
+class GuestReplyCompleteError(Exception):
+    """The guest channel tool succeeded; the flow agent must stop."""
+
+    def __init__(self, message: str = ""):
+        self.guest_message = (message or "").strip()
+        super().__init__(self.guest_message or "guest reply delivered")
+
+
 def _call_key(name: str, args: dict) -> tuple[str, str]:
     try:
         args_json = json.dumps(args, sort_keys=True, ensure_ascii=False, default=str)
@@ -128,6 +136,7 @@ class ToolCallCap(AgentMiddleware):
         self._failed: dict[tuple[str, str], str] = {}
         self._success_snippet: dict[tuple[str, str], str] = {}
         self._succeeded: set[str] = set(self._prior)
+        self.guest_reply_message: str | None = None
 
     def reset(self) -> None:
         self.calls = 0
@@ -137,6 +146,7 @@ class ToolCallCap(AgentMiddleware):
         # Prior-turn successes survive the reset: they are session
         # facts, not per-execution state.
         self._succeeded = set(self._prior)
+        self.guest_reply_message = None
 
     def wrap_tool_call(self, request, handler):
         tool_call = request.tool_call or {}
@@ -144,9 +154,7 @@ class ToolCallCap(AgentMiddleware):
         args = dict(tool_call.get("args") or {})
         tool_call_id = str(tool_call.get("id") or "")
         if GUEST_REPLY_TOOL_NAME in self._succeeded:
-            raise ToolCallBudgetExceededError(
-                "reply_to_guest already succeeded; end this flow"
-            )
+            raise GuestReplyCompleteError(self.guest_reply_message or "")
         self.calls += 1
         if self.calls > self.max_calls:
             self.exceeded = True
@@ -201,6 +209,11 @@ class ToolCallCap(AgentMiddleware):
             elif isinstance(content, dict):
                 snippet = json.dumps(content, ensure_ascii=False, default=str)
             self._success_snippet[key] = str(snippet)[:1500]
+            if name == GUEST_REPLY_TOOL_NAME:
+                msg = args.get("message")
+                if isinstance(msg, str) and msg.strip():
+                    self.guest_reply_message = msg.strip()
+                raise GuestReplyCompleteError(self.guest_reply_message or "")
         return result
 
 
