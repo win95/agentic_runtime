@@ -4,8 +4,10 @@ import json
 
 from langchain_core.messages import AIMessage, ToolMessage
 
+from app.config import settings
 from runtime.policy_grounding import (
     apply_policy_grounding,
+    policy_unavailable_reply,
     search_query_from_guest_message,
 )
 
@@ -40,8 +42,9 @@ def test_apply_policy_grounding_no_docs_unavailable():
         guest_message="Chính sách hủy?",
         tools_by_name=None,
     )
-    assert "chưa tìm thấy" in reply.casefold()
-    assert notes
+    assert reply == policy_unavailable_reply()
+    assert reply == settings.policy_unavailable_reply_template.strip()
+    assert any("unavailable" in n for n in notes)
 
 
 def test_apply_policy_grounding_keeps_supported_sentence():

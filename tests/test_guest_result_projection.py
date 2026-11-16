@@ -15,7 +15,10 @@ def test_is_guest_api_channel():
 def test_project_guest_result_strips_internal_fields():
     output, evidence = project_guest_result(
         {
-            "answer": "Flow 'policy-lookup': done\n\nXin chào khách.",
+            "answer": (
+                '<data source="trace">{"step":"done"}</data>\n\n'
+                "Xin chào khách."
+            ),
             "plan_trace": {"reception": {"visited": ["policy-lookup"]}},
             "tool_failures": ["x"],
         },
@@ -31,6 +34,7 @@ def test_project_guest_result_strips_internal_fields():
     assert "plan_trace" not in output
     assert "tool_failures" not in output
     assert "<data" not in output["answer"]
+    assert "Xin chào khách" in output["answer"]
     assert len(evidence) == 1
     assert evidence[0]["kind"] == "guest_reply"
     assert "<data" not in evidence[0]["summary"]

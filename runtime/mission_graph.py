@@ -914,8 +914,11 @@ def deep_agent_node(state: MissionState) -> dict:
                 "notes": state.get("notes") or [],
                 "errors": [],
             }
-        logger.warning("Deep agent unavailable: %s", exc)
-        return {"errors": [f"Deep agent unavailable: {exc}"]}
+        from runtime.execution_diagnostics import classify_agent_failure
+
+        diagnostic = classify_agent_failure(exc)
+        logger.warning("Deep agent failed (%s): %s", diagnostic.category, exc)
+        return {"errors": [diagnostic.to_json()]}
 
 
 def _root_causes_from_evidence(evidence: list | None) -> list[str]:
@@ -1034,6 +1037,10 @@ def _execution_diagnostic_errors(errors: list[str] | None) -> list[str]:
 
 def _errors_explain_empty_evidence(errors: list[str]) -> bool:
     """True when existing errors already explain why evidence is empty."""
+    from runtime.execution_diagnostics import diagnostic_explains_empty_evidence
+
+    if diagnostic_explains_empty_evidence(errors):
+        return True
     diag = _execution_diagnostic_errors(errors)
     if not diag:
         return False
@@ -1044,8 +1051,6 @@ def _errors_explain_empty_evidence(errors: list[str]) -> bool:
         "Turn ended without",
         "Turn completed flows",
         "ending turn",
-        "Deep agent unavailable",
-        "Connection error",
     )
     return any(any(m in line for m in markers) for line in diag)
 

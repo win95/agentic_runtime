@@ -1062,7 +1062,6 @@ def build_flow_subgraph(
                 context_blobs=context_blobs,
                 session_id=state.get("session_id") or "",
                 input_data=state.get("input_data") or {},
-                fallback_text=_flow_answer(added),
                 tools_by_name=tools_by_name,
                 reprompt_invoke=reprompt_cb,
             )

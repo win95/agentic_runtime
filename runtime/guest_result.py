@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from runtime.guest_output import guard_guest_reply, strip_internal_prose
+from runtime.guest_output import guard_guest_reply, strip_runtime_markup
 
 GUEST_API_CHANNEL = "guest_api"
 
@@ -47,7 +47,7 @@ def project_guest_result(
         or raw.get("summary")
         or ""
     )
-    answer = strip_internal_prose(str(answer))
+    answer = strip_runtime_markup(str(answer))
     cleaned, _ = guard_guest_reply(
         answer,
         context_blobs=[],

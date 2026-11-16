@@ -12,12 +12,13 @@ POLICY_SEARCH_TOOL = "search_policy_documents"
 POLICY_READ_TOOL = "read_policy_document"
 POLICY_TOOLS = frozenset({POLICY_SEARCH_TOOL, POLICY_READ_TOOL})
 
-_POLICY_UNAVAILABLE = (
-    "Em chưa tìm thấy thông tin chính sách phù hợp trong tài liệu của khách sạn. "
-    "Anh/chị vui lòng liên hệ lễ tân để được hỗ trợ chi tiết."
-)
-
 _TOKEN_RE = re.compile(r"[\w]{3,}", re.UNICODE)
+
+
+def policy_unavailable_reply() -> str:
+    from app.config import settings
+
+    return (settings.policy_unavailable_reply_template or "").strip()
 
 
 def _tool_content_dict(message: Any) -> dict | None:
@@ -164,7 +165,7 @@ def _sentence_support_score(sentence: str, corpus: list[str]) -> float:
 
 def _best_corpus_excerpt(corpus: list[str], *, max_chars: int = 600) -> str:
     if not corpus:
-        return _POLICY_UNAVAILABLE
+        return policy_unavailable_reply()
     text = corpus[0]
     for part in corpus:
         if len(part) > len(text):
@@ -194,7 +195,7 @@ def apply_policy_grounding(
     notes.extend(extend_notes)
     if not corpus:
         notes.append("policy: no grounded document text — unavailable reply")
-        return _POLICY_UNAVAILABLE, notes
+        return policy_unavailable_reply(), notes
     if not (reply or "").strip():
         notes.append("policy: empty reply — using document excerpt")
         return _best_corpus_excerpt(corpus), notes

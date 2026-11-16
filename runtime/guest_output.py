@@ -5,30 +5,22 @@ from __future__ import annotations
 import json
 import re
 
-from langchain_core.messages import AIMessage
 from langchain_core.tools import StructuredTool
 
 from runtime.policy_grounding import apply_policy_grounding
 from runtime.reply_grounding import apply_reply_grounding, grounded_reply_from_tools
 from runtime.scope import get_bound_guest_id
-
 GUEST_REPLY_TOOL_NAME = "reply_to_guest"
 GUEST_REPLY_REPROMPT = (
-    "You must call reply_to_guest exactly once with ONLY the final message "
-    "for the guest (no headings, no 'Booking summary', no 'Reply to guest' "
-    "labels, no flow notes)."
+    "Call reply_to_guest exactly once with the final message for the guest."
 )
 _PARA_SIMILARITY = 0.82
-_REPLY_QUOTED_RE = re.compile(
-    r'Reply to guest:\s*["\u201c](.+?)["\u201d]',
-    re.IGNORECASE | re.DOTALL,
-)
-_FLOW_LINE_RE = re.compile(r"^Flow\s+'[^']+'\s*:", re.IGNORECASE | re.MULTILINE)
 _NGRAM_WORDS = 8
 _OVERLAP_RATIO = 0.35
 _GUEST_ID_IN_TEXT = re.compile(
     r'"guest_id"\s*:\s*"([^"]+)"|\'guest_id\'\s*:\s*\'([^\']+)\''
 )
+# Same delimiter shape as runtime.security.wrap_data — not model-specific phrases.
 _DATA_BLOCK_RE = re.compile(r"<data\b[^>]*>.*?</data>", re.IGNORECASE | re.DOTALL)
 
 
@@ -67,6 +59,14 @@ def reply_from_tool_calls(messages: list) -> str | None:
     return None
 
 
+def strip_runtime_markup(text: str) -> str:
+    """Remove runtime-injected prompt markup (``wrap_data`` blocks only)."""
+    if not text:
+        return ""
+    cleaned = _DATA_BLOCK_RE.sub("", text).strip()
+    return _dedupe_paragraphs(cleaned)
+
+
 def _word_ngrams(text: str, n: int) -> set[str]:
     words = re.findall(r"\S+", (text or "").lower())
     if len(words) < n:
@@ -92,41 +92,7 @@ def _dedupe_paragraphs(text: str) -> str:
         if any(_paragraphs_similar(part, prev) for prev in out):
             continue
         out.append(part)
-    if not out:
-        lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
-        for line in lines:
-            if any(_paragraphs_similar(line, prev) for prev in out):
-                continue
-            if not _FLOW_LINE_RE.match(line):
-                out.append(line)
-        return "\n".join(out)
-    return "\n\n".join(out)
-
-
-def strip_internal_prose(text: str) -> str:
-    """Remove scaffolding labels and flow diagnostics from guest-visible text."""
-    if not text:
-        return ""
-    quoted = _REPLY_QUOTED_RE.search(text)
-    if quoted:
-        text = quoted.group(1).strip()
-    text = _FLOW_LINE_RE.sub("", text)
-    lines: list[str] = []
-    for line in text.splitlines():
-        low = line.strip().casefold()
-        if low.startswith("booking summary:"):
-            continue
-        if low.startswith("reply to guest:"):
-            continue
-        if low.startswith("flow '") and "stopped:" in low:
-            continue
-        lines.append(line)
-    text = "\n".join(lines).strip()
-    return _dedupe_paragraphs(_strip_data_blocks(text))
-
-
-def _strip_data_blocks(text: str) -> str:
-    return _DATA_BLOCK_RE.sub("", text or "").strip()
+    return "\n\n".join(out) if out else text.strip()
 
 
 def _remove_overlap_sentences(text: str, context_blobs: list[str]) -> str:
@@ -158,10 +124,9 @@ def _allowed_guest_ids(session_id: str | None, input_data: dict | None) -> set[s
     if isinstance(bound, str) and bound:
         allowed.add(bound)
     data = input_data or {}
-    for key in ("guest_id",):
-        gid = data.get(key)
-        if isinstance(gid, str) and gid:
-            allowed.add(gid)
+    gid = data.get("guest_id")
+    if isinstance(gid, str) and gid:
+        allowed.add(gid)
     return allowed
 
 
@@ -183,7 +148,7 @@ def guard_guest_reply(
     notes: list[str] = []
     if not text or not str(text).strip():
         return "", notes
-    cleaned = strip_internal_prose(str(text))
+    cleaned = strip_runtime_markup(str(text))
     before = cleaned
     cleaned = _remove_overlap_sentences(cleaned, context_blobs)
     if cleaned != before:
@@ -201,18 +166,10 @@ def guard_guest_reply(
     return cleaned.strip(), notes
 
 
-def needs_reply_reprompt(messages: list, answer: str) -> bool:
-    if reply_from_tool_calls(messages):
-        return False
-    text = answer or ""
-    low = text.casefold()
-    if not text.strip():
-        return True
-    if "reply to guest:" in low or "booking summary:" in low:
-        return True
-    if _FLOW_LINE_RE.search(text):
-        return True
-    return len(text.split()) > 80 and GUEST_REPLY_TOOL_NAME not in low
+def generic_guest_fallback() -> str:
+    from app.config import settings
+
+    return (settings.guest_reply_generic_fallback or "").strip()
 
 
 def finalize_guest_reply(
@@ -221,15 +178,27 @@ def finalize_guest_reply(
     context_blobs: list[str],
     session_id: str | None = None,
     input_data: dict | None = None,
-    fallback_text: str | None = None,
     tools_by_name: dict | None = None,
     reprompt_invoke=None,
 ) -> tuple[str, list[str]]:
-    """Full guest reply pipeline: tool channel, policy/number grounding, guards."""
+    """Guest text ONLY from reply_to_guest, then reprompt, then structured/generic fallback."""
     notes: list[str] = []
     raw = reply_from_tool_calls(messages)
+    if raw is None and reprompt_invoke is not None:
+        try:
+            raw = reprompt_invoke()
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"Guest reply reprompt failed: {exc}")
+        if raw:
+            notes.append("Guest reply from reprompt")
     if raw is None:
-        raw = strip_internal_prose(fallback_text or "")
+        built = grounded_reply_from_tools(messages)
+        if built:
+            raw = built
+            notes.append("Guest reply from structured tool results")
+    if not (raw or "").strip():
+        raw = generic_guest_fallback()
+        notes.append("Guest reply generic fallback")
     guest_message = str((input_data or {}).get("message") or "")
     raw, pnotes = apply_policy_grounding(
         raw,
@@ -247,39 +216,6 @@ def finalize_guest_reply(
     notes.extend(gnotes)
     cleaned, gnotes2 = apply_reply_grounding(cleaned, messages)
     notes.extend(gnotes2)
-    if needs_reply_reprompt(messages, cleaned) and reprompt_invoke is not None:
-        try:
-            reprompted = reprompt_invoke()
-        except Exception as exc:  # noqa: BLE001
-            notes.append(f"Guest reply reprompt failed: {exc}")
-            reprompted = None
-        if reprompted:
-            cleaned = strip_internal_prose(reprompted)
-            cleaned, gnotes3 = guard_guest_reply(
-                cleaned,
-                context_blobs=context_blobs,
-                session_id=session_id,
-                input_data=input_data,
-            )
-            notes.extend(gnotes3)
-            cleaned, pnotes2 = apply_policy_grounding(
-                cleaned,
-                messages,
-                guest_message=guest_message,
-                tools_by_name=tools_by_name,
-            )
-            notes.extend(pnotes2)
-            notes.append("Guest reply taken after reprompt")
-        elif not cleaned.strip():
-            built = grounded_reply_from_tools(messages)
-            if built:
-                cleaned, _ = guard_guest_reply(
-                    built,
-                    context_blobs=context_blobs,
-                    session_id=session_id,
-                    input_data=input_data,
-                )
-                notes.append("Guest reply safe fallback from tool results")
     return cleaned.strip(), notes
 
 
@@ -289,17 +225,15 @@ def extract_flow_guest_reply(
     context_blobs: list[str],
     session_id: str | None = None,
     input_data: dict | None = None,
-    fallback_text: str | None = None,
     tools_by_name: dict | None = None,
     reprompt_invoke=None,
 ) -> tuple[str, list[str]]:
-    """Prefer reply_to_guest tool; fall back to sanitized assistant text."""
+    """Guest-facing reply via reply_to_guest channel only."""
     return finalize_guest_reply(
         messages,
         context_blobs=context_blobs,
         session_id=session_id,
         input_data=input_data,
-        fallback_text=fallback_text,
         tools_by_name=tools_by_name,
         reprompt_invoke=reprompt_invoke,
     )

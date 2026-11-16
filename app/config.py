@@ -155,6 +155,16 @@ class Settings(BaseSettings):
     graph_recursion_limit: int = 80
     llm_request_timeout_seconds: int = 120
     llm_request_max_retries: int = 2
+    # Guest channel: when reply_to_guest is missing after reprompt (template, not test-tuned).
+    guest_reply_generic_fallback: str = (
+        "We could not deliver a reply at this time. "
+        "Please try again or contact the front desk."
+    )
+    # Policy flows: reply when no document text could be grounded (template).
+    policy_unavailable_reply_template: str = (
+        "The requested policy information is not available in our documents. "
+        "Please contact the front desk for assistance."
+    )
 
     # Batch ingest (Option B): files in a local inbox dir, or in the
     # MinIO ingest-inbox bucket when ingest_use_minio is true. Beat
