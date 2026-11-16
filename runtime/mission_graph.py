@@ -860,6 +860,7 @@ def deep_agent_node(state: MissionState) -> dict:
         if "recommendations" in required_keys and not result.get("recommendations"):
             result["recommendations"] = _recommendations_from_summary(summary)
         tool_failures = outcome.get("errors") or []
+        graph_errors = _execution_diagnostic_errors(tool_failures)
         if tool_failures:
             # Business-level tool refusals (a delete refused, a cancel
             # on a finished execution) are outcomes the agent handled
@@ -877,7 +878,7 @@ def deep_agent_node(state: MissionState) -> dict:
             "evidence": outcome.get("evidence") or [],
             "result": result,
             "notes": notes,
-            "errors": [],
+            "errors": list(graph_errors),
             "agent_version": agent_version.version if agent_version is not None else None,
             "agent_version_drift": agent_version_drift,
             "hook_events": hook_events,
@@ -984,6 +985,28 @@ def _allowed_tool_names(mission: dict) -> set[str] | None:
     return allowed or None
 
 
+def _execution_diagnostic_errors(errors: list[str] | None) -> list[str]:
+    """Graph / router failures that belong in validation errors.
+
+    Tool-outcome lines (``Tool '…' reported failure``) stay in
+    ``result.tool_failures`` only — they are agent-handled refusals,
+    not missing-evidence failures.
+    """
+    if not errors:
+        return []
+    out: list[str] = []
+    for line in errors:
+        if line.startswith("Tool '") and " reported failure" in line:
+            continue
+        out.append(line)
+    return out
+
+
+def _errors_explain_empty_evidence(errors: list[str]) -> bool:
+    """True when existing errors already explain why evidence is empty."""
+    return bool(_execution_diagnostic_errors(errors))
+
+
 def validate_results(state: MissionState) -> dict:
     """Check evidence, output schema and success criteria.
 
@@ -1011,7 +1034,7 @@ def validate_results(state: MissionState) -> dict:
     mission = state.get("mission") or {}
     required_keys = list((mission.get("output_schema") or {}).get("properties", {}).keys())
 
-    if not evidence:
+    if not evidence and not _errors_explain_empty_evidence(errors):
         errors.append("No evidence collected")
     if "evidence" not in result:
         result["evidence"] = evidence

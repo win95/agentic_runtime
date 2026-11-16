@@ -1,0 +1,216 @@
+"""Structured flow router — selection, budget, reprompt, error surfacing.
+
+No live LLM: exercises ``runtime/subgraph/flow.py`` helpers and the
+compiled graph through the ``route_invoker`` seam.
+"""
+
+from __future__ import annotations
+
+import json
+
+from langchain_core.messages import AIMessage, HumanMessage
+
+from runtime.context_budget import ROUTE_INSTRUCTION_TOKENS
+from runtime.mission_graph import validate_results, _errors_explain_empty_evidence
+from runtime.skills.map_plan import MapBranch, MapNode, SkillMap
+from runtime.subgraph.flow import (
+    ROUTE_TOOL_NAME,
+    ROUTER_CLARIFICATION_REPLY,
+    build_flow_subgraph,
+    build_route_instruction,
+    parse_route_declaration,
+    route_instruction_token_count,
+    route_tool_spec,
+    run_flow_subgraph,
+)
+
+
+def _map(nodes, start="route"):
+    return SkillMap(
+        skill_name="test-flow",
+        start=start,
+        nodes=[
+            MapNode(
+                id=n["id"],
+                goal=n.get("goal", n["id"]),
+                tools=n.get("tools", []),
+                branches=[
+                    MapBranch(when=b["when"], goto=b["goto"]) for b in n.get("branches", [])
+                ],
+                terminal=bool(n.get("terminal", False)),
+                resume=bool(n.get("resume", False)),
+            )
+            for n in nodes
+        ],
+    )
+
+
+FLOW_MAP = _map(
+    [
+        {
+            "id": "route",
+            "branches": [
+                {"when": "guest wants to book", "goto": "check"},
+                {"when": "guest wants a task", "goto": "find"},
+            ],
+        },
+        {"id": "check", "goal": "Collect stay dates", "tools": ["t_check"], "terminal": True},
+        {"id": "find", "goal": "Collect task details", "tools": ["t_find"], "terminal": True},
+        {
+            "id": "create",
+            "goal": "Create after confirm",
+            "tools": ["t_create"],
+            "terminal": True,
+            "resume": True,
+        },
+    ]
+)
+
+
+def _tool_call(flow_id: str) -> AIMessage:
+    return AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "id": "call-1",
+                "name": ROUTE_TOOL_NAME,
+                "args": {"flow_id": flow_id},
+                "type": "tool_call",
+            }
+        ],
+    )
+
+
+def test_route_tool_spec_enum_from_map():
+    spec = route_tool_spec(["check", "find"])
+    enum = spec["function"]["parameters"]["properties"]["flow_id"]["enum"]
+    assert set(enum) == {"check", "find", "END", "WAIT"}
+
+
+def test_parse_route_declaration_prefers_tool_over_text():
+    msg = _tool_call("check")
+    assert parse_route_declaration(msg, frozenset({"check", "END", "WAIT"})) == "check"
+    text_msg = AIMessage(content="prose\nFLOW: find")
+    assert parse_route_declaration(
+        text_msg, frozenset({"check", "find", "END", "WAIT"})
+    ) == "find"
+
+
+def test_parse_route_declaration_rejects_unknown_tool_enum():
+    msg = _tool_call("not-a-flow")
+    assert parse_route_declaration(msg, frozenset({"check", "END", "WAIT"})) is None
+
+
+def test_route_instruction_respects_token_budget():
+    long_goal = "x" * 500
+    big_map = _map(
+        [
+            {"id": "route", "branches": [{"when": "a", "goto": f"f{i}"} for i in range(30)]},
+            *[
+                {"id": f"f{i}", "goal": long_goal, "terminal": True}
+                for i in range(30)
+            ],
+        ]
+    )
+    from runtime.subgraph.flow import derive_flows
+
+    flows = derive_flows(big_map)
+    when = {b.goto: b.when for b in big_map.node_by_id("route").branches}
+    state = {"input_data": {"message": "hi"}, "visited": [], "history_block": ""}
+    assert (
+        route_instruction_token_count(state, flows, when)
+        <= ROUTE_INSTRUCTION_TOKENS
+    )
+
+
+def test_flow_subgraph_structured_route_success():
+    calls = iter([_tool_call("check"), _tool_call("END")])
+
+    def route_invoker(messages, tool_spec, config):  # noqa: ARG001
+        return next(calls)
+
+    def flow_executor(flow, state, messages):  # noqa: ARG001
+        return messages + [AIMessage(content=f"ran {flow.id}")]
+
+    compiled = build_flow_subgraph(
+        FLOW_MAP,
+        tools=[],
+        system_prompt="base",
+        flow_executor=flow_executor,
+        route_invoker=route_invoker,
+    )
+    out = run_flow_subgraph(
+        compiled,
+        {"mission_id": "test", "objective": "test"},
+        {"message": "book"},
+        skill_maps=[FLOW_MAP],
+    )
+    assert "check" in (out.get("visited_nodes") or [])
+    assert not any("Router declared no flow" in e for e in out.get("errors") or [])
+
+
+def test_flow_subgraph_reprompt_then_clarification():
+    seq = iter(
+        [
+            AIMessage(content="Flow 'quote-price': unsure"),
+            AIMessage(content="still no tool"),
+        ]
+    )
+
+    def route_invoker(messages, tool_spec, config):  # noqa: ARG001
+        return next(seq)
+
+    compiled = build_flow_subgraph(
+        FLOW_MAP,
+        tools=[],
+        system_prompt="base",
+        route_invoker=route_invoker,
+    )
+    out = run_flow_subgraph(
+        compiled,
+        {"mission_id": "test", "objective": "test"},
+        {"message": "help"},
+        skill_maps=[FLOW_MAP],
+    )
+    assert out.get("summary") == ROUTER_CLARIFICATION_REPLY
+    assert any("Router declared no flow" in e for e in out.get("errors") or [])
+
+
+def test_validate_results_skips_no_evidence_when_router_failed():
+    state = {
+        "errors": ["Router declared no flow (no FLOW: line); ending turn"],
+        "evidence": [],
+        "result": {},
+        "mission": {"output_schema": {"properties": {"answer": {}}}},
+    }
+    assert _errors_explain_empty_evidence(state["errors"])
+    out = validate_results(state)
+    assert "No evidence collected" not in out["errors"]
+    assert "Router declared no flow" in out["errors"][0]
+
+
+def test_validate_results_still_flags_no_evidence_without_router_errors():
+    out = validate_results(
+        {
+            "errors": [],
+            "evidence": [],
+            "result": {},
+            "mission": {"output_schema": {"properties": {"answer": {}}}},
+        }
+    )
+    assert "No evidence collected" in out["errors"]
+
+
+def test_build_route_instruction_compact_lines():
+    from runtime.subgraph.flow import derive_flows
+
+    flows = derive_flows(FLOW_MAP)
+    when = {b.goto: b.when for b in FLOW_MAP.node_by_id("route").branches}
+    text = build_route_instruction(
+        {"input_data": {}, "visited": []},
+        flows,
+        when,
+    )
+    assert "select_flow" in text
+    assert "- check:" in text or "- check\n" in text or "- check:" in text
+    assert json.dumps(when)[:20] not in text  # not dumping raw map JSON

@@ -97,6 +97,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
+from runtime.context_budget import ROUTE_INSTRUCTION_TOKENS, estimate_tokens
 from runtime.deep_agent import MAX_INPUT_JSON_BYTES, build_deep_agent, outcome_from_messages
 from runtime.llm_factory import build_chat_model
 from runtime.security import wrap_data
@@ -127,6 +128,18 @@ MAX_FLOW_STEPS = 12
 # turn) create. 10 covers the observed paths with headroom; the
 # budget still bounds a looping agent.
 MAX_TOOL_CALLS_PER_FLOW = 10
+
+ROUTE_TOOL_NAME = "select_flow"
+ROUTE_REPROMPT = (
+    "Your route choice was missing or invalid. Call the select_flow "
+    "tool exactly once with a single flow_id from the allowed list "
+    "(END or WAIT only when appropriate). Do not guess a flow."
+)
+ROUTER_CLARIFICATION_REPLY = (
+    "I am not sure I understood your request yet. Could you tell me "
+    "whether you need help with a booking, payment, a lookup, or "
+    "something else?"
+)
 
 # The route node's declaration. Tolerant by design (the v4b root
 # cause): the first token after FLOW: is the choice — bold markers
@@ -333,6 +346,247 @@ def parse_flow(text: str | None) -> str | None:
     return match.group(1) if match else None
 
 
+def route_tool_spec(flow_ids: list[str]) -> dict:
+    """OpenAI-style tool schema for structured flow selection."""
+    enum = sorted(set(flow_ids)) + ["END", "WAIT"]
+    return {
+        "type": "function",
+        "function": {
+            "name": ROUTE_TOOL_NAME,
+            "description": (
+                "Pick exactly one flow to run next for this guest turn."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "flow_id": {
+                        "type": "string",
+                        "enum": enum,
+                        "description": (
+                            "One flow id from the catalog, END when "
+                            "nothing remains, or WAIT when more guest "
+                            "information is needed before routing."
+                        ),
+                    }
+                },
+                "required": ["flow_id"],
+            },
+        },
+    }
+
+
+def _allowed_route_ids(flow_ids: list[str]) -> frozenset[str]:
+    return frozenset(flow_ids) | {"END", "WAIT"}
+
+
+def parse_route_tool_call(message, allowed: frozenset[str]) -> str | None:
+    """Flow id from a select_flow tool call, validated against ``allowed``."""
+    for call in getattr(message, "tool_calls", None) or []:
+        if isinstance(call, dict):
+            name = call.get("name")
+            args = call.get("args") or {}
+        else:
+            name = getattr(call, "name", None)
+            args = getattr(call, "args", None) or {}
+        if name != ROUTE_TOOL_NAME or not isinstance(args, dict):
+            continue
+        flow_id = args.get("flow_id")
+        if not isinstance(flow_id, str) or not flow_id.strip():
+            continue
+        choice = flow_id.strip()
+        if choice in allowed:
+            return choice
+    return None
+
+
+def parse_route_declaration(
+    message,
+    allowed: frozenset[str],
+    *,
+    reply_text: str | None = None,
+) -> str | None:
+    """Structured tool call first, then tolerant FLOW: text."""
+    from_tool = parse_route_tool_call(message, allowed)
+    if from_tool is not None:
+        return from_tool
+    text = reply_text
+    if text is None:
+        text = last_text([message])
+    declared = parse_flow(text)
+    if declared is None:
+        return None
+    return declared if declared in allowed else None
+
+
+def flow_summary_line(flow: Flow, when: str | None, *, desc_limit: int) -> str:
+    """One catalog line: id plus a single-line description from map data."""
+    desc = (when or "").strip()
+    if not desc and flow.nodes:
+        desc = (flow.nodes[0].goal or "").strip()
+    if desc:
+        desc = " ".join(desc.split())
+        if desc_limit > 0 and len(desc) > desc_limit:
+            desc = desc[: max(0, desc_limit - 3)] + "..."
+    if desc:
+        return f"- {flow.id}: {desc}"
+    return f"- {flow.id}"
+
+
+def build_compact_flow_catalog(
+    flows: list[Flow],
+    when_by_entry: dict[str, str],
+    max_tokens: int,
+) -> str:
+    """Flow list compiled from the skill map, trimmed to ``max_tokens``."""
+    if max_tokens < 1:
+        return ""
+    for desc_limit in (160, 120, 80, 48, 24, 0):
+        lines = [
+            flow_summary_line(
+                flow,
+                when_by_entry.get(flow.id),
+                desc_limit=desc_limit,
+            )
+            for flow in flows
+        ]
+        text = "\n".join(lines)
+        if estimate_tokens(text) <= max_tokens:
+            return text
+    lines = [f"- {flow.id}" for flow in flows]
+    while len(lines) > 1 and estimate_tokens("\n".join(lines)) > max_tokens:
+        lines.pop()
+    return "\n".join(lines)
+
+
+def build_route_instruction(
+    state: dict,
+    flows: list[Flow],
+    when_by_entry: dict[str, str],
+    *,
+    max_tokens: int = ROUTE_INSTRUCTION_TOKENS,
+) -> str:
+    """Human prompt for the route model (catalog budget enforced)."""
+    input_json = json.dumps(state.get("input_data") or {}, ensure_ascii=False)[
+        :MAX_INPUT_JSON_BYTES
+    ]
+    prefix = [
+        "Route the guest's request to ONE flow. Read the conversation: "
+        "what flows already did this turn is in their replies — route "
+        "only what is still unhandled.",
+        f"Execution input:\n{wrap_data('execution_input', input_json)}",
+    ]
+    history_block = state.get("history_block") or ""
+    if history_block:
+        prefix.append(f"Session history (prior turns):\n{history_block}")
+    visited = state.get("visited") or []
+    suffix = [
+        "Already visited this turn: "
+        + (", ".join(visited) if visited else "none")
+        + " — do not pick a visited flow again.",
+        (
+            "Call the select_flow tool once with your single choice "
+            "(a flow id, END, or WAIT). "
+            "Backward compatibility: you may instead end with one line "
+            "FLOW: <id> or FLOW: END or FLOW: WAIT."
+        ),
+    ]
+    fixed = "\n\n".join(prefix + ["Flows (choose one):\n{CATALOG}", *suffix])
+    catalog_when = dict(when_by_entry)
+    for flow in flows:
+        if flow.id not in catalog_when and flow.resume_gated:
+            catalog_when[flow.id] = (
+                "the guest confirmed a booking in a previous turn "
+                "(only when the session has prior turns)"
+            )
+    catalog_budget = max(48, max_tokens - estimate_tokens(fixed.replace("{CATALOG}", "")))
+    catalog = build_compact_flow_catalog(flows, catalog_when, catalog_budget)
+    return fixed.replace("{CATALOG}", catalog)
+
+
+def route_instruction_token_count(
+    state: dict,
+    flows: list[Flow],
+    when_by_entry: dict[str, str],
+    *,
+    max_tokens: int = ROUTE_INSTRUCTION_TOKENS,
+) -> int:
+    return estimate_tokens(
+        build_route_instruction(state, flows, when_by_entry, max_tokens=max_tokens)
+    )
+
+
+def classify_route_choice(
+    declared: str | None,
+    state: dict,
+    by_id: dict[str, Flow],
+    *,
+    max_steps: int,
+    steps: int,
+    at_route: bool,
+    reply_text: str = "",
+) -> tuple[str | None, list[str], bool]:
+    """Validate a route declaration.
+
+    Returns ``(route_next, failure_reasons, ok)``. ``failure_reasons`` is
+    empty when ``ok``; callers record them only after a reprompt fails.
+    """
+    if at_route and steps >= max_steps:
+        return (
+            "END",
+            [f"Plan step cap ({max_steps} nodes) reached at 'route'"],
+            False,
+        )
+
+    if declared is None:
+        if _is_ambiguous_flow_declaration(reply_text):
+            return (
+                None,
+                [
+                    "Router declared an ambiguous flow (more than "
+                    "one FLOW: line, or 'or FLOW:'); ending turn"
+                ],
+                False,
+            )
+        return (
+            None,
+            ["Router declared no flow (no FLOW: line); ending turn"],
+            False,
+        )
+
+    if declared in ("END", "WAIT"):
+        return "END", [], True
+
+    if declared not in by_id:
+        return (
+            None,
+            [f"Router declared unknown flow '{declared}'; ending turn"],
+            False,
+        )
+
+    if declared in (state.get("visited") or []):
+        return (
+            None,
+            [
+                f"Router declared flow '{declared}' already visited "
+                "this turn; ending turn"
+            ],
+            False,
+        )
+
+    if by_id[declared].resume_gated:
+        session_turns = len((state.get("session_history") or {}).get("turns") or [])
+        if session_turns == 0:
+            return (
+                None,
+                [
+                    f"Router declared resume-gated flow '{declared}' "
+                    "on a fresh turn; ending turn"
+                ],
+                False,
+            )
+    return declared, [], True
+
+
 def use_flow_subgraph(mission_id: str | None, mapped_skills) -> bool:
     """True when the mission is a flow pilot and has a mapped skill."""
     return mission_id in FLOW_PILOT_MISSIONS and bool(mapped_skills)
@@ -437,6 +691,7 @@ def build_flow_subgraph(
     resume_nodes: frozenset[str] | None = None,
     prior_successful_tools: frozenset[str] = frozenset(),
     flow_executor=None,
+    route_invoker=None,
     max_steps: int = MAX_FLOW_STEPS,
     max_tool_calls_per_flow: int = MAX_TOOL_CALLS_PER_FLOW,
 ):
@@ -456,9 +711,14 @@ def build_flow_subgraph(
     ``flow_executor`` is a test seam: ``executor(flow, state,
     messages)`` returning the new message list, replacing the real
     Deep Agent call. Production passes None.
+
+    ``route_invoker`` is a test seam: ``(messages, tool_spec, config)
+    -> AIMessage``, replacing the bound route model call.
     """
     flows = derive_flows(skill_map, resume_nodes=resume_nodes)
     by_id = {flow.id: flow for flow in flows}
+    allowed_ids = _allowed_route_ids(list(by_id.keys()))
+    route_tool = route_tool_spec(list(by_id.keys()))
     start = skill_map.node_by_id(skill_map.start)
     when_by_entry = {b.goto: b.when for b in (start.branches if start else [])}
     agent_cache: dict[str, object] = {}
@@ -518,49 +778,41 @@ def build_flow_subgraph(
         return agent_cache[flow.id]
 
     def route_model():
-        if "model" not in model_cache:
-            model_cache["model"] = build_chat_model(model_config)
-        return model_cache["model"]
+        if "bound" not in model_cache:
+            base = build_chat_model(model_config)
+            model_cache["bound"] = base.bind_tools(
+                [route_tool],
+                tool_choice=ROUTE_TOOL_NAME,
+            )
+        return model_cache["bound"]
 
-    def route_instruction(state: dict) -> str:
-        input_json = json.dumps(state.get("input_data") or {}, ensure_ascii=False)[
-            :MAX_INPUT_JSON_BYTES
-        ]
-        parts = [
-            "Route the guest's request to ONE flow. Read the "
-            "conversation: what the flows already did this turn is in "
-            "their replies — route only what is still unhandled.",
-            f"Execution input:\n{wrap_data('execution_input', input_json)}",
-        ]
-        history_block = state.get("history_block") or ""
-        if history_block:
-            parts.append(f"Session history (prior turns):\n{history_block}")
-        choices = []
-        for flow in flows:
-            when = when_by_entry.get(flow.id)
-            if when is None and flow.resume_gated:
-                when = (
-                    "the guest confirmed a booking in a previous turn "
-                    "(only when the session has prior turns)"
-                )
-            choices.append(f"- {flow.id} ({when})" if when else f"- {flow.id}")
-        parts.append("Flows (choose one):\n" + "\n".join(choices))
-        visited = state.get("visited") or []
-        parts.append(
-            "Already visited this turn: "
-            + (", ".join(visited) if visited else "none")
-            + " — do not pick a visited flow again."
+    def _invoke_route(messages: list, config: dict) -> AIMessage:
+        if route_invoker is not None:
+            return route_invoker(messages, route_tool, config)
+        model = route_model()
+        if config:
+            reply = model.invoke(messages, config=config)
+        else:
+            reply = model.invoke(messages)
+        if not isinstance(reply, AIMessage):
+            reply = AIMessage(content=last_text([reply]))
+        return reply
+
+    def _route_attempt(messages: list, config: dict, state: dict, steps: int):
+        reply = _invoke_route(messages, config)
+        new_messages = messages + [reply]
+        reply_text = last_text(new_messages)
+        declared = parse_route_declaration(reply, allowed_ids, reply_text=reply_text)
+        route_next, reasons, ok = classify_route_choice(
+            declared,
+            state,
+            by_id,
+            max_steps=max_steps,
+            steps=steps,
+            at_route=True,
+            reply_text=reply_text,
         )
-        parts.append(
-            "Finish with exactly one final line that names your single "
-            "choice. Write the word FLOW, a colon and a space, then your "
-            "choice: one flow id from the list above, or the word END when "
-            "nothing remains to do, or the word WAIT when you need more "
-            "information from the guest before routing. Put that line once "
-            "at the very end — never repeat this format and never offer "
-            "two choices."
-        )
-        return "\n\n".join(parts)
+        return reply, new_messages, declared, route_next, reasons, ok
 
     def flow_instruction(state: dict, flow: Flow) -> str:
         input_json = json.dumps(state.get("input_data") or {}, ensure_ascii=False)[
@@ -589,52 +841,30 @@ def build_flow_subgraph(
         def _run_route(state: dict) -> dict:
             steps = int(state.get("steps") or 0) + 1
             messages = list(state.get("messages") or []) + [
-                HumanMessage(content=route_instruction(state))
+                HumanMessage(content=build_route_instruction(state, flows, when_by_entry))
             ]
             config = _config()
-            model = route_model()
-            reply = model.invoke(messages, config=config) if config else model.invoke(messages)
-            new_messages = messages + [reply]
-            reply_text = last_text(new_messages)
-            declared = parse_flow(reply_text)
             errors = list(state.get("errors") or [])
-            # The router decides here; the edge function only reads
-            # route_next. Every invalid case ends the turn with an
-            # error recorded — there is no "next in order" fallback:
-            # in a flat list of independent flows there is no
-            # meaningful next, and a silent walk is how a failed
-            # report-booking created a task the guest never asked for.
-            route_next: str | None = None
-            if declared is None:
-                if _is_ambiguous_flow_declaration(reply_text):
-                    errors.append(
-                        "Router declared an ambiguous flow (more than "
-                        "one FLOW: line, or 'or FLOW:'); ending turn"
-                    )
+            answer = state.get("answer") or ""
+            _, new_messages, declared, route_next, reasons, ok = _route_attempt(
+                messages, config, state, steps
+            )
+            if not ok:
+                if reasons and reasons[0].startswith("Plan step cap"):
+                    errors.extend(reasons)
+                    route_next = "END"
                 else:
-                    errors.append("Router declared no flow (no FLOW: line); ending turn")
-            elif declared in ("END", "WAIT"):
-                route_next = "END"
-            elif declared not in by_id:
-                errors.append(f"Router declared unknown flow '{declared}'; ending turn")
-            elif declared in (state.get("visited") or []):
-                errors.append(
-                    f"Router declared flow '{declared}' already visited this turn; ending turn"
-                )
-            elif by_id[declared].resume_gated:
-                session_turns = len((state.get("session_history") or {}).get("turns") or [])
-                if session_turns == 0:
-                    errors.append(
-                        f"Router declared resume-gated flow '{declared}' "
-                        "on a fresh turn; ending turn"
+                    reprompt_messages = new_messages + [
+                        HumanMessage(content=ROUTE_REPROMPT)
+                    ]
+                    _, new_messages, declared, route_next, reasons2, ok2 = _route_attempt(
+                        reprompt_messages, config, state, steps
                     )
-                else:
-                    route_next = declared
-            else:
-                route_next = declared
-            if steps >= max_steps:
-                errors.append(f"Plan step cap ({max_steps} nodes) reached at 'route'")
-                route_next = "END"
+                    if not ok2:
+                        errors.extend(reasons2)
+                        route_next = "END"
+                        if not answer:
+                            answer = ROUTER_CLARIFICATION_REPLY
             return {
                 "messages": new_messages,
                 "current": "route",
@@ -643,6 +873,7 @@ def build_flow_subgraph(
                 "route_next": route_next,
                 "steps": steps,
                 "errors": errors,
+                "answer": answer,
             }
 
         return _run_route

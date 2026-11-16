@@ -74,6 +74,9 @@ MAX_CONTEXT_TOKENS = 32_000
 SYSTEM_PROMPT_TOKENS = 1_024
 TOOL_DEFINITIONS_TOKENS = 2_048
 SKILLS_TOKENS = 2_048
+# Flow router: the per-route human message (catalog + instructions). The
+# catalog is compiled from the skill map, not the full SKILL body.
+ROUTE_INSTRUCTION_TOKENS = 2_048
 RETRIEVAL_TOKENS = 8_024
 EXECUTION_INPUT_TOKENS = 2_048
 HISTORY_TOKENS = 9_640
