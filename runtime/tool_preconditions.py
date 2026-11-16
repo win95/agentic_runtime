@@ -1,21 +1,78 @@
-"""Write-tool preconditions — data-driven, not prompt-specific."""
+"""Write-tool preconditions — loaded from declarative config, not tool-name branches."""
 
 from __future__ import annotations
+
+import logging
+from pathlib import Path
+
+import yaml
 
 from runtime.scope import SCOPE_UNKNOWN, get_bound_guest_id
 from runtime.tool_schema import schema_from_tool, validate_args_against_schema
 from runtime.tools.registry import registry
 
+logger = logging.getLogger(__name__)
+
+_CATALOG: dict[str, dict] | None = None
+_CONFIG_PATH = (
+    Path(__file__).resolve().parents[1] / "seeds" / "tool_write_preconditions.yaml"
+)
+
+_GUEST_READ_TOOLS = frozenset(
+    {"find_guest", "get_booking", "list_payments", "get_task", "search_policy_documents"}
+)
+
+
+def _load_yaml_catalog() -> dict[str, dict]:
+    if not _CONFIG_PATH.is_file():
+        return {}
+    try:
+        raw = yaml.safe_load(_CONFIG_PATH.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Could not load tool write preconditions: %s", exc)
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    out: dict[str, dict] = {}
+    for name, spec in raw.items():
+        if isinstance(name, str) and isinstance(spec, dict):
+            out[name.strip()] = dict(spec)
+    return out
+
+
+def _catalog_from_skill_maps() -> dict[str, dict]:
+    """Merge optional ``map.write_preconditions`` from loaded skills."""
+    try:
+        from runtime.skills import load_skills
+    except Exception:
+        return {}
+    merged: dict[str, dict] = {}
+    for skill in load_skills() or []:
+        skill_map = getattr(skill, "map", None)
+        if skill_map is None:
+            continue
+        raw = getattr(skill_map, "write_preconditions", None)
+        if not isinstance(raw, dict):
+            continue
+        for tool_name, spec in raw.items():
+            if isinstance(tool_name, str) and isinstance(spec, dict):
+                merged[tool_name.strip()] = {**merged.get(tool_name.strip(), {}), **spec}
+    return merged
+
 
 def precondition_catalog() -> dict[str, dict]:
-    """Per-tool precondition metadata (generic write gates)."""
-    return {
-        "record_payment": {"requires_booking_arg": "booking_id"},
-        "confirm_payment": {"requires_booking_arg": "booking_id"},
-        "cancel_booking": {"requires_booking_arg": "booking_id"},
-        "change_booking_dates": {"requires_booking_arg": "booking_id"},
-        "create_booking": {"requires_bound_guest": True},
-    }
+    """Merged declarative catalog (YAML seed + skill-map overrides)."""
+    global _CATALOG
+    if _CATALOG is None:
+        base = _load_yaml_catalog()
+        overrides = _catalog_from_skill_maps()
+        _CATALOG = {**base, **overrides}
+    return dict(_CATALOG)
+
+
+def reset_precondition_catalog_for_tests() -> None:
+    global _CATALOG
+    _CATALOG = None
 
 
 def _booking_exists_for_session(booking_id: str, session_id: str) -> str | None:
@@ -42,6 +99,7 @@ def check_write_preconditions(
     execution_id: str = "",
 ) -> str | None:
     """Return a refusal message, or None when the call may proceed."""
+    _ = execution_id
     entry = registry.get(tool_name)
     if entry is None:
         return None
@@ -71,3 +129,7 @@ def check_write_preconditions(
         if isinstance(guest_arg, str) and guest_arg and guest_arg != bound:
             return f"{tool_name} refused: guest_id outside session scope"
     return None
+
+
+def guest_read_tool_names() -> frozenset[str]:
+    return _GUEST_READ_TOOLS

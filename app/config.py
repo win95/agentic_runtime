@@ -148,6 +148,13 @@ class Settings(BaseSettings):
     # Runtime
     checkpoint_enabled: bool = False
     execution_timeout_seconds: int = 3600
+    # Celery: must exceed worst-case task runtime so unacked work is not redelivered early.
+    celery_visibility_timeout_seconds: int = 0  # 0 => execution_timeout + 600
+    # Mark RUNNING executions stale after this many seconds (reaper / reclaim).
+    execution_stale_running_seconds: int = 7200
+    graph_recursion_limit: int = 80
+    llm_request_timeout_seconds: int = 120
+    llm_request_max_retries: int = 2
 
     # Batch ingest (Option B): files in a local inbox dir, or in the
     # MinIO ingest-inbox bucket when ingest_use_minio is true. Beat
@@ -175,6 +182,12 @@ class Settings(BaseSettings):
     def resolved_embedding_model_query(self) -> str:
         """Embedding model for query-time work (empty override = shared)."""
         return self.embedding_model_query or self.embedding_model
+
+    @property
+    def resolved_celery_visibility_timeout(self) -> int:
+        if self.celery_visibility_timeout_seconds > 0:
+            return self.celery_visibility_timeout_seconds
+        return self.execution_timeout_seconds + 600
 
 
 settings = Settings()

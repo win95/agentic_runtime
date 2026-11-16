@@ -16,7 +16,8 @@ from sqlalchemy.exc import IntegrityError
 import infra.repositories as repositories
 from app import models
 from app.services import execution_service, mission_service
-from infra import falkor_client
+from ingest.loaders import load_relations
+from ingest.schemas import RelationRow
 from ingest import loaders
 from ingest.schemas import FaultRow
 from runtime.capabilities import fault_analysis as fault_cap
@@ -192,14 +193,14 @@ def test_wrap_data_escapes_closing_tag():
 
 
 # --- P1-12: Cypher identifiers are allowlisted ---------------------------
-def test_merge_asset_relations_rejects_bad_label(monkeypatch):
-    with pytest.raises(ValueError):
-        falkor_client.merge_asset_relations(
-            [("O21", "Asset) MATCH (x", "PART_OF", "B1", "Building")]
-        )
+def test_merge_asset_relations_rejects_bad_label():
+    from ontology.canonical.schema import normalize_entity_label
+
+    with pytest.raises(ValueError, match="Invalid entity_type"):
+        normalize_entity_label("Asset) MATCH (x")
 
 
-def test_merge_asset_relations_writes_canonical(monkeypatch):
+def test_merge_asset_relations_writes_canonical(db_session, monkeypatch):
     """S7: the shim writes canonical rows but must NOT drain inline —
     projection is owned by beat/CLI/the internal endpoint now."""
     drained: list[int] = []
@@ -212,8 +213,19 @@ def test_merge_asset_relations_writes_canonical(monkeypatch):
         "ontology.projection.engine.drain_pending_projections",
         _fake_drain,
     )
-    falkor_client.merge_asset_relations(
-        [("O21", "Asset", "HAS_COMPONENT", "M2", "Component")]
+    load_relations(
+        db_session,
+        [
+            RelationRow.model_validate(
+                {
+                    "from_id": "O21",
+                    "from_label": "Asset",
+                    "relation": "HAS_COMPONENT",
+                    "to_id": "M2",
+                    "to_label": "Component",
+                }
+            )
+        ],
     )
     assert not drained
 

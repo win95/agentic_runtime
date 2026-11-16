@@ -232,20 +232,24 @@ def try_automated_write(
     if tool is None:
         errors.append(f"Automated write tool '{pipeline.write_tool}' is not available")
         return "", errors, None
-    idem = write_idempotency_key(session_id, pipeline.write_tool, args, execution_id=execution_id)
+    payload = pending.get("payload") or {}
+    write_attempt_id = (
+        payload.get("write_attempt_id") or pending.get("write_attempt_id") or ""
+    )
+    idem = write_idempotency_key(
+        write_attempt_id=write_attempt_id,
+        execution_id=execution_id,
+        write_tool=pipeline.write_tool,
+        action="execute",
+    )
     save_pending(
         session_id,
         pipeline.id,
         status="confirmed",
-        payload=pending.get("payload") or {},
+        payload=payload,
         idempotency_key=idem,
     )
-    result = invoke_idempotent_write(
-        tool,
-        args,
-        session_id=session_id,
-        execution_id=execution_id,
-    )
+    result = invoke_idempotent_write(tool, args, idempotency_key=idem)
     if isinstance(result, dict) and result.get("error"):
         errors.append(
             f"Automated {pipeline.write_tool} failed: {result.get('error')}"

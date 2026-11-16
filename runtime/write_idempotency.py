@@ -1,4 +1,4 @@
-"""Idempotent write-tool calls within a session."""
+"""Idempotent write-tool calls — one key per logical write attempt + execution."""
 
 from __future__ import annotations
 
@@ -10,18 +10,22 @@ _CACHE: dict[str, dict] = {}
 
 
 def write_idempotency_key(
-    session_id: str,
-    tool_name: str,
-    args: dict,
     *,
-    execution_id: str = "",
+    write_attempt_id: str,
+    execution_id: str,
+    write_tool: str,
+    action: str = "execute",
 ) -> str:
-    """Stable key for one logical write action (session + tool + args)."""
-    _ = execution_id  # retained for logging; key is stable across retries
+    """Stable key for one write attempt in one execution (Celery retries replay).
+
+    Distinct intentional writes use a new ``write_attempt_id`` (per pipeline
+  quote cycle), so identical room args in the same session are not blocked.
+    """
     payload = {
-        "session_id": session_id or "",
-        "tool": tool_name,
-        "args": args,
+        "write_attempt_id": write_attempt_id or "",
+        "execution_id": execution_id or "",
+        "tool": write_tool,
+        "action": action,
     }
     text = json.dumps(payload, sort_keys=True, ensure_ascii=False, default=str)
     return hashlib.sha256(text.encode()).hexdigest()[:32]
@@ -42,18 +46,15 @@ def invoke_idempotent_write(
     tool,
     args: dict,
     *,
-    session_id: str,
-    execution_id: str = "",
+    idempotency_key: str,
 ) -> dict:
     """Call a write tool once per idempotency key; return cached success."""
-    name = getattr(tool, "name", "write")
-    key = write_idempotency_key(session_id, name, args, execution_id=execution_id)
-    cached = cached_write_result(key)
+    cached = cached_write_result(idempotency_key)
     if cached is not None and not cached.get("error"):
         return {**cached, "idempotent_replay": True}
     result = tool.invoke(args)
     if isinstance(result, dict) and not result.get("error"):
-        store_write_result(key, result)
+        store_write_result(idempotency_key, result)
     return result if isinstance(result, dict) else {"result": result}
 
 

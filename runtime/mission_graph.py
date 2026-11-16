@@ -1355,8 +1355,21 @@ def run_mission(
             graph = (
                 build_mission_graph(checkpointer=checkpointer) if checkpointer else mission_graph
             )
-            config: dict = {"metadata": trace_metadata, "tags": trace_tags}
+            from app.config import settings as app_settings
+
+            config: dict = {
+                "metadata": trace_metadata,
+                "tags": trace_tags,
+                "recursion_limit": app_settings.graph_recursion_limit,
+            }
+            resume = False
             if checkpointer:
                 config["configurable"] = {"thread_id": execution_id}
-            final_state = graph.invoke(initial_state, config=config)
+                try:
+                    snapshot = checkpointer.get_tuple(config)
+                    resume = snapshot is not None and snapshot.checkpoint is not None
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Could not read checkpoint for %s: %s", execution_id, exc)
+            graph_input = None if resume else initial_state
+            final_state = graph.invoke(graph_input, config=config)
     return dict(final_state)

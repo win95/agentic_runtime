@@ -211,7 +211,12 @@ def test_load_session_history_only_terminal_and_excludes_current(db_session):
 
 def test_load_session_history_empty_session(db_session):
     history = session_service.load_session_history(db_session, "sess-empty", "exec-x")
-    assert history == {"turns": [], "omitted": 0, "total_prior": 0}
+    assert history == {
+        "turns": [],
+        "omitted": 0,
+        "total_prior": 0,
+        "prior_actions": [],
+    }
 
 
 # --- Caps ---
@@ -240,6 +245,10 @@ def _run_with_recording_fake(db_session, monkeypatch, mission_dict, history, ses
 
     monkeypatch.setattr(deep_agent_module, "build_deep_agent", fake_build)
     monkeypatch.setattr(deep_agent_module, "run_deep_agent", fake_run)
+    monkeypatch.setattr(
+        "runtime.long_term_memory.past_context_block",
+        lambda _sid, _q, history_block="", shown_execution_ids=None: history_block,
+    )
     final = run_mission(
         mission_dict,
         dict(input_data) if input_data is not None else dict(FAULT_INPUT),

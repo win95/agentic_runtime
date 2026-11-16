@@ -122,7 +122,9 @@ def test_run_mission_passes_trace_config(monkeypatch):
     """graph.invoke receives metadata + tags carrying the session id."""
     monkeypatch.setattr(tracing_module, "is_mlflow_tracing_enabled", lambda: False)
     monkeypatch.setattr(
-        mission_graph_module, "_resolve_agent_version", lambda agent_id: (None, False)
+        mission_graph_module,
+        "_resolve_agent_version",
+        lambda agent_id: (None, False, False),
     )
     monkeypatch.setattr(mission_graph_module, "get_checkpointer", _no_checkpointer)
     captured: dict = {}
@@ -155,7 +157,9 @@ def test_run_mission_passes_trace_config(monkeypatch):
 def test_run_mission_without_session_omits_session_tag(monkeypatch):
     monkeypatch.setattr(tracing_module, "is_mlflow_tracing_enabled", lambda: False)
     monkeypatch.setattr(
-        mission_graph_module, "_resolve_agent_version", lambda agent_id: (None, False)
+        mission_graph_module,
+        "_resolve_agent_version",
+        lambda agent_id: (None, False, False),
     )
     monkeypatch.setattr(mission_graph_module, "get_checkpointer", _no_checkpointer)
     captured: dict = {}

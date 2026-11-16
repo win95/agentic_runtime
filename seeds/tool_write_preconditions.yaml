@@ -1,0 +1,12 @@
+# Declarative write preconditions (merged with skill-map overrides).
+# Keys are tool names; values describe generic gates enforced in code.
+record_payment:
+  requires_booking_arg: booking_id
+confirm_payment:
+  requires_booking_arg: booking_id
+cancel_booking:
+  requires_booking_arg: booking_id
+change_booking_dates:
+  requires_booking_arg: booking_id
+create_booking:
+  requires_bound_guest: true

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -36,10 +37,12 @@ def get_pending(session_id: str, pipeline_id: str) -> dict | None:
             )
             if row is None:
                 return None
+            payload = dict(row.payload or {})
             return {
                 "status": row.status,
-                "payload": dict(row.payload or {}),
+                "payload": payload,
                 "idempotency_key": row.idempotency_key,
+                "write_attempt_id": payload.get("write_attempt_id"),
             }
         finally:
             db.close()
@@ -56,10 +59,12 @@ def save_pending(
     payload: dict,
     idempotency_key: str | None = None,
 ) -> None:
+    payload = dict(payload or {})
     record = {
         "status": status,
-        "payload": dict(payload or {}),
+        "payload": payload,
         "idempotency_key": idempotency_key,
+        "write_attempt_id": payload.get("write_attempt_id"),
     }
     _MEMORY[_key(session_id, pipeline_id)] = record
     if not session_id or not pipeline_id:
@@ -110,17 +115,30 @@ def merge_tool_result(
         return
     if not isinstance(result, dict) or result.get("error"):
         return
-    pending = get_pending(session_id, pipeline_id) or {
-        "status": initial_status,
-        "payload": {"tools": {}},
-        "idempotency_key": None,
-    }
+    pending = get_pending(session_id, pipeline_id)
+    if pending is None or pending.get("status") == "written":
+        write_attempt_id = uuid.uuid4().hex[:16]
+        pending = {
+            "status": initial_status,
+            "payload": {"tools": {}, "write_attempt_id": write_attempt_id},
+            "idempotency_key": None,
+            "write_attempt_id": write_attempt_id,
+        }
+    else:
+        payload = pending.setdefault("payload", {})
+        if not payload.get("write_attempt_id"):
+            write_attempt_id = uuid.uuid4().hex[:16]
+            payload["write_attempt_id"] = write_attempt_id
+            pending["write_attempt_id"] = write_attempt_id
     tools = pending.setdefault("payload", {}).setdefault("tools", {})
     tools[tool_name] = result
+    new_status = pending.get("status") or initial_status
+    if new_status == "written":
+        new_status = initial_status
     save_pending(
         session_id,
         pipeline_id,
-        status=pending.get("status") or initial_status,
+        status=new_status,
         payload=pending["payload"],
         idempotency_key=pending.get("idempotency_key"),
     )

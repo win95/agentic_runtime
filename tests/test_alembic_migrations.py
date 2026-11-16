@@ -53,7 +53,7 @@ def test_alembic_upgrade_head_then_downgrade_base(tmp_path):
     db_path = tmp_path / "migrate-test.db"
     result = _alembic(tmp_path, "upgrade", "head")
     assert result.returncode == 0, result.stderr
-    assert _version(db_path) == [("0010",)]
+    assert _version(db_path) == [("0013_session_write_pending",)]
     tables = _tables(db_path)
     assert {"missions", "executions", "tools", "agent_versions"} <= tables
     assert "ontology_entities" in tables
@@ -97,6 +97,7 @@ def test_alembic_upgrade_head_then_downgrade_base(tmp_path):
         }
         assert "ix_ontology_versions_subject_version" in ontology_indexes
         assert "ix_ontology_relationships_target" in ontology_indexes
+        assert "session_write_pending" in tables
     finally:
         conn.close()
 
@@ -110,4 +111,4 @@ def test_alembic_current_matches_head(tmp_path):
     assert result.returncode == 0, result.stderr
     result = _alembic(tmp_path, "current")
     assert result.returncode == 0, result.stderr
-    assert "0010" in result.stdout
+    assert "0013_session_write_pending" in result.stdout

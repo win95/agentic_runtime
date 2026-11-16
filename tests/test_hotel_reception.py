@@ -20,7 +20,7 @@ from app.config import settings
 from app.services import agent_version_service as avs
 from app.services import mission_service
 from runtime import deep_agent as deep_agent_module
-from runtime import skill_subgraph as skill_subgraph_module
+from runtime.subgraph import flow as flow_subgraph_module
 from runtime.mission_graph import run_mission
 from runtime.skills import load_skills
 from runtime.skills.map_plan import parse_skill_map, render_plan
@@ -46,6 +46,9 @@ HOTEL_TOOLS = {
     "get_task",
     "search_policy_documents",
     "read_policy_document",
+    "record_payment",
+    "list_payments",
+    "confirm_payment",
 }
 
 MAP_NODE_IDS = [
@@ -56,6 +59,10 @@ MAP_NODE_IDS = [
     "confirm-booking",
     "create-booking",
     "report-booking",
+    "booking-payment",
+    "collect-payment",
+    "confirm-payment",
+    "report-payment",
     "task-details",
     "find-staff",
     "create-task",
@@ -142,8 +149,13 @@ def test_reception_skill_map_contract():
     assert tools == HOTEL_TOOLS
     route = skill_map.node_by_id("route")
     assert {b.goto for b in route.branches} == {
-        "booking-dates", "task-details", "policy-lookup", "booking-lookup",
-        "booking-change", "task-status",
+        "booking-dates",
+        "task-details",
+        "policy-lookup",
+        "booking-lookup",
+        "booking-change",
+        "task-status",
+        "booking-payment",
     }
     confirm = skill_map.node_by_id("confirm-booking")
     assert "chưa xác nhận" in (confirm.stop_when or "")
@@ -153,8 +165,14 @@ def test_reception_skill_map_contract():
     # mid-flow nodes (booking-dates, task-details, find-staff, ...) are
     # not terminal — a premature END there falls back to the next node.
     assert {n.id for n in skill_map.nodes if n.terminal} == {
-        "route", "report-booking", "report-task", "policy-lookup",
-        "booking-lookup", "booking-change", "task-status",
+        "route",
+        "report-booking",
+        "report-payment",
+        "report-task",
+        "policy-lookup",
+        "booking-lookup",
+        "booking-change",
+        "task-status",
     }
 
 
@@ -257,9 +275,9 @@ def test_deep_agent_node_adds_builtin_exclusion_for_hotel(db_session, monkeypatc
         }
 
     monkeypatch.setattr(
-        skill_subgraph_module, "build_skill_subgraph", fake_build_subgraph)
-    monkeypatch.setattr(
-        skill_subgraph_module, "run_skill_subgraph", fake_run_subgraph)
+        flow_subgraph_module, "build_flow_subgraph", fake_build_subgraph
+    )
+    monkeypatch.setattr(flow_subgraph_module, "run_flow_subgraph", fake_run_subgraph)
 
     final = run_mission(mission_dict, {"message": "hi"}, "exec_hotel_wiring")
     assert final["status"] == "SUCCEEDED", f"errors: {final.get('errors')}"

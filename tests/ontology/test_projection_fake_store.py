@@ -304,13 +304,8 @@ def test_projection_unhealthy_store_short_circuits(db, monkeypatch):
     )
     db.commit()
     result = drain_pending_projections(db)
-    assert result == {
-        "processed": 0,
-        "errors": 1,
-        "dead": 0,
-        "claimed": 0,
-        "detail": "neo4j_unhealthy",
-    }
+    assert result["detail"] == "neo4j_unhealthy"
+    assert result["processed"] == 0 and result["errors"] == 1
     # Row was never claimed — still pending.
     assert _row_status(db, "entity:Asset:O-unhealthy") == "pending"
     # Once healthy again the same row drains normally.

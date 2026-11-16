@@ -411,7 +411,9 @@ def _no_version_state(mission):
 def test_no_version_fault_branch_uses_code_constant(monkeypatch):
     _fake_reachable_registry_with_other_text(monkeypatch)
     monkeypatch.setattr(
-        mission_graph_module, "_resolve_agent_version", lambda agent_id: (None, False)
+        mission_graph_module,
+        "_resolve_agent_version",
+        lambda agent_id: (None, False, False),
     )
     seen: dict = {}
     _fake_agent(monkeypatch, seen)
@@ -429,7 +431,9 @@ def test_no_version_fault_branch_uses_code_constant(monkeypatch):
 def test_no_version_admin_branch_uses_code_constant(monkeypatch):
     _fake_reachable_registry_with_other_text(monkeypatch)
     monkeypatch.setattr(
-        mission_graph_module, "_resolve_agent_version", lambda agent_id: (None, False)
+        mission_graph_module,
+        "_resolve_agent_version",
+        lambda agent_id: (None, False, False),
     )
     seen: dict = {}
     _fake_agent(monkeypatch, seen)

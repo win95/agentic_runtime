@@ -87,6 +87,8 @@ def build_chat_model(cfg: Settings | None = None):
         model=cfg.llm_model,
         temperature=cfg.llm_temperature,
         max_tokens=OUTPUT_RESERVE_TOKENS,
+        timeout=cfg.llm_request_timeout_seconds,
+        max_retries=cfg.llm_request_max_retries,
     )
 
 

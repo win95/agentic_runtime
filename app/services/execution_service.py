@@ -8,7 +8,7 @@ lifecycle). The worker (app/worker/tasks.py) does the actual run.
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
@@ -121,6 +121,69 @@ def create_execution(
 
 def get_execution(db: Session, execution_id: str) -> models.Execution | None:
     return db.get(models.Execution, execution_id)
+
+
+def try_claim_execution(db: Session, execution_id: str) -> models.Execution | None:
+    """Atomically move QUEUED -> RUNNING. Returns row when this worker claimed it."""
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    rows = (
+        db.query(models.Execution)
+        .filter(
+            models.Execution.id == execution_id,
+            models.Execution.status == "QUEUED",
+        )
+        .update(
+            {
+                "status": "RUNNING",
+                "started_at": now,
+                "updated_at": now,
+            },
+            synchronize_session=False,
+        )
+    )
+    if rows != 1:
+        db.rollback()
+        return None
+    db.commit()
+    return db.get(models.Execution, execution_id)
+
+
+def execution_is_stale(execution: models.Execution) -> bool:
+    from app.config import settings
+
+    if execution.status != "RUNNING" or execution.started_at is None:
+        return False
+    age = datetime.now(timezone.utc).replace(tzinfo=None) - execution.started_at
+    return age.total_seconds() > settings.execution_stale_running_seconds
+
+
+def reap_stale_running_executions(db: Session, *, limit: int = 50) -> dict:
+    """Mark long-stuck RUNNING rows FAILED so operators can inspect and re-dispatch."""
+    from app.config import settings
+
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
+        seconds=settings.execution_stale_running_seconds
+    )
+    rows = (
+        db.query(models.Execution)
+        .filter(
+            models.Execution.status == "RUNNING",
+            models.Execution.started_at.isnot(None),
+            models.Execution.started_at < cutoff,
+        )
+        .order_by(models.Execution.started_at.asc())
+        .limit(limit)
+        .all()
+    )
+    reaped = 0
+    for row in rows:
+        row.status = "FAILED"
+        row.error = "stale RUNNING — worker did not finish (reaped)"
+        row.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        reaped += 1
+    if reaped:
+        db.commit()
+    return {"reaped": reaped}
 
 
 def list_executions(

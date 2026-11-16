@@ -142,7 +142,12 @@ def require_mission_for_role(user: dict | None, mission_id: str) -> None:
     """
     if user is None:
         return
-    if user.get("role", "user") == "admin":
+    role = user.get("role")
+    if role is None:
+        if mission_id not in USER_RUNNABLE_MISSIONS:
+            raise HTTPException(status_code=403, detail="Not permitted to run this mission")
+        return
+    if role == "admin":
         return
     if mission_id not in USER_RUNNABLE_MISSIONS:
         raise HTTPException(status_code=404, detail="Mission not found")

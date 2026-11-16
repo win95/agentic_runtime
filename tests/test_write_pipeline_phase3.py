@@ -8,7 +8,11 @@ from runtime.reply_grounding import apply_reply_grounding
 from runtime.session_write_pending import get_pending, merge_tool_result, reset_pending_store_for_tests
 from runtime.tool_preconditions import check_write_preconditions
 from runtime.tools.registry import ToolEntry
-from runtime.write_idempotency import invoke_idempotent_write, reset_idempotency_cache_for_tests
+from runtime.write_idempotency import (
+    invoke_idempotent_write,
+    reset_idempotency_cache_for_tests,
+    write_idempotency_key,
+)
 from runtime.write_pipeline_runner import (
     WritePipeline,
     build_write_args,
@@ -91,6 +95,31 @@ def test_pending_and_automated_write():
         assert not errs
         assert "BK-1" in ans
         assert tool.calls == 1
+        ans_retry, errs_retry, _ = try_automated_write(
+            pipe,
+            session_id="sess-1",
+            execution_id="exec-1",
+            tools_by_name={"create_booking": tool},
+            session_turns=1,
+        )
+        assert not errs_retry
+        assert tool.calls == 1
+        merge_tool_result(
+            "sess-1",
+            "booking_create",
+            "get_room_rates",
+            {
+                "check_in": "2025-02-01",
+                "check_out": "2025-02-03",
+                "rates": [{"room_type": "deluxe", "total_price": 4_000_000}],
+            },
+        )
+        merge_tool_result(
+            "sess-1",
+            "booking_create",
+            "check_room_availability",
+            {"guests": 2, "available": True},
+        )
         ans2, errs2, _ = try_automated_write(
             pipe,
             session_id="sess-1",
@@ -99,7 +128,7 @@ def test_pending_and_automated_write():
             session_turns=1,
         )
         assert not errs2
-        assert tool.calls == 1
+        assert tool.calls == 2
 
 
 def test_idempotent_replay():
@@ -114,9 +143,21 @@ def test_idempotent_replay():
             return {"booking_id": "BK-9", "ok": True}
 
     t = Stub()
-    invoke_idempotent_write(t, {"guest_id": "g1"}, session_id="s1", execution_id="e1")
-    invoke_idempotent_write(t, {"guest_id": "g1"}, session_id="s1", execution_id="e2")
+    key = write_idempotency_key(
+        write_attempt_id="attempt-1",
+        execution_id="e1",
+        write_tool="create_booking",
+    )
+    invoke_idempotent_write(t, {"guest_id": "g1"}, idempotency_key=key)
+    invoke_idempotent_write(t, {"guest_id": "g1"}, idempotency_key=key)
     assert t.calls == 1
+    key2 = write_idempotency_key(
+        write_attempt_id="attempt-2",
+        execution_id="e2",
+        write_tool="create_booking",
+    )
+    invoke_idempotent_write(t, {"guest_id": "g1"}, idempotency_key=key2)
+    assert t.calls == 2
 
 
 def test_record_payment_precondition_missing_booking():
