@@ -27,6 +27,11 @@ from langgraph.graph import END, START, StateGraph
 from app.config import settings
 from infra.mlflow_setup import setup_mlflow_tracing
 from runtime.capabilities.fault_analysis import build_fault_analysis_graph
+from runtime.observability_resilience import (
+    filter_observability_errors,
+    invoke_with_observability_fallback,
+    is_observability_transport_error,
+)
 from runtime.security import detect_injection_signals
 from runtime.state import MissionState
 
@@ -702,6 +707,8 @@ def deep_agent_node(state: MissionState) -> dict:
                 skill_maps=[s.map for s in mapped_skills],
                 trace_metadata=trace_metadata,
                 trace_tags=trace_tags,
+                session_id=state.get("session_id"),
+                callbacks=[handler],
             )
         else:
             if agent_version is not None:
@@ -884,6 +891,14 @@ def deep_agent_node(state: MissionState) -> dict:
             "hook_events": hook_events,
         }
     except Exception as exc:  # noqa: BLE001 — model/package problems are state
+        if is_observability_transport_error(exc):
+            logger.warning("Deep agent observability failed (ignored): %s", exc)
+            return {
+                "evidence": [],
+                "result": dict(state.get("result") or {}),
+                "notes": state.get("notes") or [],
+                "errors": [],
+            }
         logger.warning("Deep agent unavailable: %s", exc)
         return {"errors": [f"Deep agent unavailable: {exc}"]}
 
@@ -999,12 +1014,23 @@ def _execution_diagnostic_errors(errors: list[str] | None) -> list[str]:
         if line.startswith("Tool '") and " reported failure" in line:
             continue
         out.append(line)
-    return out
+    return filter_observability_errors(out)
 
 
 def _errors_explain_empty_evidence(errors: list[str]) -> bool:
     """True when existing errors already explain why evidence is empty."""
-    return bool(_execution_diagnostic_errors(errors))
+    diag = _execution_diagnostic_errors(errors)
+    if not diag:
+        return False
+    markers = (
+        "Router ",
+        "Plan step cap",
+        "Tool-call budget",
+        "Turn ended without",
+        "Turn completed flows",
+        "ending turn",
+    )
+    return any(any(m in line for m in markers) for line in diag)
 
 
 def validate_results(state: MissionState) -> dict:

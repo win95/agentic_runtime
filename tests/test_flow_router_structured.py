@@ -16,8 +16,11 @@ from runtime.skills.map_plan import MapBranch, MapNode, SkillMap
 from runtime.subgraph.flow import (
     ROUTE_TOOL_NAME,
     ROUTER_CLARIFICATION_REPLY,
+    append_unique_errors,
     build_flow_subgraph,
     build_route_instruction,
+    derive_flows,
+    eligible_flow_ids,
     parse_route_declaration,
     route_instruction_token_count,
     route_tool_spec,
@@ -79,6 +82,18 @@ def _tool_call(flow_id: str) -> AIMessage:
             }
         ],
     )
+
+
+def test_eligible_flow_ids_excludes_visited():
+    flows = derive_flows(FLOW_MAP)
+    state = {"visited": ["check"]}
+    assert eligible_flow_ids(flows, state) == ["find", "create"]
+
+
+def test_append_unique_errors_dedupes():
+    errors = ["Router declared flow 'x' already visited this turn; ending turn"]
+    append_unique_errors(errors, [errors[0]])
+    assert len(errors) == 1
 
 
 def test_route_tool_spec_enum_from_map():
@@ -147,6 +162,26 @@ def test_flow_subgraph_structured_route_success():
     )
     assert "check" in (out.get("visited_nodes") or [])
     assert not any("Router declared no flow" in e for e in out.get("errors") or [])
+
+
+def test_run_flow_subgraph_surfaces_empty_turn_without_flows():
+    class EndOnly:
+        def invoke(self, initial, config=None):  # noqa: ARG002
+            return {
+                **initial,
+                "visited": [],
+                "errors": [],
+                "answer": "",
+                "flow_messages": [],
+                "flow_trace": [],
+            }
+
+    out = run_flow_subgraph(
+        EndOnly(),
+        {"mission_id": "test", "objective": "test"},
+        {"message": "maintenance task room 201"},
+    )
+    assert any("Turn ended without executing any flow" in e for e in out.get("errors") or [])
 
 
 def test_flow_subgraph_reprompt_then_clarification():

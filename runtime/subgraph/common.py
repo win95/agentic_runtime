@@ -125,12 +125,14 @@ class ToolCallCap(AgentMiddleware):
         self.calls = 0
         self.exceeded = False
         self._failed: dict[tuple[str, str], str] = {}
+        self._success_snippet: dict[tuple[str, str], str] = {}
         self._succeeded: set[str] = set(self._prior)
 
     def reset(self) -> None:
         self.calls = 0
         self.exceeded = False
         self._failed = {}
+        self._success_snippet = {}
         # Prior-turn successes survive the reset: they are session
         # facts, not per-execution state.
         self._succeeded = set(self._prior)
@@ -158,6 +160,17 @@ class ToolCallCap(AgentMiddleware):
                 tool_call_id=tool_call_id,
                 status="error",
             )
+        if key in self._success_snippet:
+            return ToolMessage(
+                content=(
+                    f"You already called '{name}' with these exact arguments "
+                    f"successfully in this flow. Use that prior result and "
+                    f"conclude your guest reply — do not call it again.\n"
+                    f"Prior result: {self._success_snippet[key]}"
+                ),
+                tool_call_id=tool_call_id,
+                status="error",
+            )
         missing = sorted(self._requires.get(name, frozenset()) - self._succeeded)
         if missing:
             return ToolMessage(
@@ -176,6 +189,13 @@ class ToolCallCap(AgentMiddleware):
             self._failed[key] = error
         else:
             self._succeeded.add(name)
+            snippet = ""
+            content = getattr(result, "content", result)
+            if isinstance(content, str):
+                snippet = content
+            elif isinstance(content, dict):
+                snippet = json.dumps(content, ensure_ascii=False, default=str)
+            self._success_snippet[key] = str(snippet)[:1500]
         return result
 
 

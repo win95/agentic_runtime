@@ -14,6 +14,7 @@ import json
 import logging
 
 from runtime.llm_factory import build_chat_model
+from runtime.observability_resilience import invoke_with_observability_fallback
 from runtime.security import MAX_INPUT_JSON_BYTES, wrap_data
 from runtime.skills.map_plan import SkillMap, compute_plan_trace
 
@@ -349,11 +350,10 @@ def run_deep_agent(agent, mission: dict, input_data: dict, callbacks=None, files
         config["metadata"] = trace_metadata
     if trace_tags:
         config["tags"] = trace_tags
-    if config:
-        result = agent.invoke(input_payload, config=config)
-    else:
-        # No callbacks: keep the plain call so mock agents with a
-        # one-argument invoke() (eval script) keep working.
-        result = agent.invoke(input_payload)
+    result = invoke_with_observability_fallback(
+        agent.invoke,
+        input_payload,
+        config=config if config else None,
+    )
     messages = result.get("messages") or []
     return outcome_from_messages(messages, skill_maps=skill_maps)
