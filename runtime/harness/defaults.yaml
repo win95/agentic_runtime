@@ -1,0 +1,13 @@
+# Shared mission harness defaults — override per mission in seeds/missions/*.yaml.
+security:
+  user_runnable: false
+guest_channel:
+  exposes_public_chat: false
+builtin_tools:
+  deny: false
+  deny_message_template: null
+flow_subgraph:
+  enabled: false
+guest_output:
+  register_reply_tools: false
+  capability: null

@@ -1,4 +1,4 @@
-.PHONY: install install-requirements run-api run-worker run-beat migrate migrate-users run-user-service seed-admin test lint docker-up docker-down seed seed-dry-run seed-edge ingest ingest-dry-run demo eval eval-real eval-genai eval-genai-real langgraph-dev gen-synthetic-data eval-tool-use eval-retrieval train-embedding train-llm mlflow-report eval-retrieval-live
+.PHONY: install install-requirements run-api run-worker run-beat migrate migrate-users run-user-service seed-admin test lint docker-up docker-down seed seed-dry-run seed-edge new-agent seed-agent ingest ingest-dry-run demo eval eval-real eval-genai eval-genai-real langgraph-dev gen-synthetic-data eval-tool-use eval-retrieval train-embedding train-llm mlflow-report eval-retrieval-live
 
 # Prefer the project venv when it exists (this checkout), else system python.
 PYTHON := $(shell [ -x .venv/bin/python ] && echo .venv/bin/python || echo python)
@@ -61,6 +61,17 @@ docker-down:
 # (docker compose up -d) and the LiteLLM proxy for Qdrant embeddings.
 seed:
 	$(PYTHON) -m seeds.seed_demo_data
+
+# Scaffold a new agent + mission + skill (see docs/agents-harness.md).
+new-agent:
+	@test -n "$(NAME)" || (echo "Usage: make new-agent NAME=my_agent" && exit 1)
+	$(PYTHON) -m scripts.new_agent "$(NAME)"
+
+# Seed only the agent/mission YAMLs for one scaffolded agent.
+seed-agent:
+	@test -n "$(AGENT)" || (echo "Usage: make seed-agent AGENT=... MISSION=..." && exit 1)
+	@test -n "$(MISSION)" || (echo "Usage: make seed-agent AGENT=... MISSION=..." && exit 1)
+	$(PYTHON) -m seeds.load_missions --agent "$(AGENT)" --mission "$(MISSION)"
 
 # Validate the seed data without touching any store.
 seed-dry-run:

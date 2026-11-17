@@ -21,6 +21,14 @@ and later runs see the prior turns (`docs/sessions.md`).
   (existing environment variables win; `API_BASE_URL` defaults to
   `http://localhost:8000`).
 
+## Adding a new agent
+
+Use the declarative harness flow (``docs/agents-harness.md``): ``make
+new-agent NAME=…``, edit the generated YAML, ``make seed-agent AGENT=…
+MISSION=…``, then ``agent_config_check.py --static-only`` to validate harness +
+pinning. **~5 steps** vs ~12–15 (estimate) Python/YAML touchpoints before harness.
+Rebuild the Docker image (or mount ``seeds/`` and ``skills/``) after scaffolding.
+
 ## Scripts
 
 | Script | What it does |
@@ -295,7 +303,7 @@ make mlflow-report
   ```bash
   export NO_PROXY=127.0.0.1,localhost
   export no_proxy=127.0.0.1,localhost
-  .venv/bin/python -m scripts.mock_hotel_mcp_server   # 127.0.0.1:8081/mcp
+  .venv/bin/python -m scripts.mock_hotel_mcp_server   # 127.0.0.1:8082/mcp
   ```
 
   The API and worker read `.env` at startup, and pydantic does not export

@@ -242,6 +242,7 @@ class HealthResponse(BaseModel):
     app: str = "agentic-runtime"
     version: str = "0.1.0"
     environment: str = "dev"
+    harness_index_degraded: bool = False
 
 
 class ModelInfo(BaseModel):

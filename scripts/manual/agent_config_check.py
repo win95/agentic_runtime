@@ -202,6 +202,47 @@ def _field_matches(source: dict, target: dict, field: str,
     return source[field] == target[other]
 
 
+def check_harness(report: Report, config: dict) -> None:
+    """Mission harness: seed YAML validates and matches the DB snapshot."""
+    from runtime.harness.loader import load_mission_harness_from_file, parse_mission_harness
+
+    print("\n--- mission harness (seeds → execution_config.harness) ---")
+    mission = config.get("mission") or {}
+    mission_id = mission.get("mission_id") or ""
+    if not mission_id:
+        report.skip("harness", "no mission_id in config")
+        return
+    path = REPO_ROOT / "seeds" / "missions" / f"{mission_id}.yaml"
+    if not report.check(path.is_file(), f"mission seed exists ({path.name})"):
+        return
+    try:
+        seed_harness = load_mission_harness_from_file(path)
+        parse_mission_harness(seed_harness.model_dump(), source=str(path))
+    except ValueError as exc:
+        report.check(False, "mission harness validates", str(exc))
+        return
+    report.check(True, "mission harness validates (pydantic)", mission_id)
+    db_harness = (mission.get("execution") or {}).get("harness")
+    if db_harness is None:
+        report.check(
+            False,
+            "execution.harness present in DB mission row",
+            "re-run `make seed`",
+        )
+        return
+    try:
+        db_model = parse_mission_harness(db_harness, source=f"db:{mission_id}")
+    except ValueError as exc:
+        report.check(False, "DB harness validates", str(exc))
+        return
+    report.check(
+        db_model.model_dump() == seed_harness.model_dump(),
+        "DB harness matches seed YAML",
+        "re-run `make seed`" if db_model.model_dump() != seed_harness.model_dump()
+        else mission_id,
+    )
+
+
 def check_static(report: Report, config: dict) -> None:
     print("\n--- static config (seeds → agents row → AgentVersion) ---")
     agent = config["agent"]
@@ -662,15 +703,36 @@ def main() -> int:
                         help="seconds to wait per turn (default 300)")
     parser.add_argument("--cleanup", action="store_true",
                         help="delete this session's execution rows afterwards")
+    parser.add_argument(
+        "--mission",
+        default=DEFAULT_MISSION,
+        help="mission id to check (default: system_admin)",
+    )
+    parser.add_argument(
+        "--static-only",
+        action="store_true",
+        help="harness + seed/DB drift only — no live executions or MLflow",
+    )
     args = parser.parse_args()
 
-    require_worker()
-    config = load_config(DEFAULT_MISSION)
+    mission_id = args.mission
+    config = load_config(mission_id)
     if config is None:
-        sys.exit(f"mission {DEFAULT_MISSION!r} not found — run `make seed`")
+        sys.exit(f"mission {mission_id!r} not found — run `make seed`")
+    if args.static_only:
+        report = Report()
+        check_static(report, config)
+        check_harness(report, config)
+        print(f"\n{'PASS' if not report.failures else 'FAIL'}: agent config (static)")
+        return 0 if not report.failures else 1
+
+    require_worker()
+    config = load_config(mission_id)
+    if config is None:
+        sys.exit(f"mission {mission_id!r} not found — run `make seed`")
     if not config["agent_id"] or config["version"] is None:
         sys.exit(
-            f"mission {DEFAULT_MISSION!r} has no agent/active version — "
+            f"mission {mission_id!r} has no agent/active version — "
             f"run `make seed`"
         )
 
@@ -681,11 +743,12 @@ def main() -> int:
     limits = resolve_session_limits(version_limits=version["session_history"])
     session_id = args.session_id or f"sess-cfg-{secrets.token_hex(4)}"
 
-    print(f"=== agent config check: mission={DEFAULT_MISSION} agent={agent_id}")
+    print(f"=== agent config check: mission={mission_id} agent={agent_id}")
     print(f"  session_id={session_id}  active_version=v{version['version']}")
 
     report = Report()
     check_static(report, config)
+    check_harness(report, config)
 
     reader = None
     if args.no_trace:

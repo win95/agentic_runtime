@@ -1,9 +1,11 @@
-"""Guest API (demo) — public chat with the hotel receptionist.
+"""Guest API (demo) — public guest chat.
 
 JWT-only: guests register/login via the user service and call with a
-Bearer token. The mission is locked to ``hotel_reception`` — a guest
-can never invoke another mission (``POST /executions`` is not public:
-left open, any JWT holder could run ``system_admin`` too).
+Bearer token. The mission is whichever mission has
+``harness.guest_channel.exposes_public_chat`` in the harness index (DB
+when ``HARNESS_SOURCE=db``). Guests use this route instead of
+``POST /executions``, which is limited to missions with
+``harness.security.user_runnable`` for JWT users.
 
 Flow: ``POST /guest/chat`` creates a QUEUED execution and returns
 immediately; the client polls ``GET /executions/{id}/result`` with
@@ -18,6 +20,8 @@ impersonate another user to the agent.
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -27,10 +31,9 @@ from app.core.rate_limit import check_guest_rate_limit
 from app.core.security import require_jwt_user
 from app.services import execution_service, session_service
 
+logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/guest", tags=["guest"])
-
-GUEST_MISSION_ID = "hotel_reception"
-
 
 @router.post("/chat", response_model=schemas.GuestChatRead, status_code=202)
 def guest_chat(
@@ -38,11 +41,24 @@ def guest_chat(
     db: Session = Depends(get_db),
     user: dict = Depends(require_jwt_user),
 ):
+    from runtime.harness.registry import (
+        GuestChatMisconfiguredError,
+        guest_chat_mission_id,
+    )
+
     sub = user.get("sub")
     check_guest_rate_limit(sub)
+    try:
+        mission_id = guest_chat_mission_id()
+    except GuestChatMisconfiguredError as exc:
+        logger.error("Guest chat unavailable: %s", exc)
+        raise HTTPException(
+            status_code=503,
+            detail="Guest chat is temporarily unavailable",
+        ) from exc
     execution, problems = execution_service.create_execution(
         db,
-        GUEST_MISSION_ID,
+        mission_id,
         {"message": payload.message, "guest_id": sub, "channel": "guest_api"},
         session_id=payload.session_id,
         user_id=sub,
@@ -50,7 +66,7 @@ def guest_chat(
     if execution is None:
         if problems == ["__mission_not_found__"]:
             raise HTTPException(
-                status_code=404, detail="Mission hotel_reception not found"
+                status_code=404, detail=f"Mission {mission_id} not found"
             )
         raise HTTPException(
             status_code=422, detail=f"Invalid execution input: {problems}"

@@ -9,6 +9,9 @@
 # under the name "admin_bot" — see scripts/register_prompts.py).
 # allowed_tools is the full admin tool set; the registry permission
 # check only hands these tools to missions with capability system_admin.
+harness:
+  system_prompt_fallback: admin
+
 id: admin_bot
 name: Admin Bot
 provider: openai
