@@ -125,15 +125,6 @@ def require_own_execution(execution, user: dict | None) -> None:
         raise HTTPException(status_code=404, detail="Execution not found")
 
 
-# Missions a plain JWT user ("role": "user") may run through
-# POST /executions. Guests talk to the hotel agent only — fault analysis
-# and system admin are operator missions (they read infra state and can
-# trigger destructive tools behind human approval). Admins ("role":
-# "admin") and service-key calls (user is None) are unrestricted.
-# A token with no role claim is treated as a plain user (least privilege).
-USER_RUNNABLE_MISSIONS = frozenset({"hotel_reception"})
-
-
 def require_mission_for_role(user: dict | None, mission_id: str) -> None:
     """Refuse a mission the caller's role may not run.
 
@@ -144,5 +135,7 @@ def require_mission_for_role(user: dict | None, mission_id: str) -> None:
         return
     if user.get("role", "user") == "admin":
         return
-    if mission_id not in USER_RUNNABLE_MISSIONS:
+    from runtime.harness.registry import user_runnable_mission_ids
+
+    if mission_id not in user_runnable_mission_ids():
         raise HTTPException(status_code=404, detail="Mission not found")

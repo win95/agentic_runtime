@@ -50,6 +50,25 @@ execution:
 capabilities:
   - hotel_reception
 
+harness:
+  security:
+    user_runnable: true
+  guest_channel:
+    exposes_public_chat: true
+  builtin_tools:
+    deny: true
+    deny_message_template: >-
+      Tool '{tool_name}' denied by hook 'deny_builtin_tools': the hotel
+      receptionist has no file or subagent tools — all room, guest,
+      booking, staff and policy actions go through the MCP tools
+      (check_room_availability, get_booking, create_booking, ...). Do not
+      retry this tool; use the MCP tool for the task instead.
+  flow_subgraph:
+    enabled: true
+  guest_output:
+    register_reply_tools: true
+    capability: hotel_reception
+
 output_schema:
   type: object
   properties:

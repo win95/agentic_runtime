@@ -65,8 +65,15 @@ def expand_env_placeholders(value, defaults=None):
 
 
 def load_mission_file(path: pathlib.Path) -> dict:
+    from runtime.harness.loader import parse_mission_harness, harness_dict_from_model
+
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    execution = data.get("execution") or {}
+    execution = dict(data.get("execution") or {})
+    harness_model = parse_mission_harness(
+        data.get("harness"),
+        source=str(path),
+    )
+    execution["harness"] = harness_dict_from_model(harness_model)
     return {
         "id": data["mission_id"],
         "name": data.get("name", data["mission_id"]),
@@ -93,7 +100,10 @@ def load_agent_file(path: pathlib.Path) -> dict:
         yaml.safe_load(path.read_text(encoding="utf-8")),
         defaults={"LLM_MODEL": settings.llm_model},
     )
+    from runtime.harness.loader import parse_agent_harness
     from runtime.session_history import parse_session_history_config
+
+    parse_agent_harness(data.get("harness"), source=str(path))
 
     return {
         "id": data["id"],

@@ -116,7 +116,7 @@ map (tool chưa biết) nhưng giữ nguyên cấu trúc node — plan vẫn ren
 
 `runtime/subgraph/flow.py` biên dịch map của hotel thành một LangGraph
 con, chạy thay cho một agent tự do duy nhất (`deep_agent_node` chọn
-đường này khi mission thuộc `FLOW_PILOT_MISSIONS` và có skill map;
+đường này khi mission có `harness.flow_subgraph.enabled` và có skill map;
 hiện chỉ có `hotel_reception`). Đây là hướng C thay cho node compiler
 cũ (`runtime/subgraph/node.py`, đã xóa 2026-11-16): run live v4b
 (109 pass / 32 fail) cho thấy lỗi của node compiler là cấu trúc — một

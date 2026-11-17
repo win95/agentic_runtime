@@ -20,16 +20,6 @@ from runtime.skills.map_plan import SkillMap, compute_plan_trace
 
 logger = logging.getLogger(__name__)
 
-# Missions whose Deep Agent must never be offered a deepagents built-in
-# tool (Part 1, option b). The built-ins are hidden from the model
-# request AND rejected at the call boundary by deepagents'
-# _ToolExclusionMiddleware (see build_deep_agent). fault_analysis
-# deliberately opts out: its sandbox sessions need `execute` by design.
-# Keep in sync with runtime/hooks/builtin.py::_BUILTIN_DENY_MISSIONS —
-# the hook is the backstop for the same missions (it can only fire if a
-# built-in somehow reaches the model anyway).
-NO_BUILTIN_TOOL_MISSIONS = frozenset({"hotel_reception"})
-
 # The 9 built-in names deepagents adds: 7 filesystem tools + `execute`
 # (sandbox backends only — dropped at assembly for the default
 # StateBackend) + `task` (the general-purpose subagent). Same set the
@@ -98,11 +88,14 @@ def get_chat_model():
     return build_chat_model()
 
 
-def builtin_tools_exclusion(mission_id: str | None):
+def builtin_tools_exclusion(
+    mission_id: str | None,
+    execution_config: dict | None = None,
+):
     """_ToolExclusionMiddleware hiding the deepagents built-ins, or None
     when the mission keeps them.
 
-    For missions in ``NO_BUILTIN_TOOL_MISSIONS`` (hotel only —
+    For missions with ``harness.builtin_tools.deny`` (hotel only —
     fault_analysis needs ``execute`` in its sandbox by design), the
     9 built-ins are hidden from the model request AND rejected at the
     call boundary (Part 1, option b). The public alternatives cannot
@@ -116,7 +109,9 @@ def builtin_tools_exclusion(mission_id: str | None):
     ``test_hotel_agent_model_sees_no_builtin_tools``. The Mission
     Graph calls this when assembling the per-run middleware list.
     """
-    if mission_id not in NO_BUILTIN_TOOL_MISSIONS:
+    from runtime.harness.registry import mission_denies_builtin_tools
+
+    if not mission_denies_builtin_tools(mission_id, execution_config):
         return None
     from deepagents.middleware._tool_exclusion import _ToolExclusionMiddleware
 

@@ -402,7 +402,10 @@ def deep_agent_node(state: MissionState) -> dict:
         # — so they were dead code, not a fallback.
         from runtime.subgraph.flow import use_flow_subgraph
 
-        use_flow = use_flow_subgraph(state.get("mission_id"), mapped_skills)
+        execution_cfg = mission.get("execution") or {}
+        use_flow = use_flow_subgraph(
+            state.get("mission_id"), mapped_skills, execution_cfg
+        )
         plan_block = (
             "\n\n".join(render_plan(s.map) for s in mapped_skills)
             if mapped_skills
@@ -521,7 +524,9 @@ def deep_agent_node(state: MissionState) -> dict:
         # `execute` in its sandbox). See
         # runtime/deep_agent.py::builtin_tools_exclusion.
         middleware = [hook_middleware]
-        exclusion = builtin_tools_exclusion(state.get("mission_id"))
+        exclusion = builtin_tools_exclusion(
+            state.get("mission_id"), execution_cfg
+        )
         if exclusion is not None:
             middleware.append(exclusion)
         # Direction C: flow agents get their own hook middleware whose

@@ -21,6 +21,13 @@ and later runs see the prior turns (`docs/sessions.md`).
   (existing environment variables win; `API_BASE_URL` defaults to
   `http://localhost:8000`).
 
+## Adding a new agent
+
+Use the declarative harness flow (``docs/agents-harness.md``): ``make
+new-agent NAME=…``, edit the generated YAML, ``make seed-agent AGENT=…
+MISSION=…``, then ``agent_config_check.py`` to validate harness +
+pinning. **~5 steps** vs ~12–15 Python/YAML touchpoints before harness.
+
 ## Scripts
 
 | Script | What it does |

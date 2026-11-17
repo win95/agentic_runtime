@@ -29,20 +29,20 @@ from app.services import execution_service, session_service
 
 router = APIRouter(prefix="/guest", tags=["guest"])
 
-GUEST_MISSION_ID = "hotel_reception"
-
-
 @router.post("/chat", response_model=schemas.GuestChatRead, status_code=202)
 def guest_chat(
     payload: schemas.GuestChatCreate,
     db: Session = Depends(get_db),
     user: dict = Depends(require_jwt_user),
 ):
+    from runtime.harness.registry import guest_chat_mission_id
+
     sub = user.get("sub")
     check_guest_rate_limit(sub)
+    mission_id = guest_chat_mission_id()
     execution, problems = execution_service.create_execution(
         db,
-        GUEST_MISSION_ID,
+        mission_id,
         {"message": payload.message, "guest_id": sub, "channel": "guest_api"},
         session_id=payload.session_id,
         user_id=sub,
@@ -50,7 +50,7 @@ def guest_chat(
     if execution is None:
         if problems == ["__mission_not_found__"]:
             raise HTTPException(
-                status_code=404, detail="Mission hotel_reception not found"
+                status_code=404, detail=f"Mission {mission_id} not found"
             )
         raise HTTPException(
             status_code=422, detail=f"Invalid execution input: {problems}"

@@ -346,18 +346,10 @@ _BUILTIN_FILE_TOOLS = frozenset({
     "glob", "grep", "task", "execute",
 })
 
-# Missions where the built-ins are denied. fault_analysis deliberately
-# opts out: its sandbox sessions need `execute` by design. The gate
-# lives here, not only in the mission YAML — a mission that declares no
-# hooks runs every built-in (see select_hooks), so a YAML-only scope
-# would leak this deny into fault_analysis.
-_BUILTIN_DENY_MISSIONS = frozenset({"hotel_reception"})
-
-
 def deny_builtin_tools(context: HookContext) -> HookDecision | None:
     """PreToolUse: deny deepagents built-in file/subagent tools (Part 1).
 
-    Scoped to ``_BUILTIN_DENY_MISSIONS`` (hotel only): the
+    Scoped to missions with ``harness.builtin_tools.deny`` (hotel only): the
     receptionist's whole contract is the 17 MCP tools, so a file
     read/write or a subagent spawn is never a legitimate step for it —
     the manual runs showed the 3B model falling into read_file loops
@@ -366,17 +358,24 @@ def deny_builtin_tools(context: HookContext) -> HookDecision | None:
     tools stay visible in its tool list, so it may retry them, and the
     message is what steers it away.
     """
-    if context.mission_id not in _BUILTIN_DENY_MISSIONS:
+    from runtime.harness.registry import (
+        builtin_deny_message,
+        mission_denies_builtin_tools,
+    )
+
+    execution_config = (context.mission or {}).get("execution") or {}
+    if not mission_denies_builtin_tools(context.mission_id, execution_config):
         return None
     if context.tool_name not in _BUILTIN_FILE_TOOLS:
         return None
-    return HookDecision.deny(
-        f"Tool '{context.tool_name}' denied by hook 'deny_builtin_tools': "
-        "the hotel receptionist has no file or subagent tools — all room, "
-        "guest, booking, staff and policy actions go through the MCP tools "
-        "(check_room_availability, get_booking, create_booking, ...). Do not "
-        "retry this tool; use the MCP tool for the task instead."
+    message = builtin_deny_message(
+        context.mission_id,
+        context.tool_name,
+        execution_config,
     )
+    if not message:
+        return None
+    return HookDecision.deny(message)
 
 
 def injection_feedback(context: HookContext) -> HookDecision | None:

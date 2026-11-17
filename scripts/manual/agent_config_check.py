@@ -202,6 +202,47 @@ def _field_matches(source: dict, target: dict, field: str,
     return source[field] == target[other]
 
 
+def check_harness(report: Report, config: dict) -> None:
+    """Mission harness: seed YAML validates and matches the DB snapshot."""
+    from runtime.harness.loader import load_mission_harness_from_file, parse_mission_harness
+
+    print("\n--- mission harness (seeds → execution_config.harness) ---")
+    mission = config.get("mission") or {}
+    mission_id = mission.get("mission_id") or ""
+    if not mission_id:
+        report.skip("harness", "no mission_id in config")
+        return
+    path = REPO_ROOT / "seeds" / "missions" / f"{mission_id}.yaml"
+    if not report.check(path.is_file(), f"mission seed exists ({path.name})"):
+        return
+    try:
+        seed_harness = load_mission_harness_from_file(path)
+        parse_mission_harness(seed_harness.model_dump(), source=str(path))
+    except ValueError as exc:
+        report.check(False, "mission harness validates", str(exc))
+        return
+    report.check(True, "mission harness validates (pydantic)", mission_id)
+    db_harness = (mission.get("execution") or {}).get("harness")
+    if db_harness is None:
+        report.check(
+            False,
+            "execution.harness present in DB mission row",
+            "re-run `make seed`",
+        )
+        return
+    try:
+        db_model = parse_mission_harness(db_harness, source=f"db:{mission_id}")
+    except ValueError as exc:
+        report.check(False, "DB harness validates", str(exc))
+        return
+    report.check(
+        db_model.model_dump() == seed_harness.model_dump(),
+        "DB harness matches seed YAML",
+        "re-run `make seed`" if db_model.model_dump() != seed_harness.model_dump()
+        else mission_id,
+    )
+
+
 def check_static(report: Report, config: dict) -> None:
     print("\n--- static config (seeds → agents row → AgentVersion) ---")
     agent = config["agent"]
@@ -686,6 +727,7 @@ def main() -> int:
 
     report = Report()
     check_static(report, config)
+    check_harness(report, config)
 
     reader = None
     if args.no_trace:

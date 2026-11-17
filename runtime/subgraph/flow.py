@@ -77,7 +77,7 @@ Direction C: one agent per FLOW, not per node.
   still completes — the trace is for the v5 acceptance check, not for
   steering the model mid-turn.
 
-``FLOW_PILOT_MISSIONS`` is the rollout scope — hotel only, for now.
+Mission harness ``flow_subgraph.enabled`` is the rollout scope.
 The legacy node compiler (``runtime/subgraph/node.py``) and the Phase 3a
 plan gate were deleted 2026-11-16: the flow compiler is the only
 subgraph path, and free-form missions run without a gate.
@@ -128,7 +128,6 @@ logger = logging.getLogger(__name__)
 
 # Rollout scope (pilot): hotel only. The mechanism is generic; the next
 # mission adopts it once its map is verified against the compiler.
-FLOW_PILOT_MISSIONS = frozenset({"hotel_reception"})
 
 # Node executions per run (route calls + flow executions). A
 # multi-request turn is route -> flow -> route -> flow, so 12 still
@@ -616,9 +615,15 @@ def classify_route_choice(
     return declared, [], True
 
 
-def use_flow_subgraph(mission_id: str | None, mapped_skills) -> bool:
-    """True when the mission is a flow pilot and has a mapped skill."""
-    return mission_id in FLOW_PILOT_MISSIONS and bool(mapped_skills)
+def use_flow_subgraph(
+    mission_id: str | None,
+    mapped_skills,
+    execution_config: dict | None = None,
+) -> bool:
+    """True when harness enables the flow subgraph and has a mapped skill."""
+    from runtime.harness.registry import use_flow_subgraph_harness
+
+    return use_flow_subgraph_harness(mission_id, mapped_skills, execution_config)
 
 
 def _tool_names_called(messages: list) -> set[str]:
