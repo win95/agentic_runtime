@@ -9,6 +9,7 @@ same models run on SQLite in tests.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from enum import Enum
 
 from sqlalchemy import (
     JSON,
@@ -507,6 +508,28 @@ class Schedule(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
 
 
+class IngestRunStatus(str, Enum):
+    """Batch-ingest run/file status (``IngestRun.status``).
+
+    Distinct from execution statuses (``Execution.status``): the
+    same ``SUCCEEDED``/``FAILED`` spellings, a different domain.
+    """
+
+    SUCCEEDED = "SUCCEEDED"
+    PARTIAL = "PARTIAL"
+    FAILED = "FAILED"
+    SKIPPED = "SKIPPED"
+    DRY_RUN = "DRY_RUN"
+
+
+class IngestQuarantineStatus(str, Enum):
+    """Quarantined-row status (``IngestQuarantine.status``)."""
+
+    PENDING = "pending"
+    RETRIED = "retried"
+    DISCARDED = "discarded"
+
+
 class IngestRun(Base):
     """One batch-ingest run for a single source file (Option B).
 
@@ -521,7 +544,9 @@ class IngestRun(Base):
 
     id: Mapped[str] = mapped_column(String(128), primary_key=True)
     source: Mapped[str] = mapped_column(String(512), nullable=False, index=True)
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="SUCCEEDED")
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=IngestRunStatus.SUCCEEDED
+    )
     rows_ok: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     rows_failed: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     errors: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
@@ -547,7 +572,9 @@ class IngestQuarantine(Base):
     source: Mapped[str] = mapped_column(String(512), nullable=False)
     row: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     error: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default=IngestQuarantineStatus.PENDING
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
 
 

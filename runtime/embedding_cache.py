@@ -28,8 +28,12 @@ import threading
 import time
 from collections import OrderedDict
 
-_TTL_SECONDS = 300
-_MAX_ENTRIES = 512
+from app.config import settings
+
+# Ops values live in app/config.py; the names below are aliases so
+# existing imports keep working.
+_TTL_SECONDS = settings.embedding_cache_ttl_seconds
+_MAX_ENTRIES = settings.embedding_cache_max_entries
 
 _lock = threading.Lock()
 # (model, text) -> (expires_at_monotonic, vector)

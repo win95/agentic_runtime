@@ -42,6 +42,7 @@ scores, guardrail flags.
 from __future__ import annotations
 
 import logging
+from enum import Enum
 
 from runtime.retrieval_fusion import (
     W_EXACT,
@@ -60,8 +61,27 @@ from runtime.retrieval_graph import (
     graph_features,
     graph_scores,
 )
+from runtime.retrieval_weights import (
+    DEFAULT_SEED_CONFIDENCE,
+    TRACE_SCORE_PRECISION,
+)
 
 logger = logging.getLogger(__name__)
+
+
+class AdjacencySource(str, Enum):
+    """Where a candidate subgraph's adjacency came from.
+
+    ``LIVE``: ``build_live_adjacency`` over real Neo4j edges (out to
+    the second hop). ``EXPANSION_ONLY``: the fallback adjacency built
+    from the expansion alone (``build_expansion_adjacency``) when the
+    live build failed or came back empty. One spelling for the trace
+    value ``graph_adjacency_source`` — ``retrieval_live.py`` and the
+    plan path pass these members, never raw strings.
+    """
+
+    LIVE = "live"
+    EXPANSION_ONLY = "expansion-only"
 
 VECTOR_LIMIT = 40
 
@@ -343,7 +363,19 @@ class HybridRetriever:
                 # path) — reuse it instead of rebuilding the same
                 # live adjacency a second time.
                 graph_adjacency = adjacency
-                expansion["graph_adjacency_source"] = adjacency_source or "live"
+                try:
+                    source = (
+                        AdjacencySource(adjacency_source)
+                        if adjacency_source
+                        else AdjacencySource.LIVE
+                    )
+                except ValueError:
+                    logger.warning(
+                        "unknown adjacency_source %r; treating as live",
+                        adjacency_source,
+                    )
+                    source = AdjacencySource.LIVE
+                expansion["graph_adjacency_source"] = source.value
             else:
                 try:
                     live_adjacency = build_live_adjacency(seeds, expansion, store=self.graph_store)
@@ -352,10 +384,10 @@ class HybridRetriever:
                     live_adjacency = {}
                 if live_adjacency:
                     graph_adjacency = live_adjacency
-                    expansion["graph_adjacency_source"] = "live"
+                    expansion["graph_adjacency_source"] = AdjacencySource.LIVE.value
                 else:
                     graph_adjacency = build_expansion_adjacency(seeds, expansion)
-                    expansion["graph_adjacency_source"] = "expansion-only"
+                    expansion["graph_adjacency_source"] = AdjacencySource.EXPANSION_ONLY.value
                     logger.warning(
                         "live adjacency empty/failed; using expansion-only adjacency (%d nodes)",
                         len(graph_adjacency),
@@ -372,7 +404,9 @@ class HybridRetriever:
 
             spec = seed_specificity(seeds, self._resolved_doc_counts())
             seed_weights = {
-                s["key"]: float(s.get("confidence", 1.0)) * spec[s["key"]] for s in seeds
+                s["key"]: float(s.get("confidence", DEFAULT_SEED_CONFIDENCE))
+                * spec[s["key"]]
+                for s in seeds
             }
             ppr_scores = personalized_pagerank(graph_adjacency, seeds, seed_weights=seed_weights)
 
@@ -650,8 +684,8 @@ class HybridRetriever:
             "feature_rows": trace_feature_rows(candidates, final),
             "candidates": {
                 c["doc_id"]: {
-                    "vec": round(c["vec_score"], 4),
-                    "graph": round(c["graph_score"], 4),
+                    "vec": round(c["vec_score"], TRACE_SCORE_PRECISION),
+                    "graph": round(c["graph_score"], TRACE_SCORE_PRECISION),
                     "exact": c["exact"],
                     "final": c.get("final_score"),
                     "g1": c.get("graph_g1_min_hops"),

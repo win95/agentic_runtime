@@ -82,14 +82,18 @@ DOCUMENT_LINKS: dict[str, dict] = {
 }
 
 
-def compute_document_links(doc: dict) -> dict:
+def compute_document_links(doc: dict, *, allow_demo_links: bool = False) -> dict:
     """Payload link fields for one document dict (``id``/``title``/``content``).
 
     Generic rules, from fields already on the row — no model, no
     guessing:
-    - known demo docs keep the grounded table above (it encodes the
-      deliberate M05 asymmetry: ``doc-motor-overheat`` links to O21 /
-      motor-M2 only, never O22 / motor-M3);
+    - demo fallback (``allow_demo_links=True`` only): known demo docs
+      keep the grounded table above (it encodes the deliberate M05
+      asymmetry: ``doc-motor-overheat`` links to O21 / motor-M2 only,
+      never O22 / motor-M3). Real ingest passes the default
+      ``False``: a real document whose id happens to collide with a
+      demo id must NOT inherit demo links — only its explicit fields
+      (next rule) count;
     - any other doc links from its explicit fields: ``asset_id`` /
       ``component_id`` / ``building_id`` become ``node_ids`` entries,
       and the doc's own id is included when the doc is an ontology
@@ -100,14 +104,15 @@ def compute_document_links(doc: dict) -> dict:
       unlinked doc simply scores ``graph_score = 0`` and the vector
       arm carries it (guardrail 3 fallback).
     """
-    links = DOCUMENT_LINKS.get(doc.get("id", ""))
-    if links is not None:
-        return {
-            "node_ids": list(links["node_ids"]),
-            "asset_id": links["asset_id"],
-            "component_id": links["component_id"],
-            "building_id": links["building_id"],
-        }
+    if allow_demo_links:
+        links = DOCUMENT_LINKS.get(doc.get("id", ""))
+        if links is not None:
+            return {
+                "node_ids": list(links["node_ids"]),
+                "asset_id": links["asset_id"],
+                "component_id": links["component_id"],
+                "building_id": links["building_id"],
+            }
     node_ids: list[str] = []
     asset_id = doc.get("asset_id")
     component_id = doc.get("component_id")
@@ -132,21 +137,23 @@ def compute_document_links(doc: dict) -> dict:
     }
 
 
-def with_document_links(doc: dict) -> dict:
+def with_document_links(doc: dict, *, allow_demo_links: bool = False) -> dict:
     """Return a copy of ``doc`` with payload link fields attached.
 
     Existing explicit link fields win over the table, so a caller that
-    already knows a doc's links is never overwritten.
+    already knows a doc's links is never overwritten. The demo table
+    is consulted only when ``allow_demo_links`` is true (demo/seed
+    sources); real ingest leaves it off.
     """
     out = dict(doc)
-    computed = compute_document_links(doc)
+    computed = compute_document_links(doc, allow_demo_links=allow_demo_links)
     for key, value in computed.items():
         if key not in out or out[key] in (None, [], ""):
             out[key] = value
     return out
 
 
-def linking_coverage(docs: list[dict]) -> dict:
+def linking_coverage(docs: list[dict], *, allow_demo_links: bool = False) -> dict:
     """Linking coverage over a doc list: share with >=1 ``node_id``.
 
     Phase 1 target (locked decision): >= 80% of chunks with >=1 node_id.
@@ -157,7 +164,7 @@ def linking_coverage(docs: list[dict]) -> dict:
     for doc in docs:
         node_ids = doc.get("node_ids")
         if node_ids is None:
-            node_ids = compute_document_links(doc)["node_ids"]
+            node_ids = compute_document_links(doc, allow_demo_links=allow_demo_links)["node_ids"]
         if node_ids:
             linked += 1
     return {

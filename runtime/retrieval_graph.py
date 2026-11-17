@@ -59,7 +59,33 @@ import re
 import time
 import unicodedata
 
+from app.config import settings
+from ontology.canonical.schema import (
+    DEFAULT_RELATION_TYPE,
+    ENTITY_ASSET,
+    ENTITY_BUILDING,
+    ENTITY_COMPONENT,
+    ENTITY_DOCUMENT,
+    REL_DOCUMENTED_BY,
+    REL_HAS_COMPONENT,
+    REL_LOCATED_IN,
+    REL_PART_OF,
+    REL_RELATED_TO,
+    UNKNOWN_NODE_TYPE,
+)
 from runtime.retrieval_fusion import zscores
+from runtime.retrieval_weights import (
+    G5_DIRECT,
+    G5_ONE_HOP,
+    GRAPH_PATH_HOP_ADJ,
+    GRAPH_PATH_SCORE_MAX,
+    GRAPH_PATH_SCORE_MIN,
+    GRAPH_PATH_SEED_BONUS,
+    GRAPH_PATH_SEED_BONUS_CAP,
+    GRAPH_PATH_W_G4,
+    GRAPH_PATH_W_G5,
+    TRACE_SCORE_PRECISION,
+)
 from runtime.retrieval_weights import (
     GRAPH_W_COVERAGE as W_COVERAGE,
 )
@@ -73,35 +99,41 @@ from runtime.retrieval_weights import (
 logger = logging.getLogger(__name__)
 
 # --- Relation weights (§4.2, starting values = locked priors) --------
+# Keys are the canonical relation names (ontology/canonical/schema.py):
+# renaming a relation touches schema.py only.
 RELATION_WEIGHTS: dict[str, float] = {
-    "DOCUMENTED_BY": 1.00,
-    "HAS_COMPONENT": 0.90,
-    "PART_OF": 0.90,
-    "LOCATED_IN": 0.40,
-    "RELATED_TO": 0.25,
+    REL_DOCUMENTED_BY: 1.00,
+    REL_HAS_COMPONENT: 0.90,
+    REL_PART_OF: 0.90,
+    REL_LOCATED_IN: 0.40,
+    REL_RELATED_TO: 0.25,
 }
 # LOCATED_IN through a hub building (degree > HUB_DEGREE) is weaker.
-HUB_DEGREE = 50
-HUB_LOCATED_IN_WEIGHT = 0.15
-HOP_DECAY = 0.6
+# Ops values live in app/config.py; the names below are aliases so
+# existing imports keep working.
+HUB_DEGREE = settings.retrieval_hub_degree
+HUB_LOCATED_IN_WEIGHT = settings.retrieval_hub_located_in_weight
+HOP_DECAY = settings.retrieval_hop_decay
 
 ALLOWED_RELATIONS = frozenset(RELATION_WEIGHTS)
 
 # Caps (§3.2, locked).
-MAX_FANOUT_PER_TYPE = 10
-MAX_EXPANSION_NODES = 50
-DEFAULT_TIMEOUT_SECONDS = 0.15  # 150 ms Neo4j budget, report §3.2
+MAX_FANOUT_PER_TYPE = settings.retrieval_max_fanout_per_type
+MAX_EXPANSION_NODES = settings.retrieval_max_expansion_nodes
+# 150 ms Neo4j budget, report §3.2.
+DEFAULT_TIMEOUT_SECONDS = settings.retrieval_default_timeout_seconds
 # B9: the live-adjacency build gets its OWN budget, separate from
 # the expansion's 150 ms — it serves PPR/coverage/hub over up to
 # ~200 nodes, and sharing the expansion budget meant it almost
 # certainly exhausted mid-way on non-localhost Neo4j.
-LIVE_ADJACENCY_TIMEOUT_SECONDS = 0.30  # 300 ms Neo4j budget
+# 300 ms Neo4j budget.
+LIVE_ADJACENCY_TIMEOUT_SECONDS = settings.retrieval_live_adjacency_timeout_seconds
 
 # Live-adjacency cap (Phase 5 follow-up): the PPR candidate subgraph
 # is <= ~200 nodes by design (report §11.3 PPR cap). The live builder
 # counts seeds + expansion + second-hop nodes against this cap.
 
-MAX_LIVE_ADJACENCY_NODES = 200
+MAX_LIVE_ADJACENCY_NODES = settings.retrieval_max_live_adjacency_nodes
 
 
 # --- graph_score weights (locked full formula, §4.7) ----------
@@ -131,7 +163,7 @@ MAX_LIVE_ADJACENCY_NODES = 200
 # identical numbers (the z-clip saturates the effect), so 1.0 —
 # the full log-degree value — is used, not a tuned knife-edge.
 HUB_LAMBDA = 1.0
-HUB_TRANSIT_TYPES = frozenset({"Building", "Document"})
+HUB_TRANSIT_TYPES = frozenset({ENTITY_BUILDING, ENTITY_DOCUMENT})
 
 # --- Gazetteer ---------------------------------------------------------
 # Seeds come ONLY from the dynamic gazetteer (see module docstring
@@ -201,10 +233,10 @@ def gazetteer_seeds(question: str) -> list[dict]:
 #   this only changes WHICH keys can become seeds.
 
 _DYNAMIC_ENTITY_TYPES: tuple[tuple[str, str], ...] = (
-    ("Asset", "assets"),
-    ("Component", "components"),
-    ("Building", "buildings"),
-    ("Document", "documents"),
+    (ENTITY_ASSET, "assets"),
+    (ENTITY_COMPONENT, "components"),
+    (ENTITY_BUILDING, "buildings"),
+    (ENTITY_DOCUMENT, "documents"),
 )
 
 _DYNAMIC_CODES: dict[str, list[str]] = {}
@@ -228,7 +260,9 @@ _DYNAMIC_PATTERNS: list[tuple[str, str, re.Pattern[str], re.Pattern[str]]] = []
 # cache EMPTY). An explicitly passed store always refreshes for
 # real (an explicit refresh request — tests and manual calls), and
 # ``force=True`` refreshes regardless (drain / seed after a write).
-_GAZETTEER_REFRESH_MIN_INTERVAL_SECONDS = 60
+_GAZETTEER_REFRESH_MIN_INTERVAL_SECONDS = (
+    settings.retrieval_gazetteer_refresh_min_interval_seconds
+)
 _GAZETTEER_LAST_REFRESH: float = 0.0
 _GAZETTEER_SUMMARY: dict | None = None
 
@@ -344,10 +378,10 @@ def refresh_gazetteer_codes(store=None, *, force: bool = False) -> dict:
     _DYNAMIC_PATTERNS = patterns
     _GAZETTEER_LAST_REFRESH = time.monotonic()
     _GAZETTEER_SUMMARY = {
-        "assets": len(codes["Asset"]),
-        "components": len(codes["Component"]),
-        "buildings": len(codes["Building"]),
-        "documents": len(codes["Document"]),
+        "assets": len(codes[ENTITY_ASSET]),
+        "components": len(codes[ENTITY_COMPONENT]),
+        "buildings": len(codes[ENTITY_BUILDING]),
+        "documents": len(codes[ENTITY_DOCUMENT]),
         "source": "ontology",
     }
     return dict(_GAZETTEER_SUMMARY)
@@ -417,9 +451,16 @@ def node_degree(adjacency: dict, key: str) -> int:
 
 
 def _relation_weight(rel: str, via_key: str, adjacency: dict) -> float:
-    if rel == "LOCATED_IN" and node_degree(adjacency, via_key) > HUB_DEGREE:
+    if rel == REL_LOCATED_IN and node_degree(adjacency, via_key) > HUB_DEGREE:
         return HUB_LOCATED_IN_WEIGHT
-    return RELATION_WEIGHTS.get(rel, 0.0)
+    weight = RELATION_WEIGHTS.get(rel)
+    if weight is None:
+        # An unlisted relation scores 0.0 — but never silently: a
+        # relation the schema does not know is a data problem, not
+        # a weak edge.
+        logger.warning("graph relation %r has no weight; scoring 0.0", rel)
+        return 0.0
+    return weight
 
 
 def expand_one_hop(
@@ -461,7 +502,7 @@ def expand_one_hop(
                     "type": to_type,
                     "rel": rel,
                     "from_seed": seed_key,
-                    "via_hub": rel == "LOCATED_IN"
+                    "via_hub": rel == REL_LOCATED_IN
                     and node_degree(adjacency, to_key) > HUB_DEGREE,
                 }
             if len(nodes) >= max_nodes:
@@ -523,7 +564,7 @@ def expand_via_graph_query(
                     truncated = True
                     break
                 nodes[to_key] = {
-                    "type": row.get("to_label") or "Entity",
+                    "type": row.get("to_label") or UNKNOWN_NODE_TYPE,
                     "rel": rel,
                     "from_seed": seed["key"],
                     "via_hub": False,
@@ -565,19 +606,19 @@ def build_expansion_adjacency(seeds: list[dict], expansion: dict) -> dict:
     def _ensure(key: str, node_type: str) -> None:
         adjacency.setdefault(key, {"type": node_type, "neighbors": []})
 
-    seed_types = {s["key"]: s.get("type") or "Entity" for s in seeds}
+    seed_types = {s["key"]: s.get("type") or UNKNOWN_NODE_TYPE for s in seeds}
     for seed in seeds:
         _ensure(seed["key"], seed_types[seed["key"]])
     for to_key, node in (expansion.get("nodes") or {}).items():
-        _ensure(to_key, node.get("type") or "Entity")
+        _ensure(to_key, node.get("type") or UNKNOWN_NODE_TYPE)
         from_seed = node.get("from_seed")
         if from_seed in adjacency:
             _live_adjacency_edge(
                 adjacency,
                 from_seed,
-                node.get("rel") or "RELATED_TO",
+                node.get("rel") or DEFAULT_RELATION_TYPE,
                 to_key,
-                node.get("type") or "Entity",
+                node.get("type") or UNKNOWN_NODE_TYPE,
             )
     for entry in adjacency.values():
         entry["neighbors"] = sorted(set(entry["neighbors"]), key=lambda e: (e[1], e[0]))
@@ -651,10 +692,10 @@ def build_live_adjacency(
         adjacency.setdefault(key, {"type": node_type, "neighbors": []})
 
     for seed in seeds:
-        _ensure(seed["key"], seed.get("type") or "Entity")
+        _ensure(seed["key"], seed.get("type") or UNKNOWN_NODE_TYPE)
     expansion_nodes = expansion.get("nodes") or {}
     for key, node in expansion_nodes.items():
-        _ensure(key, node.get("type") or "Entity")
+        _ensure(key, node.get("type") or UNKNOWN_NODE_TYPE)
 
     started = time.monotonic()
     truncated = False
@@ -690,7 +731,7 @@ def build_live_adjacency(
                 to_key = row.get("to")
                 if rel not in ALLOWED_RELATIONS or not to_key or to_key == key:
                     continue
-                to_type = row.get("to_label") or "Entity"
+                to_type = row.get("to_label") or UNKNOWN_NODE_TYPE
                 if to_key not in adjacency:
                     if len(adjacency) >= max_nodes:
                         truncated = True
@@ -753,7 +794,7 @@ def seed_coverage(doc_id: str, seeds: list[dict], adjacency: dict, *, max_hops: 
                     nxt.add(to_key)
         frontier = nxt
     seed_keys = {s["key"] for s in seeds}
-    return round(len(seen & seed_keys) / len(seed_keys), 4)
+    return round(len(seen & seed_keys) / len(seed_keys), TRACE_SCORE_PRECISION)
 
 
 def graph_features(
@@ -793,8 +834,8 @@ def graph_features(
       (that entity). ``g8_transit_key`` names it for the trace.
     """
     seed_keys = {s["key"] for s in seeds}
-    seed_assets = {s["key"] for s in seeds if s["type"] == "Asset"}
-    seed_comps = {s["key"] for s in seeds if s["type"] == "Component"}
+    seed_assets = {s["key"] for s in seeds if s["type"] == ENTITY_ASSET}
+    seed_comps = {s["key"] for s in seeds if s["type"] == ENTITY_COMPONENT}
     linked = doc_linked_nodes(doc_id, payload)
     linked_set = set(linked)
     expanded = expansion.get("nodes", {})
@@ -806,7 +847,7 @@ def graph_features(
     for entity in linked:
         if entity in seed_keys:
             if 1.0 > best[0]:
-                best = (1.0, 0, ("DOCUMENTED_BY",), None)
+                best = (1.0, 0, (REL_DOCUMENTED_BY,), None)
             continue
         if entity in expanded:
             rel = expanded[entity]["rel"]
@@ -824,10 +865,10 @@ def graph_features(
     path_score, hops, best_rels, transit = best
     if doc_id in seed_keys or linked_set & seed_keys:
         g1: int | None = 0
-        direct = 1.0
+        direct = G5_DIRECT
     elif hops == 1:
         g1 = 1
-        direct = 0.5
+        direct = G5_ONE_HOP
     else:
         g1 = None
         direct = 0.0
@@ -841,8 +882,8 @@ def graph_features(
         real = (adjacency.get(key) or {}).get("type") or (expanded.get(key) or {}).get("type")
         return real if real else _node_type(key)
 
-    doc_comps = {k for k in linked_set if _linked_type(k) == "Component"}
-    doc_assets = {k for k in linked_set if _linked_type(k) == "Asset"}
+    doc_comps = {k for k in linked_set if _linked_type(k) == ENTITY_COMPONENT}
+    doc_assets = {k for k in linked_set if _linked_type(k) == ENTITY_ASSET}
     if seed_comps:
         if doc_comps & seed_comps:
             g4 = 1
@@ -866,11 +907,11 @@ def graph_features(
     if transit is not None:
         transit_type = adjacency.get(transit, {}).get("type")
         if transit_type in HUB_TRANSIT_TYPES:
-            hub = round(math.log1p(node_degree(adjacency, transit)), 4)
+            hub = round(math.log1p(node_degree(adjacency, transit)), TRACE_SCORE_PRECISION)
 
     return {
         "g1_min_hops": g1,
-        "g2_path_score": round(path_score, 4),
+        "g2_path_score": round(path_score, TRACE_SCORE_PRECISION),
         "g4_type_match": g4,
         "g5_direct": direct,
         "g5_n_seeds_linked": n_seeds_linked,
@@ -908,16 +949,25 @@ def graph_score(features: dict) -> float:
     for every candidate instead of using this formula.
     """
     g1 = features.get("g1_min_hops")
-    hop_adj = 0.05 if g1 == 0 else (0.0 if g1 == 1 else -0.05)
-    extra_seeds = min(max(features.get("g5_n_seeds_linked", 0) - 1, 0), 2)
+    hop_adj = (
+        GRAPH_PATH_HOP_ADJ
+        if g1 == 0
+        else (0.0 if g1 == 1 else -GRAPH_PATH_HOP_ADJ)
+    )
+    extra_seeds = min(
+        max(features.get("g5_n_seeds_linked", 0) - 1, 0), GRAPH_PATH_SEED_BONUS_CAP
+    )
     score = (
         features.get("g2_path_score", 0.0)
-        + 0.10 * features.get("g4_type_match", 0)
-        + 0.10 * (features.get("g5_direct", 0.0) - 0.5)
+        + GRAPH_PATH_W_G4 * features.get("g4_type_match", 0)
+        + GRAPH_PATH_W_G5 * (features.get("g5_direct", 0.0) - 0.5)
         + hop_adj
-        + 0.02 * extra_seeds
+        + GRAPH_PATH_SEED_BONUS * extra_seeds
     )
-    return round(max(-0.3, min(1.2, score)), 4)
+    return round(
+        max(GRAPH_PATH_SCORE_MIN, min(GRAPH_PATH_SCORE_MAX, score)),
+        TRACE_SCORE_PRECISION,
+    )
 
 
 def _minmax_log(values: list[float]) -> list[float]:
@@ -975,7 +1025,7 @@ def graph_scores(
     return [
         round(
             w_ppr * pp + w_path * pz + w_coverage * float(row.get("g6_coverage", 0.0)),
-            4,
+            TRACE_SCORE_PRECISION,
         )
         for pp, pz, row in zip(ppr_norm, path_z, feature_rows)
     ]

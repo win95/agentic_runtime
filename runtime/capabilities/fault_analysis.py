@@ -23,9 +23,15 @@ import logging
 from langgraph.graph import END, START, StateGraph
 
 from infra import repositories
+from ontology.canonical.schema import DEFAULT_RELATION_TYPE
+from runtime.retrieval_weights import DEFAULT_DOC_LIMIT
 from runtime.state import MissionState
 
 logger = logging.getLogger(__name__)
+
+# Knowledge-node question template: the hybrid/vector search the
+# knowledge_retrieval node runs for an asset. Value unchanged.
+KNOWLEDGE_RETRIEVAL_QUERY_TEMPLATE = "faults maintenance {asset_id}"
 
 
 def _evidence(source: str, kind: str, asset_id: str, summary: str, data=None, stub=False) -> dict:
@@ -59,7 +65,7 @@ def fault_history_node(state: MissionState) -> dict:
             "fault_history",
             "fault",
             asset_id,
-            f"{row.get('code', 'FAULT')}: {row.get('title', 'Untitled fault')}",
+            f"{row.get('code') or 'missing code'}: {row.get('title') or 'missing title'}",
             row,
             is_stub,
         )
@@ -117,7 +123,7 @@ def _load_knowledge_documents(retrieval: dict, asset_id: str, execution_id: str 
     eval harness / manual scripts keeps working. Raises only when
     both arms fail.
     """
-    question = f"faults maintenance {asset_id}"
+    question = KNOWLEDGE_RETRIEVAL_QUERY_TEMPLATE.format(asset_id=asset_id)
     if retrieval.get("hybrid"):
         from runtime.retrieval_live import hybrid_documents
 
@@ -133,7 +139,7 @@ def _load_knowledge_documents(retrieval: dict, asset_id: str, execution_id: str 
                 "falling back to vector search",
                 exc,
             )
-    return repositories.search_documents(question, limit=5)
+    return repositories.search_documents(question, limit=DEFAULT_DOC_LIMIT)
 
 
 def knowledge_retrieval_node(state: MissionState) -> dict:
@@ -201,7 +207,8 @@ def asset_relations_node(state: MissionState) -> dict:
             "asset_relations",
             "relation",
             asset_id,
-            f"{rel.get('from', asset_id)} -[{rel.get('type', 'RELATED')}]-> {rel.get('to', '')}",
+            f"{rel.get('from', asset_id)} "
+            f"-[{rel.get('type', DEFAULT_RELATION_TYPE)}]-> {rel.get('to', '')}",
             rel,
             is_stub,
         )

@@ -45,6 +45,13 @@ from __future__ import annotations
 
 import math
 
+from ontology.canonical.schema import REL_LOCATED_IN, REL_RELATED_TO
+from runtime.retrieval_weights import (
+    DIRECT_LINK_VALUE,
+    GENERIC_PATH_TOP_N,
+    PER_DOC_CAP,
+    TRACE_SCORE_PRECISION,
+)
 from runtime.retrieval_weights import (
     FUSION_W_EXACT as W_EXACT,
 )
@@ -87,9 +94,9 @@ def renormalise_weights(w_graph: float) -> dict[str, float]:
     """Grid-search weights: w_graph varies, vec:exact keep their 5:1 ratio."""
     rest = 1.0 - w_graph
     return {
-        "w_vec": round(rest * W_VEC / (W_VEC + W_EXACT), 4),
-        "w_graph": round(w_graph, 4),
-        "w_exact": round(rest * W_EXACT / (W_VEC + W_EXACT), 4),
+        "w_vec": round(rest * W_VEC / (W_VEC + W_EXACT), TRACE_SCORE_PRECISION),
+        "w_graph": round(w_graph, TRACE_SCORE_PRECISION),
+        "w_exact": round(rest * W_EXACT / (W_VEC + W_EXACT), TRACE_SCORE_PRECISION),
     }
 
 
@@ -122,8 +129,14 @@ def fuse_candidates(
     scored: list[dict] = []
     for cand, vz, gz in zip(candidates, vec_z, graph_z):
         final = w_vec * vz + w_graph * gz + w_exact * float(cand.get("exact", 0))
-        scored.append({**cand, "final_score": round(final, 4),
-                       "z_vec": round(vz, 4), "z_graph": round(gz, 4)})
+        scored.append(
+            {
+                **cand,
+                "final_score": round(final, TRACE_SCORE_PRECISION),
+                "z_vec": round(vz, TRACE_SCORE_PRECISION),
+                "z_graph": round(gz, TRACE_SCORE_PRECISION),
+            }
+        )
     # Ties (common on a 7-doc corpus where several docs share a
     # graph score and a ~0 vector score) break toward the stronger
     # graph score, then the stronger vector score, then doc_id.
@@ -137,7 +150,7 @@ def fuse_candidates(
     per_doc: dict[str, int] = {}
     for cand in ranked:
         doc_id = cand.get("document_id", cand["doc_id"])
-        if per_doc.get(doc_id, 0) >= 2:
+        if per_doc.get(doc_id, 0) >= PER_DOC_CAP:
             continue
         per_doc[doc_id] = per_doc.get(doc_id, 0) + 1
         out.append(cand)
@@ -165,7 +178,7 @@ def _apply_guardrails(ranked: list[dict]) -> list[dict]:
     # qualifier, which the guardrail does not forbid).
     def _qualifies(cand: dict) -> bool:
         return (
-            cand.get("g5_direct") == 1.0
+            cand.get("g5_direct") == DIRECT_LINK_VALUE
             and cand.get("vec_score", 0.0) >= median_vec
         )
 
@@ -178,17 +191,17 @@ def _apply_guardrails(ranked: list[dict]) -> list[dict]:
                 break
     # Guardrail 2: demote generic-path-only candidates out of top-3.
     for i, cand in enumerate(list(ranked)):
-        if i >= 3:
+        if i >= GENERIC_PATH_TOP_N:
             break
         rels = cand.get("best_path_rels") or []
         if not rels:
             continue
-        generic = all(r == "RELATED_TO" for r in rels) or all(
-            r == "LOCATED_IN" and cand.get("via_hub") for r in rels
+        generic = all(r == REL_RELATED_TO for r in rels) or all(
+            r == REL_LOCATED_IN and cand.get("via_hub") for r in rels
         )
         if generic:
             ranked.remove(cand)
-            ranked.insert(3, cand)
+            ranked.insert(GENERIC_PATH_TOP_N, cand)
     return ranked
 
 

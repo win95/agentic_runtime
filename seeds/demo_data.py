@@ -631,7 +631,7 @@ def validate() -> dict:
     # >=80% coverage — the demo corpus is 7/7 = 100%).
     from runtime.retrieval_linking import linking_coverage
 
-    coverage = linking_coverage(DOCUMENTS)
+    coverage = linking_coverage(DOCUMENTS, allow_demo_links=True)
     if coverage["coverage"] < 0.8:
         raise ValueError(
             f"document linking coverage {coverage['coverage']:.2f} below 0.80"

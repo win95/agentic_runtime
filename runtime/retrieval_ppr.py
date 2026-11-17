@@ -57,11 +57,16 @@ setup (see docs/hybrid-retrieval-phase2.md).
 
 from __future__ import annotations
 
+from app.config import settings
+from runtime.retrieval_weights import DEFAULT_SEED_CONFIDENCE
+
 # Restart probability (see module docstring): 0.5 restarts to the
-# seeds, 0.5 follows an edge — the HippoRAG convention.
-RESTART_PROB = 0.5
-DEFAULT_MAX_ITER = 200
-DEFAULT_TOL = 1e-9
+# seeds, 0.5 follows an edge — the HippoRAG convention. Ops values
+# live in app/config.py; the names below are aliases so existing
+# imports keep working.
+RESTART_PROB = settings.retrieval_ppr_restart_prob
+DEFAULT_MAX_ITER = settings.retrieval_ppr_max_iter
+DEFAULT_TOL = settings.retrieval_ppr_tol
 
 
 def seed_specificity(seeds: list[dict], doc_counts: dict[str, int]) -> dict[str, float]:
@@ -116,7 +121,7 @@ def personalized_pagerank(
         weight = (
             seed_weights[key]
             if seed_weights is not None and key in seed_weights
-            else float(seed.get("confidence", 1.0))
+            else float(seed.get("confidence", DEFAULT_SEED_CONFIDENCE))
         )
         personalization[key] += weight
         total += weight

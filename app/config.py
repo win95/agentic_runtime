@@ -191,6 +191,43 @@ class Settings(BaseSettings):
     ingest_use_minio: bool = False
     ingest_minio_bucket: str = "ingest-inbox"
 
+    # --- Retrieval / ingestion / projection ops values ---
+    # Moved here from module-level literals (2026-11-17 hardcode
+    # cleanup): every default below equals the old literal, so
+    # behaviour is unchanged unless the env overrides it. Modules
+    # keep their old constant names as aliases of these settings.
+    # Graph expansion caps + budgets (runtime/retrieval_graph.py).
+    retrieval_hub_degree: int = 50
+    retrieval_hub_located_in_weight: float = 0.15
+    retrieval_hop_decay: float = 0.6
+    retrieval_max_fanout_per_type: int = 10
+    retrieval_max_expansion_nodes: int = 50
+    retrieval_default_timeout_seconds: float = 0.15
+    retrieval_live_adjacency_timeout_seconds: float = 0.30
+    retrieval_max_live_adjacency_nodes: int = 200
+    retrieval_gazetteer_refresh_min_interval_seconds: int = 60
+    # One shared retriever per execution (runtime/retrieval_live.py).
+    retrieval_max_execution_retrievers: int = 32
+    # Context assembly budgets (runtime/retrieval_context.py).
+    retrieval_total_budget_tokens: int = 3000
+    retrieval_graph_reserve_tokens: int = 200
+    retrieval_max_triples: int = 20
+    retrieval_max_chunks_per_doc: int = 2
+    # Expansion gating thresholds (runtime/retrieval_expansion.py).
+    retrieval_max_variants: int = 3
+    retrieval_low_top1_vec: float = 0.35
+    retrieval_small_margin_vec: float = 0.15
+    # Personalized PageRank (runtime/retrieval_ppr.py).
+    retrieval_ppr_restart_prob: float = 0.5
+    retrieval_ppr_max_iter: int = 200
+    retrieval_ppr_tol: float = 1e-9
+    # Process embedding cache (runtime/embedding_cache.py).
+    embedding_cache_ttl_seconds: int = 300
+    embedding_cache_max_entries: int = 512
+    # Qdrant payload batching + substrate cache (infra/qdrant_client.py).
+    qdrant_payload_batch_size: int = 100
+    qdrant_substrate_ttl_seconds: int = 60
+
     # --- Resolved (effective) values ---
     @property
     def resolved_embedding_api_base(self) -> str:

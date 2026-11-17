@@ -22,6 +22,7 @@ import time
 import uuid
 
 from app.config import settings
+from runtime.retrieval_weights import DEFAULT_DOC_LIMIT
 
 logger = logging.getLogger(__name__)
 
@@ -269,7 +270,9 @@ def upsert_documents(
     return {"upserted": len(points), "skipped": len(docs) - len(points)}
 
 
-_PAYLOAD_BATCH_SIZE = 100
+# Ops values live in app/config.py; the names below are aliases so
+# existing imports keep working.
+_PAYLOAD_BATCH_SIZE = settings.qdrant_payload_batch_size
 
 
 def _apply_payload_updates(
@@ -371,7 +374,11 @@ def backfill_document_links(client=None, collection_name: str | None = None) -> 
                     "asset_id": payload.get("asset_id"),
                     "component_id": payload.get("component_id"),
                     "building_id": payload.get("building_id"),
-                }
+                },
+                # Maintenance backfill, not new ingest: it re-derives
+                # the payload the doc was indexed with, so the demo
+                # table stays in play for already-indexed demo docs.
+                allow_demo_links=True,
             )
             if not links["node_ids"]:
                 unknown += 1
@@ -435,7 +442,7 @@ def _scroll_payloads(client, name):
 # immediately, so invalidation-on-write is the primary freshness
 # rule and the TTL only bounds a missed invalidation. NEVER
 # unbounded/uninvalidated: the cache is one entry per collection.
-_SUBSTRATE_TTL_SECONDS = 60
+_SUBSTRATE_TTL_SECONDS = settings.qdrant_substrate_ttl_seconds
 _substrate_cache: dict[str, dict] = {}
 
 
@@ -564,7 +571,12 @@ def get_document_payloads(
 
 
 def search_documents(
-    query_text: str, limit: int = 5, embeddings=None, client=None, *, slim: bool = False
+    query_text: str,
+    limit: int = DEFAULT_DOC_LIMIT,
+    embeddings=None,
+    client=None,
+    *,
+    slim: bool = False,
 ) -> list[dict]:
     """Vector search over the technical-documents collection.
 

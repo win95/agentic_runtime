@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import threading
 
+from app.config import settings
 from infra.qdrant_client import get_document_payloads
 from runtime.retrieval_graph import (
     build_expansion_adjacency,
@@ -29,7 +30,7 @@ from runtime.retrieval_graph import (
     expand_via_graph_query,
     gazetteer_seeds,
 )
-from runtime.retrieval_hybrid import build_hybrid_retriever
+from runtime.retrieval_hybrid import AdjacencySource, build_hybrid_retriever
 from runtime.retrieval_query_plan import build_query_plan
 
 logger = logging.getLogger(__name__)
@@ -56,7 +57,7 @@ logger = logging.getLogger(__name__)
 # a fresh retriever (unchanged behaviour for direct callers).
 _EXECUTION_RETRIEVERS: dict[str, object] = {}
 _EXECUTION_RETRIEVERS_LOCK = threading.Lock()
-_MAX_EXECUTION_RETRIEVERS = 32
+_MAX_EXECUTION_RETRIEVERS = settings.retrieval_max_execution_retrievers
 
 
 def get_execution_retriever(execution_id: str | None):
@@ -164,10 +165,10 @@ def hybrid_documents(
         expansion = expand_via_graph_query(seeds, store=store)
         try:
             adjacency = build_live_adjacency(seeds, expansion, store=store)
-            adjacency_source = "live"
+            adjacency_source = AdjacencySource.LIVE.value
         except Exception:  # noqa: BLE001 — degraded substrate, never fatal
             adjacency = build_expansion_adjacency(seeds, expansion)
-            adjacency_source = "expansion-only"
+            adjacency_source = AdjacencySource.EXPANSION_ONLY.value
         plan = build_query_plan(
             question,
             retriever=live_retriever,

@@ -9,6 +9,8 @@ from typing import Any
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
+from app.config import settings
+from ontology.canonical.schema import ChangeType, ProjectionStatus
 from ontology.models import (
     OntologyEntity,
     OntologyProjectionState,
@@ -17,6 +19,9 @@ from ontology.models import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Projection error text kept on a dead/failed row (operator inspection).
+MAX_ERROR_LEN = 4000
 
 
 def _utcnow() -> datetime:
@@ -92,7 +97,7 @@ class CanonicalOntologyRepository:
         subject_kind: str,
         subject_ref: str,
         version: int,
-        change_type: str,
+        change_type: str | ChangeType,
         snapshot: dict[str, Any],
         trace_id: str,
         source_event_id: str | None,
@@ -117,7 +122,7 @@ class CanonicalOntologyRepository:
         subject_kind: str,
         subject_ref: str,
         canonical_version: int,
-        change_type: str,
+        change_type: str | ChangeType,
         trace_id: str | None,
     ) -> None:
         stmt = select(OntologyProjectionState).where(
@@ -132,7 +137,7 @@ class CanonicalOntologyRepository:
                     subject_ref=subject_ref,
                     canonical_version=canonical_version,
                     projected_version=None,
-                    status="pending",
+                    status=ProjectionStatus.PENDING,
                     change_type=change_type,
                     attempts=0,
                     last_enqueued_at=now,
@@ -145,10 +150,10 @@ class CanonicalOntologyRepository:
             # limit, and attempts are only incremented on claim, so
             # without this reset a re-queued row would go dead again on
             # its very next failure and could never recover.
-            if row.status == "dead":
+            if row.status == ProjectionStatus.DEAD:
                 row.attempts = 0
             row.canonical_version = canonical_version
-            row.status = "pending"
+            row.status = ProjectionStatus.PENDING
             row.change_type = change_type
             row.last_enqueued_at = now
             row.trace_id = trace_id
@@ -162,19 +167,22 @@ class CanonicalOntologyRepository:
         pending = self._session.scalar(
             select(func.count())
             .select_from(OntologyProjectionState)
-            .where(OntologyProjectionState.status == "pending")
+            .where(OntologyProjectionState.status == ProjectionStatus.PENDING)
         )
         dead = self._session.scalar(
             select(func.count())
             .select_from(OntologyProjectionState)
-            .where(OntologyProjectionState.status == "dead")
+            .where(OntologyProjectionState.status == ProjectionStatus.DEAD)
         )
         return {"pending": int(pending or 0), "dead": int(dead or 0)}
 
-    def claim_pending_projections(self, limit: int = 32) -> list[OntologyProjectionState]:
+    def claim_pending_projections(
+        self, limit: int | None = None
+    ) -> list[OntologyProjectionState]:
+        limit = settings.projection_drain_batch_size if limit is None else limit
         stmt = (
             select(OntologyProjectionState)
-            .where(OntologyProjectionState.status == "pending")
+            .where(OntologyProjectionState.status == ProjectionStatus.PENDING)
             .order_by(
                 OntologyProjectionState.last_enqueued_at.asc(),
                 OntologyProjectionState.id.asc(),
@@ -190,7 +198,7 @@ class CanonicalOntologyRepository:
             )
         rows = list(self._session.scalars(stmt).all())
         for row in rows:
-            row.status = "projecting"
+            row.status = ProjectionStatus.PROJECTING
             row.attempts = (row.attempts or 0) + 1
         self._session.flush()
         return rows
@@ -216,7 +224,7 @@ class CanonicalOntologyRepository:
             )
             .values(
                 projected_version=projected_version,
-                status="synced",
+                status=ProjectionStatus.SYNCED,
                 last_projected_at=_utcnow(),
                 last_error=None,
             )
@@ -225,7 +233,7 @@ class CanonicalOntologyRepository:
             # A newer canonical write arrived mid-projection; re-queue so
             # the next drain re-projects it instead of stranding the row
             # in "projecting" (claim only picks up "pending" rows).
-            row.status = "pending"
+            row.status = ProjectionStatus.PENDING
             self._session.flush()
             self._session.expire(row)
             return False
@@ -233,8 +241,8 @@ class CanonicalOntologyRepository:
         return True
 
     def mark_projection_failed(self, row: OntologyProjectionState, error: str) -> None:
-        row.status = "pending"
-        row.last_error = (error or "")[:4000]
+        row.status = ProjectionStatus.PENDING
+        row.last_error = (error or "")[:MAX_ERROR_LEN]
         self._session.flush()
 
     def mark_projection_dead(self, row: OntologyProjectionState, error: str) -> None:
@@ -244,6 +252,6 @@ class CanonicalOntologyRepository:
         died; re-queueing is a manual fix (upsert_projection_pending
         resets status to "pending"), never automatic.
         """
-        row.status = "dead"
-        row.last_error = (error or "")[:4000]
+        row.status = ProjectionStatus.DEAD
+        row.last_error = (error or "")[:MAX_ERROR_LEN]
         self._session.flush()

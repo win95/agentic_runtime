@@ -27,6 +27,11 @@ from ingest.schemas import (
     RelationRow,
     SensorRow,
 )
+from ontology.canonical.schema import (
+    ENTITY_ASSET,
+    ENTITY_DOCUMENT,
+    REL_DOCUMENTED_BY,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -68,17 +73,24 @@ def load_sensor_readings(db, rows: list[SensorRow]) -> tuple[int, list[dict]]:
     return _merge_rows(db, SensorReading, rows)
 
 
-def load_documents(rows: list[DocumentRow], embeddings=None) -> tuple[int, list[dict]]:
+def load_documents(
+    rows: list[DocumentRow], embeddings=None, *, allow_demo_links: bool = False
+) -> tuple[int, list[dict]]:
     """Embed + upsert documents into Qdrant (file-level: all or nothing).
 
     Phase 1: every doc carries payload node links. A row that omits
-    them gets the grounded links from ``runtime.retrieval_linking``
-    (demo docs); an explicit row value always wins.
+    them gets links from its explicit fields only
+    (``runtime.retrieval_linking``); the demo table is consulted only
+    when ``allow_demo_links`` is true (demo/seed sources) — real
+    ingest never inherits demo links. An explicit row value always wins.
     """
     from infra.qdrant_client import ensure_collection, probe_dimension, upsert_documents
     from runtime.retrieval_linking import with_document_links
 
-    docs = [with_document_links(row.model_dump(mode="json")) for row in rows]
+    docs = [
+        with_document_links(row.model_dump(mode="json"), allow_demo_links=allow_demo_links)
+        for row in rows
+    ]
     try:
         dim = probe_dimension(embeddings)
         ensure_collection(dim)
@@ -89,34 +101,38 @@ def load_documents(rows: list[DocumentRow], embeddings=None) -> tuple[int, list[
     return ok, []
 
 
-def documented_by_relations(rows: list[DocumentRow]) -> list[RelationRow]:
+def documented_by_relations(
+    rows: list[DocumentRow], *, allow_demo_links: bool = False
+) -> list[RelationRow]:
     """DOCUMENTED_BY edges for documents about an asset.
 
     Base ingest fix: the hybrid retrieval graph arm reads Neo4j, but
     the generic inbox ingest never wrote Asset → Document edges to
     the canonical ontology (only the demo seed had them, in
     ``seeds/demo_data.py``). Each doc with an asset_id — explicit on
-    the row, or filled from the grounded linking table by
-    ``with_document_links`` (same fields the Qdrant payload carries)
-    — yields one edge (Asset, asset_id) —DOCUMENTED_BY→ (Document,
-    doc id). A doc with no asset_id yields no edge (never invented).
+    the row — yields one edge (Asset, asset_id) —DOCUMENTED_BY→
+    (Document, doc id). The demo linking table is consulted only when
+    ``allow_demo_links`` is true; real ingest never inherits demo
+    links. A doc with no asset_id yields no edge (never invented).
     Component/building links stay Qdrant-payload-only.
     """
     from runtime.retrieval_linking import with_document_links
 
     relations = []
     for row in rows:
-        linked = with_document_links(row.model_dump(mode="json"))
+        linked = with_document_links(
+            row.model_dump(mode="json"), allow_demo_links=allow_demo_links
+        )
         asset_id = linked.get("asset_id")
         if not asset_id:
             continue
         relations.append(
             RelationRow(
                 from_id=asset_id,
-                from_label="Asset",
-                relation="DOCUMENTED_BY",
+                from_label=ENTITY_ASSET,
+                relation=REL_DOCUMENTED_BY,
                 to_id=row.id,
-                to_label="Document",
+                to_label=ENTITY_DOCUMENT,
             )
         )
     return relations

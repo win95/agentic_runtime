@@ -7,7 +7,7 @@ import sys
 
 from app.config import settings
 from app.core.db import SessionLocal
-from ontology.projection.engine import drain_pending_projections
+from ontology.projection.engine import NEO4J_UNHEALTHY_DETAIL, drain_pending_projections
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -23,7 +23,7 @@ def main(argv: list[str] | None = None) -> int:
     db = SessionLocal()
     try:
         result = drain_pending_projections(db, limit=limit)
-        if result.get("detail") == "neo4j_unhealthy":
+        if result.get("detail") == NEO4J_UNHEALTHY_DETAIL:
             print(
                 "WARNING: Neo4j unhealthy; projection drain skipped "
                 f"(processed={result.get('processed')} "

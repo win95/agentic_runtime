@@ -34,7 +34,12 @@ from pydantic import ValidationError
 
 from app.config import settings
 from app.core.db import SessionLocal
-from app.models import IngestQuarantine, IngestRun
+from app.models import (
+    IngestQuarantine,
+    IngestQuarantineStatus,
+    IngestRun,
+    IngestRunStatus,
+)
 from ingest import FILE_TYPES
 from ingest.loaders import LOADERS, documented_by_relations, load_relations
 from ingest.schemas import ROW_MODELS
@@ -61,13 +66,13 @@ def _new_run_id() -> str:
 def _already_succeeded(db, source: str) -> bool:
     return (
         db.query(IngestRun)
-        .filter_by(source=source, status="SUCCEEDED")
+        .filter_by(source=source, status=IngestRunStatus.SUCCEEDED)
         .first()
         is not None
     )
 
 
-def _record_run(db, *, source: str, status: str, rows_ok: int, rows_failed: int,
+def _record_run(db, *, source: str, status: str | IngestRunStatus, rows_ok: int, rows_failed: int,
                 errors: list[str], started_at: datetime) -> IngestRun:
     run = IngestRun(
         id=_new_run_id(),
@@ -92,7 +97,7 @@ def _quarantine(db, run: IngestRun, source: str, failures: list[dict]) -> None:
             source=source,
             row=failure["row"],
             error=str(failure["error"])[:2000],
-            status="pending",
+            status=IngestQuarantineStatus.PENDING,
         ))
     if failures:
         db.commit()
@@ -106,38 +111,47 @@ def process_file(db, name: str, content: bytes, *, force: bool = False,
     not even the watermark check — so it works with no store at all.
     """
     started_at = _utcnow()
-    result = {"source": name, "status": "SKIPPED", "rows_ok": 0, "rows_failed": 0}
+    result = {"source": name, "status": IngestRunStatus.SKIPPED, "rows_ok": 0, "rows_failed": 0}
 
     row_type = file_type(name)
     if row_type is None:
         if dry_run:
-            return {"source": name, "status": "FAILED", "rows_ok": 0, "rows_failed": 0}
-        run = _record_run(db, source=name, status="FAILED", rows_ok=0,
+            return {
+                "source": name, "status": IngestRunStatus.FAILED,
+                "rows_ok": 0, "rows_failed": 0,
+            }
+        run = _record_run(db, source=name, status=IngestRunStatus.FAILED, rows_ok=0,
                           rows_failed=0,
                           errors=[f"unknown file type for {name!r} "
                                   f"(expected one of {', '.join(FILE_TYPES)})"],
                           started_at=started_at)
-        return {"source": name, "status": "FAILED", "rows_ok": 0,
+        return {"source": name, "status": IngestRunStatus.FAILED, "rows_ok": 0,
                 "rows_failed": 0, "run_id": run.id}
 
     try:
         parsed = json.loads(content)
     except (ValueError, UnicodeDecodeError) as exc:
         if dry_run:
-            return {"source": name, "status": "FAILED", "rows_ok": 0, "rows_failed": 0}
-        run = _record_run(db, source=name, status="FAILED", rows_ok=0,
+            return {
+                "source": name, "status": IngestRunStatus.FAILED,
+                "rows_ok": 0, "rows_failed": 0,
+            }
+        run = _record_run(db, source=name, status=IngestRunStatus.FAILED, rows_ok=0,
                           rows_failed=0, errors=[f"invalid JSON: {exc}"],
                           started_at=started_at)
-        return {"source": name, "status": "FAILED", "rows_ok": 0,
+        return {"source": name, "status": IngestRunStatus.FAILED, "rows_ok": 0,
                 "rows_failed": 0, "run_id": run.id}
     if not isinstance(parsed, list):
         if dry_run:
-            return {"source": name, "status": "FAILED", "rows_ok": 0, "rows_failed": 0}
-        run = _record_run(db, source=name, status="FAILED", rows_ok=0,
+            return {
+                "source": name, "status": IngestRunStatus.FAILED,
+                "rows_ok": 0, "rows_failed": 0,
+            }
+        run = _record_run(db, source=name, status=IngestRunStatus.FAILED, rows_ok=0,
                           rows_failed=0,
                           errors=["file must contain a JSON array of rows"],
                           started_at=started_at)
-        return {"source": name, "status": "FAILED", "rows_ok": 0,
+        return {"source": name, "status": IngestRunStatus.FAILED, "rows_ok": 0,
                 "rows_failed": 0, "run_id": run.id}
 
     model = ROW_MODELS[row_type]
@@ -153,7 +167,7 @@ def process_file(db, name: str, content: bytes, *, force: bool = False,
             failures.append({"row": raw, "error": str(exc)[:2000]})
 
     if dry_run:
-        return {"source": name, "status": "DRY_RUN", "rows_ok": len(valid),
+        return {"source": name, "status": IngestRunStatus.DRY_RUN, "rows_ok": len(valid),
                 "rows_failed": len(failures)}
 
     if not force and _already_succeeded(db, name):
@@ -185,7 +199,7 @@ def process_file(db, name: str, content: bytes, *, force: bool = False,
         )
         failures.extend(rel_failures)
 
-    status = "SUCCEEDED" if not failures else "PARTIAL"
+    status = IngestRunStatus.SUCCEEDED if not failures else IngestRunStatus.PARTIAL
     run = _record_run(db, source=name, status=status, rows_ok=ok,
                       rows_failed=len(failures), errors=[],
                       started_at=started_at)
@@ -209,9 +223,9 @@ def run_batch(*, source=None, db=None, force: bool = False,
                    for name, content in files]
         summary = {
             "files": len(files),
-            "processed": sum(1 for r in results if r["status"] != "SKIPPED"),
-            "skipped": [r["source"] for r in results if r["status"] == "SKIPPED"],
-            "failed": [r["source"] for r in results if r["status"] == "FAILED"],
+            "processed": sum(1 for r in results if r["status"] != IngestRunStatus.SKIPPED),
+            "skipped": [r["source"] for r in results if r["status"] == IngestRunStatus.SKIPPED],
+            "failed": [r["source"] for r in results if r["status"] == IngestRunStatus.FAILED],
             "rows_ok": sum(r["rows_ok"] for r in results),
             "rows_failed": sum(r["rows_failed"] for r in results),
             "runs": results,
@@ -230,7 +244,7 @@ def retry_quarantine(db, *, limit: int = 100) -> dict:
     """
     pending = (
         db.query(IngestQuarantine)
-        .filter_by(status="pending")
+        .filter_by(status=IngestQuarantineStatus.PENDING)
         .order_by(IngestQuarantine.created_at)
         .limit(limit)
         .all()
@@ -268,10 +282,14 @@ def retry_quarantine(db, *, limit: int = 100) -> dict:
             item.error = str(failures[0]["error"])[:2000]
             continue
         if ok:
-            item.status = "retried"
+            item.status = IngestQuarantineStatus.RETRIED
             retried += 1
     db.commit()
-    still_pending = db.query(IngestQuarantine).filter_by(status="pending").count()
+    still_pending = (
+        db.query(IngestQuarantine)
+        .filter_by(status=IngestQuarantineStatus.PENDING)
+        .count()
+    )
     return {"retried": retried, "still_pending": still_pending}
 
 
@@ -320,7 +338,7 @@ def main(argv: list[str] | None = None) -> int:
             db.close()
         print(f"{result['source']}: {result['status']} "
               f"({result['rows_ok']} ok, {result['rows_failed']} failed).")
-        return 0 if result["status"] != "FAILED" else 1
+        return 0 if result["status"] != IngestRunStatus.FAILED else 1
 
     if args.minio:
         source = MinioInboxSource(args.bucket or settings.ingest_minio_bucket)
@@ -331,7 +349,7 @@ def main(argv: list[str] | None = None) -> int:
           f"{len(summary['skipped'])} skipped, "
           f"{summary['rows_ok']} rows ok, {summary['rows_failed']} rows failed.")
     for run in summary["runs"]:
-        if run["status"] != "SKIPPED":
+        if run["status"] != IngestRunStatus.SKIPPED:
             print(f"  {run['source']}: {run['status']} "
                   f"({run['rows_ok']} ok, {run['rows_failed']} failed)")
     return 0 if not summary["failed"] else 1

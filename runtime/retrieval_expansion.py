@@ -107,14 +107,18 @@ from __future__ import annotations
 import logging
 import re
 
+from app.config import settings
 from runtime.retrieval_graph import gazetteer_seeds
+from runtime.retrieval_weights import MULTI_PART_MIN_COUNT
 
 logger = logging.getLogger(__name__)
 
 # --- Gating thresholds (named constants; see module docstring) --------
-MAX_VARIANTS = 3
-LOW_TOP1_VEC = 0.35
-SMALL_MARGIN_VEC = 0.15
+# Ops values live in app/config.py; the names below are aliases so
+# existing imports (runtime/retrieval_query_plan.py) keep working.
+MAX_VARIANTS = settings.retrieval_max_variants
+LOW_TOP1_VEC = settings.retrieval_low_top1_vec
+SMALL_MARGIN_VEC = settings.retrieval_small_margin_vec
 
 # --- Decomposition-detection vocabulary ---------------------------------
 COMPARISON_RE = re.compile(
@@ -231,13 +235,13 @@ def detect_multi_part(question: str) -> dict:
     codes = {m.group(1).lower() for m in ANY_CODE_RE.finditer(text)}
     wh_words = {m.group(1).lower() for m in WH_RE.finditer(text)}
     reasons: list[str] = []
-    if len(assets) >= 2:
+    if len(assets) >= MULTI_PART_MIN_COUNT:
         reasons.append("two_assets")
-    if len(faults) >= 2:
+    if len(faults) >= MULTI_PART_MIN_COUNT:
         reasons.append("two_fault_codes")
     if COMPARISON_RE.search(text):
         reasons.append("comparison_word")
-    if len(wh_words) >= 2 and len(codes) >= 2:
+    if len(wh_words) >= MULTI_PART_MIN_COUNT and len(codes) >= MULTI_PART_MIN_COUNT:
         reasons.append("two_wh_words_and_codes")
     return {"is_multi_part": bool(reasons), "reasons": reasons}
 
@@ -299,7 +303,7 @@ def stub_decompose_question(question: str) -> list[str]:
         part = part.strip().strip(",")
         if len(part.split()) >= 3:
             clauses.append(part if part.endswith("?") else part + "?")
-    return clauses if len(clauses) >= 2 else [question]
+    return clauses if len(clauses) >= MULTI_PART_MIN_COUNT else [question]
 
 
 # --- Live generators (LLM-backed; lazy model build) -----------------------

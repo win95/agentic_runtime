@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from ontology.canonical.repository import CanonicalOntologyRepository
+from ontology.canonical.schema import ChangeType, EntityStatus
 from ontology.graph.protocol import GraphStore
 from ontology.models import OntologyProjectionState
 from ontology.projection.handlers.entity import project_entity
@@ -17,7 +18,18 @@ from ontology.projection.handlers.relationship import project_relationship
 logger = logging.getLogger(__name__)
 
 # Fallback when settings carry no value (e.g. a stale settings object).
-MAX_PROJECTION_ATTEMPTS = 5
+# The value itself lives in app/config.py (projection_max_attempts).
+MAX_PROJECTION_ATTEMPTS = settings.projection_max_attempts
+
+# Drain result detail when the graph store is unavailable: the same
+# string app/worker/tasks.py and scripts/project_ontology_queue.py
+# report, so callers can match on one name.
+NEO4J_UNHEALTHY_DETAIL = "neo4j_unhealthy"
+
+# Queue depth when counting fails (observability only — never fails
+# the drain). Returned as a copy so callers cannot mutate the shared
+# constant.
+EMPTY_QUEUE_DEPTH: dict[str, int] = {"pending": 0, "dead_total": 0}
 
 
 def _parse_entity_ref(subject_ref: str) -> tuple[str, str]:
@@ -79,7 +91,7 @@ class ProjectionEngine:
 
     def project_one(self, row: OntologyProjectionState) -> None:
         store = self._get_store()
-        change_type = row.change_type or "update"
+        change_type = row.change_type or ChangeType.UPDATE
         if row.subject_kind == "entity":
             etype, ekey = _parse_entity_ref(row.subject_ref)
             entity = self._repo.get_entity(etype, ekey)
@@ -112,7 +124,10 @@ class ProjectionEngine:
             store.delete_relationship(st, sk, rtype, tt, tk)
             self._mark_done(row, row.canonical_version)
             return
-        if rel.status in ("deleted", "archived") or change_type == "delete":
+        if rel.status in EntityStatus.inactive() or change_type in (
+            ChangeType.ARCHIVED,
+            ChangeType.DELETED,
+        ):
             project_relationship(
                 store,
                 relationship_type=rel.relationship_type,
@@ -137,7 +152,7 @@ class ProjectionEngine:
             gone = []
             for endpoint_type, endpoint_key in missing:
                 endpoint = self._repo.get_entity(endpoint_type, endpoint_key)
-                if endpoint is None or endpoint.status != "active":
+                if endpoint is None or endpoint.status != EntityStatus.ACTIVE:
                     gone.append((endpoint_type, endpoint_key))
             if gone:
                 # Endpoint legitimately gone from canonical: the edge is
@@ -178,7 +193,8 @@ class ProjectionEngine:
         )
         self._mark_done(row, rel.version)
 
-    def drain_batch(self, limit: int = 32) -> dict[str, Any]:
+    def drain_batch(self, limit: int | None = None) -> dict[str, Any]:
+        limit = settings.projection_drain_batch_size if limit is None else limit
         try:
             store = self._get_store()
         except Exception as exc:  # noqa: BLE001
@@ -188,7 +204,7 @@ class ProjectionEngine:
                 "errors": 1,
                 "dead": 0,
                 "claimed": 0,
-                "detail": "neo4j_unhealthy",
+                "detail": NEO4J_UNHEALTHY_DETAIL,
                 **self._queue_depth(),
             }
         if not store.is_healthy():
@@ -197,7 +213,7 @@ class ProjectionEngine:
                 "errors": 1,
                 "dead": 0,
                 "claimed": 0,
-                "detail": "neo4j_unhealthy",
+                "detail": NEO4J_UNHEALTHY_DETAIL,
                 **self._queue_depth(),
             }
         rows = self._repo.claim_pending_projections(limit=limit)
@@ -258,10 +274,10 @@ class ProjectionEngine:
             return {"pending": counts["pending"], "dead_total": counts["dead"]}
         except Exception as exc:  # noqa: BLE001 — observability only
             logger.debug("Projection queue depth unavailable: %s", exc)
-            return {"pending": 0, "dead_total": 0}
+            return dict(EMPTY_QUEUE_DEPTH)
 
 
 def drain_pending_projections(
-    session: Session, *, limit: int = 32, max_attempts: int | None = None
+    session: Session, *, limit: int | None = None, max_attempts: int | None = None
 ) -> dict[str, Any]:
     return ProjectionEngine(session, max_attempts=max_attempts).drain_batch(limit=limit)

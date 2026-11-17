@@ -12,6 +12,9 @@ from sqlalchemy.exc import IntegrityError
 from ontology.canonical.provenance import WriteProvenance
 from ontology.canonical.repository import CanonicalOntologyRepository
 from ontology.canonical.schema import (
+    ChangeType,
+    EntityStatus,
+    WriteOutcome,
     assert_relationship_type,
     normalize_entity_label,
 )
@@ -23,10 +26,11 @@ from ontology.canonical.types import (
 from ontology.models import OntologyEntity, OntologyRelationship
 
 _MAX_KEY_LEN = 200
-_STATUSES: frozenset[str] = frozenset({"active", "archived", "deleted"})
 
 
-def compute_state_hash(properties: dict[str, Any] | None, status: str) -> str:
+def compute_state_hash(
+    properties: dict[str, Any] | None, status: str | EntityStatus
+) -> str:
     canon = json.dumps({"p": properties or {}, "s": status}, sort_keys=True, default=str)
     return hashlib.sha256(canon.encode("utf-8")).hexdigest()
 
@@ -51,18 +55,23 @@ def _validate_key(value: str, field: str) -> str:
     return cleaned
 
 
-def _validate_status(status: str) -> str:
-    if status not in _STATUSES:
-        raise ValueError(f"status {status!r} must be one of {sorted(_STATUSES)}")
-    return status
+def _validate_status(status: str | EntityStatus) -> EntityStatus:
+    try:
+        return EntityStatus(status)
+    except ValueError:
+        raise ValueError(
+            f"status {status!r} must be one of "
+            f"{sorted(item.value for item in EntityStatus)}"
+        ) from None
 
 
-def _change_type(exists: bool, status: str) -> str:
+def _change_type(exists: bool, status: str | EntityStatus) -> ChangeType:
     if not exists:
-        return "create"
-    if status in ("archived", "deleted"):
-        return status
-    return "update"
+        return ChangeType.CREATE
+    status = EntityStatus(status)
+    if status in EntityStatus.inactive():
+        return ChangeType(status.value)
+    return ChangeType.UPDATE
 
 
 class OntologyWriteService:
@@ -103,7 +112,7 @@ class OntologyWriteService:
         entity_key: str,
         properties: dict[str, Any] | None,
         provenance: WriteProvenance,
-        status: str = "active",
+        status: EntityStatus | str = EntityStatus.ACTIVE,
     ) -> CanonicalWriteResult:
         """Create the entity only if it does not exist yet.
 
@@ -117,7 +126,7 @@ class OntologyWriteService:
         existing = self._repo.get_entity(entity_type, entity_key)
         if existing is not None:
             return CanonicalWriteResult(
-                entity_ref(entity_type, entity_key), existing.version, "noop", False
+                entity_ref(entity_type, entity_key), existing.version, WriteOutcome.NOOP, False
             )
         return self.write_entity(
             entity_type=entity_type,
@@ -134,7 +143,7 @@ class OntologyWriteService:
         entity_key: str,
         properties: dict[str, Any] | None,
         provenance: WriteProvenance,
-        status: str = "active",
+        status: EntityStatus | str = EntityStatus.ACTIVE,
         force_update: bool = False,
     ) -> CanonicalWriteResult:
         provenance.validate()
@@ -157,9 +166,9 @@ class OntologyWriteService:
                 provenance.source_event_id
                 and existing.source_event_id == provenance.source_event_id
             ):
-                return CanonicalWriteResult(ref, existing.version, "replay", False, True)
+                return CanonicalWriteResult(ref, existing.version, WriteOutcome.REPLAY, False, True)
             if existing.state_hash == new_hash and existing.status == status:
-                return CanonicalWriteResult(ref, existing.version, "noop", False)
+                return CanonicalWriteResult(ref, existing.version, WriteOutcome.NOOP, False)
 
         change = _change_type(existing is not None, status)
         version = self._next_version(ref, existing.version if existing else None)
@@ -263,7 +272,7 @@ class OntologyWriteService:
         target_key: str,
         properties: dict[str, Any] | None,
         provenance: WriteProvenance,
-        status: str = "active",
+        status: EntityStatus | str = EntityStatus.ACTIVE,
         force_update: bool = False,
     ) -> CanonicalWriteResult:
         provenance.validate()
@@ -292,9 +301,9 @@ class OntologyWriteService:
                 provenance.source_event_id
                 and existing.source_event_id == provenance.source_event_id
             ):
-                return CanonicalWriteResult(ref, existing.version, "replay", False, True)
+                return CanonicalWriteResult(ref, existing.version, WriteOutcome.REPLAY, False, True)
             if existing.state_hash == new_hash and existing.status == status:
-                return CanonicalWriteResult(ref, existing.version, "noop", False)
+                return CanonicalWriteResult(ref, existing.version, WriteOutcome.NOOP, False)
 
         change = _change_type(existing is not None, status)
         version = self._next_version(ref, existing.version if existing else None)

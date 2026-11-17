@@ -7,6 +7,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from ontology.canonical.repository import CanonicalOntologyRepository
+from ontology.canonical.schema import EntityStatus
 
 
 def get_entity(session: Session, entity_type: str, entity_key: str) -> dict[str, Any] | None:
@@ -21,7 +22,7 @@ def get_entity(session: Session, entity_type: str, entity_key: str) -> dict[str,
     row = CanonicalOntologyRepository(session).get_entity(entity_type, entity_key)
     if row is None:
         return None
-    if row.status in ("deleted", "archived"):
+    if row.status in EntityStatus.inactive():
         return None
     return {
         "entity_type": row.entity_type,

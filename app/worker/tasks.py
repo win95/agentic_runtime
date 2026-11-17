@@ -341,12 +341,12 @@ def run_ingest_batch(self) -> dict:
 def projection_drain() -> dict:
     """Beat task: project pending canonical rows to Neo4j."""
     from app.config import settings
-    from ontology.projection.engine import drain_pending_projections
+    from ontology.projection.engine import NEO4J_UNHEALTHY_DETAIL, drain_pending_projections
 
     db = SessionLocal()
     try:
         result = drain_pending_projections(db, limit=settings.projection_drain_batch_size)
-        if result.get("detail") == "neo4j_unhealthy":
+        if result.get("detail") == NEO4J_UNHEALTHY_DETAIL:
             logger.warning(
                 "Projection drain skipped: Neo4j unhealthy (processed=%s errors=%s)",
                 result.get("processed"),

@@ -27,18 +27,30 @@ from __future__ import annotations
 import hashlib
 import re
 
-TOTAL_BUDGET_TOKENS = 3000
-GRAPH_RESERVE_TOKENS = 200
-MAX_TRIPLES = 20
-MAX_CHUNKS_PER_DOC = 2
+from app.config import settings
+from ontology.canonical.schema import (
+    REL_DOCUMENTED_BY,
+    REL_HAS_COMPONENT,
+    REL_LOCATED_IN,
+    REL_PART_OF,
+    REL_RELATED_TO,
+)
 
-# One short sentence per fact, template per relation type.
+# Ops values live in app/config.py; the names below are aliases so
+# existing imports keep working.
+TOTAL_BUDGET_TOKENS = settings.retrieval_total_budget_tokens
+GRAPH_RESERVE_TOKENS = settings.retrieval_graph_reserve_tokens
+MAX_TRIPLES = settings.retrieval_max_triples
+MAX_CHUNKS_PER_DOC = settings.retrieval_max_chunks_per_doc
+
+# One short sentence per fact, template per relation type. Keys are
+# the canonical relation names (ontology/canonical/schema.py).
 TRIPLE_TEMPLATES = {
-    "HAS_COMPONENT": "{s} has component {o}.",
-    "PART_OF": "{s} is part of {o}.",
-    "LOCATED_IN": "{s} is located in {o}.",
-    "DOCUMENTED_BY": "{s} is documented by {o}.",
-    "RELATED_TO": "{s} is related to {o}.",
+    REL_HAS_COMPONENT: "{s} has component {o}.",
+    REL_PART_OF: "{s} is part of {o}.",
+    REL_LOCATED_IN: "{s} is located in {o}.",
+    REL_DOCUMENTED_BY: "{s} is documented by {o}.",
+    REL_RELATED_TO: "{s} is related to {o}.",
 }
 
 
@@ -121,7 +133,7 @@ def assemble_context(
             break
         sentence = verbalise_triple(
             triple["subject"], triple["relation"], triple["object"],
-            triple.get("source_doc_id", triple["subject"]),
+            triple.get("source_doc_id") or "unknown source",
         )
         cost = estimate_tokens(sentence)
         if triple_tokens + cost > graph_reserve_tokens:

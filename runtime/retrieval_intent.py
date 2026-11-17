@@ -166,6 +166,13 @@ import logging
 import math
 import re
 
+from ontology.canonical.schema import (
+    ENTITY_ASSET,
+    ENTITY_COMPONENT,
+    ENTITY_DOCUMENT,
+    REL_DOCUMENTED_BY,
+    REL_HAS_COMPONENT,
+)
 from runtime.retrieval_expansion import COMPARISON_RE, FAULT_CODE_RE
 from runtime.retrieval_fusion import zscores
 from runtime.retrieval_graph import gazetteer_seeds
@@ -178,6 +185,7 @@ from runtime.retrieval_weights import (
 from runtime.retrieval_weights import (
     INTENT_W_VEC as W_VEC,
 )
+from runtime.retrieval_weights import MULTI_PART_MIN_COUNT
 
 logger = logging.getLogger(__name__)
 
@@ -262,7 +270,7 @@ def _component_owner(component_key: str, adjacency: dict) -> str | None:
     """Owning asset of a component, via HAS_COMPONENT adjacency edges."""
     for node, entry in adjacency.items():
         for rel, to_key, _to_type in entry.get("neighbors", []):
-            if rel == "HAS_COMPONENT" and to_key == component_key:
+            if rel == REL_HAS_COMPONENT and to_key == component_key:
                 return node
     return None
 
@@ -278,13 +286,13 @@ def _docs_by_asset(doc_links: dict | None, adjacency: dict) -> dict[str, set[str
     docs: dict[str, set[str]] = {}
     for doc_id, node_ids in (doc_links or {}).items():
         for node_key in node_ids or []:
-            if _asset_type(node_key, adjacency) == "Asset":
+            if _asset_type(node_key, adjacency) == ENTITY_ASSET:
                 docs.setdefault(node_key, set()).add(doc_id)
     for node, entry in adjacency.items():
-        if entry.get("type") != "Asset":
+        if entry.get("type") != ENTITY_ASSET:
             continue
         for rel, to_key, to_type in entry.get("neighbors", []):
-            if rel == "DOCUMENTED_BY" and to_type == "Document":
+            if rel == REL_DOCUMENTED_BY and to_type == ENTITY_DOCUMENT:
                 docs.setdefault(node, set()).add(to_key)
     return docs
 
@@ -296,21 +304,21 @@ def _linked_assets(
     assets: set[str] = set()
     for seed in seeds:
         key, kind = seed["key"], seed["type"]
-        if kind == "Asset":
+        if kind == ENTITY_ASSET:
             assets.add(key)
-        elif kind == "Component":
+        elif kind == ENTITY_COMPONENT:
             owner = _component_owner(key, adjacency)
             if owner:
                 assets.add(owner)
-        elif kind == "Document":
+        elif kind == ENTITY_DOCUMENT:
             owner = None
             for node_key in (doc_links or {}).get(key, []) or []:
-                if _asset_type(node_key, adjacency) == "Asset":
+                if _asset_type(node_key, adjacency) == ENTITY_ASSET:
                     owner = node_key
                     break
             if owner is None:
                 for _rel, to_key, to_type in adjacency.get(key, {}).get("neighbors", []):
-                    if to_type == "Asset":
+                    if to_type == ENTITY_ASSET:
                         owner = to_key
                         break
             if owner:
@@ -325,10 +333,10 @@ def _linked_doc_ids(seeds: list[dict], adjacency: dict) -> set[str]:
     when it has no ontology DOCUMENTED_BY relation (e.g. a
     payload-linked doc whose edge the adjacency records).
     """
-    docs = {s["key"] for s in seeds if s["type"] == "Document"}
+    docs = {s["key"] for s in seeds if s["type"] == ENTITY_DOCUMENT}
     for seed in seeds:
         for _rel, to_key, to_type in adjacency.get(seed["key"], {}).get("neighbors", []):
-            if to_type == "Document":
+            if to_type == ENTITY_DOCUMENT:
                 docs.add(to_key)
     return docs
 
@@ -406,9 +414,9 @@ def graph_plausibility(
         return 1.0 if docs else 0.0
 
     if intent == "comparison":
-        asset_seeds = {s["key"] for s in seeds if s["type"] == "Asset"}
+        asset_seeds = {s["key"] for s in seeds if s["type"] == ENTITY_ASSET}
         fault_codes = {m.group(0).upper() for m in FAULT_CODE_RE.finditer(text)}
-        if len(asset_seeds) >= 2 or len(fault_codes) >= 2:
+        if len(asset_seeds) >= MULTI_PART_MIN_COUNT or len(fault_codes) >= MULTI_PART_MIN_COUNT:
             return 1.0
         return 0.0
 

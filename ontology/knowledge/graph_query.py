@@ -5,11 +5,19 @@ from __future__ import annotations
 import re
 from typing import Any, Iterable
 
+from ontology.canonical.schema import (
+    REL_DOCUMENTED_BY,
+    REL_RELATED_TO,
+    UNKNOWN_NODE_TYPE,
+)
 from ontology.graph.protocol import GraphStore
 from ontology.projection.provider import get_graph_store
 
 _CYPHER_IDENTIFIER_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
-_DOC_EDGE_TYPES = ("RELATED_TO", "DOCUMENTED_BY")
+
+# Doc edges: the two relations that connect a Document to what it
+# documents / relates to. Canonical names from schema.py.
+_DOC_EDGE_TYPES = (REL_RELATED_TO, REL_DOCUMENTED_BY)
 
 
 def _label(entity_type: str) -> str:
@@ -177,7 +185,7 @@ def subgraph(
         if to_id and to_id not in seen:
             seen.add(to_id)
             nodes.append(
-                {"id": to_id, "labels": [row.get("to_label") or "Entity"]}
+                {"id": to_id, "labels": [row.get("to_label") or UNKNOWN_NODE_TYPE]}
             )
         relationships.append(
             {

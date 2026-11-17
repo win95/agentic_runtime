@@ -70,9 +70,14 @@ import json
 import logging
 import re
 
+from ontology.canonical.schema import (
+    DEFAULT_RELATION_TYPE,
+    UNKNOWN_NODE_TYPE,
+)
 from runtime.context_budget import retrieval_max_chars
 from runtime.hooks.events import HookContext, HookDecision, HookEvent
 from runtime.hooks.registry import HookHandler
+from runtime.retrieval_weights import DEFAULT_DOC_LIMIT
 from runtime.security import detect_injection_signals, validate_execution_input_data
 
 logger = logging.getLogger(__name__)
@@ -88,7 +93,9 @@ DEFAULT_STOP_MAX_CONTINUES = 3
 # budget (RETRIEVAL_TOKENS = 8,024 tokens x ~4 chars).
 DEFAULT_RETRIEVAL_SOURCES = ["faults", "documents", "relations"]
 DEFAULT_RETRIEVAL_MAX_CHARS = retrieval_max_chars()
-DEFAULT_RETRIEVAL_DOC_LIMIT = 5
+# One shared default with infra/qdrant_client.search_documents and
+# the fault_analysis knowledge node (runtime/retrieval_weights.py).
+DEFAULT_RETRIEVAL_DOC_LIMIT = DEFAULT_DOC_LIMIT
 # Per-section line caps: the block is a briefing, not a dump. Faults
 # and relations are one line each; sensor rows are summarized per
 # metric instead of listed.
@@ -484,7 +491,7 @@ def _document_lines(docs: list[dict], asset_id: str = "") -> list[str]:
 
 def _relation_lines(relations: list[dict], asset_id: str) -> list[str]:
     return [
-        f"• {rel.get('from', asset_id)} -[{rel.get('type', 'RELATED')}]-> "
+        f"• {rel.get('from', asset_id)} -[{rel.get('type', DEFAULT_RELATION_TYPE)}]-> "
         f"{rel.get('to', '')}"
         for rel in relations[: _RETRIEVAL_LINE_CAPS["relations"]]
     ]
@@ -564,9 +571,9 @@ def _expansion_relations(ctx: HookContext, asset_id: str) -> list[dict]:
     rows = [
         {
             "from": asset_id,
-            "type": node.get("rel") or "RELATED_TO",
+            "type": node.get("rel") or DEFAULT_RELATION_TYPE,
             "to": to_key,
-            "to_label": node.get("type") or "Entity",
+            "to_label": node.get("type") or UNKNOWN_NODE_TYPE,
         }
         for to_key, node in (expansion.get("nodes") or {}).items()
         if (node.get("from_seed") or "") == asset_id
