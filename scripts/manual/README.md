@@ -25,8 +25,9 @@ and later runs see the prior turns (`docs/sessions.md`).
 
 Use the declarative harness flow (``docs/agents-harness.md``): ``make
 new-agent NAME=…``, edit the generated YAML, ``make seed-agent AGENT=…
-MISSION=…``, then ``agent_config_check.py`` to validate harness +
-pinning. **~5 steps** vs ~12–15 Python/YAML touchpoints before harness.
+MISSION=…``, then ``agent_config_check.py --static-only`` to validate harness +
+pinning. **~5 steps** vs ~12–15 (estimate) Python/YAML touchpoints before harness.
+Rebuild the Docker image (or mount ``seeds/`` and ``skills/``) after scaffolding.
 
 ## Scripts
 

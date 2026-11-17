@@ -603,20 +603,14 @@ def deep_agent_node(state: MissionState) -> dict:
                 }
             )
             base_prompt_text = agent_version.prompt_text
-        elif (mission.get("agent_id") or "") == "admin_bot":
-            from runtime.deep_agent import ADMIN_SYSTEM_PROMPT
-
-            # No-version fallback: the code constant (a copy of the YAML
-            # seed text) runs — the runtime never looks up MLflow for
-            # prompts (docs/agent-versioning.md).
-            base_prompt_text = ADMIN_SYSTEM_PROMPT
         else:
-            from runtime.deep_agent import DEFAULT_SYSTEM_PROMPT
+            from runtime.harness.registry import resolve_no_version_system_prompt
 
-            # No-version fallback: the code constant (a copy of the YAML
-            # seed text) runs — the runtime never looks up MLflow for
-            # prompts (docs/agent-versioning.md).
-            base_prompt_text = DEFAULT_SYSTEM_PROMPT
+            # No-version fallback: harness ``system_prompt_fallback`` or
+            # agent seed YAML — never MLflow (docs/agent-versioning.md).
+            base_prompt_text = resolve_no_version_system_prompt(
+                mission.get("agent_id")
+            )
         # The authenticated user, when known (guest API / JWT runs):
         # the agent must know who it is talking to, so it never treats
         # another user's data as this user's. One line in the system
@@ -729,20 +723,6 @@ def deep_agent_node(state: MissionState) -> dict:
                     system_prompt=system_prompt_text,
                     skills=skill_sources,
                     model_config=version_cfg,
-                    middleware=middleware,
-                    backend=sandbox_backend,
-                )
-            elif (mission.get("agent_id") or "") == "admin_bot":
-                system_prompt_text = base_prompt_text
-                if plan_block:
-                    system_prompt_text = system_prompt_text + "\n\n" + plan_block
-                prompt_for_budget = system_prompt_text
-                if history_block:
-                    system_prompt_text = system_prompt_text + "\n\n" + history_block
-                agent = build_deep_agent(
-                    tools,
-                    system_prompt=system_prompt_text,
-                    skills=skill_sources,
                     middleware=middleware,
                     backend=sandbox_backend,
                 )

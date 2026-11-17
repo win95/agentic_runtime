@@ -8,12 +8,15 @@ from runtime.write_pipeline_runner import confirm_guest_booking_tool
 
 GUEST_REPLY_TOOL = guest_reply_tool()
 CONFIRM_GUEST_BOOKING_TOOL = confirm_guest_booking_tool()
+_REGISTERED: set[str] = set()
 
 
-def register_guest_channel_tools() -> None:
+def ensure_guest_channel_tools_registered() -> None:
     from runtime.harness.registry import guest_output_capabilities
 
     for capability in guest_output_capabilities():
+        if capability in _REGISTERED:
+            continue
         registry.register(
             GUEST_REPLY_TOOL,
             capability=capability,
@@ -24,6 +27,4 @@ def register_guest_channel_tools() -> None:
             capability=capability,
             read_only=True,
         )
-
-
-register_guest_channel_tools()
+        _REGISTERED.add(capability)

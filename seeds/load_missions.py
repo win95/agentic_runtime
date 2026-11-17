@@ -186,6 +186,28 @@ def _select_files(directory: pathlib.Path, wanted: str | None,
     raise ValueError(f"Unknown {kind} {wanted!r}; available: {available}")
 
 
+def validate_all_mission_harness_policies() -> None:
+    """Validate harness across every mission seed file (fail fast on conflict)."""
+    from runtime.harness.loader import parse_mission_harness
+    from runtime.harness.validation import validate_cross_mission_harness
+
+    import yaml
+
+    items: list = []
+    for path in _select_files(BASE / "missions", None, "mission"):
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict) or not data.get("mission_id"):
+                continue
+            harness = parse_mission_harness(data.get("harness"), source=str(path))
+            items.append((data["mission_id"], harness))
+        except Exception as exc:  # noqa: BLE001 — broken files skip validation row
+            logger.warning("Harness policy skip %s: %s", path, exc)
+            continue
+    if items:
+        validate_cross_mission_harness(items)
+
+
 def main(agent: str | None = None, mission: str | None = None) -> list:
     """Upsert missions, agents and schedules from YAML.
 
@@ -201,10 +223,11 @@ def main(agent: str | None = None, mission: str | None = None) -> list:
     failures: list = []
     counts = {"missions": 0, "agents": 0, "schedules": 0}
     try:
-        # A filter narrows the run to the matching file only: --agent
-        # skips missions, --mission skips agents; both together seed
-        # the two files.
-        if agent is None:
+        validate_all_mission_harness_policies()
+        both_filters = agent is not None and mission is not None
+        seed_missions = agent is None or both_filters
+        seed_agents = mission is None or both_filters
+        if seed_missions:
             for path in _select_files(BASE / "missions", mission, "mission"):
                 try:
                     row = upsert_mission(db, load_mission_file(path))
@@ -216,7 +239,7 @@ def main(agent: str | None = None, mission: str | None = None) -> list:
                     failures.append((str(path), str(exc)))
                     logger.warning("Skipping mission file %s: %s", path, exc)
                     print(f"FAILED mission {path.name}: {exc}")
-        if mission is None:
+        if seed_agents:
             agents_dir = BASE / "agents"
             if agents_dir.is_dir():
                 from app.services import agent_version_service

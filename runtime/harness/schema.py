@@ -4,51 +4,75 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
+
+from runtime.harness.validation import validate_deny_message_template
 
 
 class SecurityHarness(BaseModel):
     """Who may invoke this mission through authenticated APIs."""
 
-    user_runnable: bool = False
+    model_config = ConfigDict(extra="forbid")
+
+    user_runnable: StrictBool = False
 
 
 class GuestChannelHarness(BaseModel):
     """Public guest chat routing (``POST /guest/chat``)."""
 
-    exposes_public_chat: bool = False
+    model_config = ConfigDict(extra="forbid")
+
+    exposes_public_chat: StrictBool = False
 
 
 class BuiltinToolsHarness(BaseModel):
     """deepagents built-in tool exclusion (model + hook gate)."""
 
-    deny: bool = False
+    model_config = ConfigDict(extra="forbid")
+
+    deny: StrictBool = False
     deny_message_template: str | None = None
 
     @model_validator(mode="after")
-    def _require_template_when_deny(self) -> BuiltinToolsHarness:
-        if self.deny and not (self.deny_message_template or "").strip():
-            raise ValueError(
-                "builtin_tools.deny is true but deny_message_template is empty"
-            )
+    def _validate_builtin(self) -> BuiltinToolsHarness:
+        if self.deny:
+            if not (self.deny_message_template or "").strip():
+                raise ValueError(
+                    "builtin_tools.deny is true but deny_message_template is empty"
+                )
+            validate_deny_message_template(self.deny_message_template)
         return self
 
 
 class FlowSubgraphHarness(BaseModel):
     """Structured flow-router subgraph (skill-mapped missions)."""
 
-    enabled: bool = False
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: StrictBool = False
 
 
 class GuestOutputHarness(BaseModel):
     """Synthetic guest reply / confirmation tools in the registry."""
 
-    register_reply_tools: bool = False
+    model_config = ConfigDict(extra="forbid")
+
+    register_reply_tools: StrictBool = False
     capability: str | None = None
+
+    @model_validator(mode="after")
+    def _require_capability(self) -> GuestOutputHarness:
+        if self.register_reply_tools and not (self.capability or "").strip():
+            raise ValueError(
+                "guest_output.capability is required when register_reply_tools is true"
+            )
+        return self
 
 
 class MissionHarness(BaseModel):
     """Effective harness for one mission (merged with defaults)."""
+
+    model_config = ConfigDict(extra="forbid")
 
     security: SecurityHarness = Field(default_factory=SecurityHarness)
     guest_channel: GuestChannelHarness = Field(default_factory=GuestChannelHarness)
@@ -59,5 +83,7 @@ class MissionHarness(BaseModel):
 
 class AgentHarness(BaseModel):
     """Agent seed metadata — prompt fallback identity for drift checks."""
+
+    model_config = ConfigDict(extra="forbid")
 
     system_prompt_fallback: Literal["default", "admin"] | None = None

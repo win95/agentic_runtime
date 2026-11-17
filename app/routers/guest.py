@@ -1,9 +1,10 @@
-"""Guest API (demo) — public chat with the hotel receptionist.
+"""Guest API (demo) — public guest chat.
 
 JWT-only: guests register/login via the user service and call with a
-Bearer token. The mission is locked to ``hotel_reception`` — a guest
-can never invoke another mission (``POST /executions`` is not public:
-left open, any JWT holder could run ``system_admin`` too).
+Bearer token. The mission comes from harness config (the mission with
+``guest_channel.exposes_public_chat``). Guests cannot invoke other
+missions (``POST /executions`` is not public for the hotel mission only
+when ``security.user_runnable`` allows it).
 
 Flow: ``POST /guest/chat`` creates a QUEUED execution and returns
 immediately; the client polls ``GET /executions/{id}/result`` with
@@ -35,11 +36,20 @@ def guest_chat(
     db: Session = Depends(get_db),
     user: dict = Depends(require_jwt_user),
 ):
-    from runtime.harness.registry import guest_chat_mission_id
+    from runtime.harness.registry import (
+        GuestChatMisconfiguredError,
+        guest_chat_mission_id,
+    )
 
     sub = user.get("sub")
     check_guest_rate_limit(sub)
-    mission_id = guest_chat_mission_id()
+    try:
+        mission_id = guest_chat_mission_id()
+    except GuestChatMisconfiguredError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"Guest chat is not configured: {exc}",
+        ) from exc
     execution, problems = execution_service.create_execution(
         db,
         mission_id,

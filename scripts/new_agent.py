@@ -14,14 +14,21 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[1]
 TEMPLATES = REPO / "seeds" / "templates"
+IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
 
 
-def _slug(name: str) -> str:
-    s = re.sub(r"[^a-z0-9_]+", "_", name.strip().lower())
-    s = re.sub(r"_+", "_", s).strip("_")
-    if not s:
-        raise ValueError("name must contain at least one letter or digit")
-    return s
+def validate_agent_name(name: str) -> str:
+    raw = name.strip()
+    if not raw or raw in (".", "..") or "/" in raw or "\\" in raw:
+        raise ValueError("name must be a simple identifier, not a path")
+    slug = re.sub(r"[^a-z0-9_]+", "_", raw.lower())
+    slug = re.sub(r"_+", "_", slug).strip("_")
+    if not IDENTIFIER_RE.match(slug):
+        raise ValueError(
+            "name must normalize to a lowercase identifier "
+            "[a-z][a-z0-9_]* (letters, digits, underscores)"
+        )
+    return slug
 
 
 def _title(slug: str) -> str:
@@ -34,13 +41,18 @@ def render(template_name: str, **kwargs: str) -> str:
     return text.format(**kwargs)
 
 
-def scaffold(name: str, *, capability: str | None = None) -> dict[str, Path]:
-    agent_id = _slug(name)
-    if agent_id in ("hotel_receptionist", "admin_bot", "fault_investigator"):
-        raise ValueError(f"refusing to overwrite built-in agent {agent_id!r}")
+def scaffold(
+    name: str,
+    *,
+    capability: str | None = None,
+    repo_root: Path | None = None,
+    force: bool = False,
+) -> dict[str, Path]:
+    root = repo_root or REPO
+    agent_id = validate_agent_name(name)
     mission_id = f"{agent_id}_mission"
-    skill_slug = agent_id.replace("_bot", "").replace("_", "-")
-    cap = capability or agent_id.replace("_bot", "")
+    skill_slug = agent_id.removesuffix("_bot").replace("_", "-")
+    cap = capability or agent_id.removesuffix("_bot")
     ctx = {
         "agent_id": agent_id,
         "agent_title": _title(agent_id),
@@ -50,17 +62,25 @@ def scaffold(name: str, *, capability: str | None = None) -> dict[str, Path]:
         "skill_slug": skill_slug,
         "skill_title": _title(skill_slug),
         "capability": cap,
+        "skill_keywords": f"{skill_slug} {agent_id} mission",
     }
-    agents_dir = REPO / "seeds" / "agents"
-    missions_dir = REPO / "seeds" / "missions"
-    skill_dir = REPO / "skills" / skill_slug
+    agents_dir = root / "seeds" / "agents"
+    missions_dir = root / "seeds" / "missions"
+    skill_dir = root / "skills" / skill_slug
     agent_path = agents_dir / f"{agent_id}.yaml"
     mission_path = missions_dir / f"{mission_id}.yaml"
     skill_path = skill_dir / "SKILL.md"
-    if agent_path.exists() or mission_path.exists():
-        raise FileExistsError(
-            f"seed files already exist for {agent_id!r} — remove them first"
-        )
+    if not force:
+        if agent_path.exists() or mission_path.exists():
+            raise FileExistsError(
+                f"seed files already exist for {agent_id!r} — use --force or remove them"
+            )
+        if skill_path.exists() or (skill_dir.exists() and any(skill_dir.iterdir())):
+            raise FileExistsError(
+                f"skill directory already exists: {skill_dir.relative_to(root)}"
+            )
+    agent_path.parent.mkdir(parents=True, exist_ok=True)
+    mission_path.parent.mkdir(parents=True, exist_ok=True)
     agent_path.write_text(render("agent.yaml.tpl", **ctx), encoding="utf-8")
     mission_path.write_text(render("mission.yaml.tpl", **ctx), encoding="utf-8")
     skill_dir.mkdir(parents=True, exist_ok=True)
@@ -79,9 +99,14 @@ def main(argv: list[str] | None = None) -> int:
         "--capability",
         help="registry capability name (default: derived from agent name)",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="overwrite existing seed/skill files",
+    )
     args = parser.parse_args(argv)
     try:
-        paths = scaffold(args.name, capability=args.capability)
+        paths = scaffold(args.name, capability=args.capability, force=args.force)
     except (ValueError, FileExistsError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

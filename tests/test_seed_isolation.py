@@ -126,6 +126,19 @@ def test_seed_single_mission_only(db_session, tmp_base):
     assert db_session.get(models.Agent, "test_agent") is None
 
 
+def test_seed_agent_and_mission_together(db_session, tmp_base, capsys):
+    _write(tmp_base, "missions", "test_mission.yaml", GOOD_MISSION)
+    _write(tmp_base, "agents", "test_agent.yaml", GOOD_AGENT)
+
+    failures = load_missions.main(agent="test_agent", mission="test_mission")
+
+    assert failures == []
+    assert db_session.get(models.Mission, "test_mission") is not None
+    assert db_session.get(models.Agent, "test_agent") is not None
+    out = capsys.readouterr().out
+    assert "Seed done: 1 missions, 1 agents" in out
+
+
 def test_seed_unknown_filter_lists_available(tmp_base):
     _write(tmp_base, "agents", "test_agent.yaml", GOOD_AGENT)
 

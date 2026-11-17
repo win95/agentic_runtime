@@ -12,8 +12,9 @@ verifies them. A route can accept either credential via
 `require_api_key_or_user`.
 
 A JWT user is not an operator: `require_mission_for_role` limits which
-missions a plain user may run through POST /executions (guests may only
-run `hotel_reception`; admins and service-key calls are unrestricted).
+missions a plain user may run through POST /executions (missions with
+``harness.security.user_runnable``; default false). Admins and service-key
+calls are unrestricted.
 """
 
 from __future__ import annotations

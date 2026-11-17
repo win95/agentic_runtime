@@ -1,9 +1,13 @@
 # Adding an agent (declarative harness)
 
 Each mission declares runtime policy in a **`harness:`** block (merged with
-`runtime/harness/defaults.yaml` and validated at seed time). The runtime
-reads the pinned `execution.harness` snapshot from Postgres — no Python
-frozensets per agent.
+`runtime/harness/defaults.yaml` and validated at seed time). At runtime the
+API/worker read **`missions.execution_config.harness`** from Postgres (short
+TTL cache); seed YAML on disk is only a fallback when a row has no harness
+key. **`security.user_runnable` defaults to false.**
+
+Docker images copy `seeds/` and `skills/` at build time — rebuild the image
+(or mount the repo) after adding scaffolded files, then run `make seed`.
 
 ## Harness fields (mission YAML)
 
@@ -26,7 +30,8 @@ drift checks against `runtime/deep_agent.py` constants (fault/admin only).
 2. Edit the new YAML: `allowed_tools`, objective, harness overrides if needed
 3. `make seed-agent AGENT=my_agent MISSION=my_agent_mission`
 4. Optional: map MCP tools in `.env` `MCP_TOOL_CAPABILITIES`
-5. `python scripts/manual/agent_config_check.py` (harness + config checks)
+5. `python scripts/manual/agent_config_check.py --static-only --mission …`
+   (harness + seed/DB drift, no live LLM)
 
 **Five steps**, one Python package touched only when you add genuinely new
 runtime behavior — not security, guest routing, builtin deny, flow pilot, or
@@ -46,8 +51,9 @@ example:
 - Duplicate prompts / MLflow registration scripts
 - Mission + agent seed YAML, skills map, MCP env JSON, manual verifier scripts
 
-That was on the order of **12–15 edits across Python, YAML, env, and docs**
-before the first seed — easy to miss a gate and get silent misconfiguration.
+That was on the order of **~12–15 edits** (estimate) across Python, YAML, env,
+and docs before the first seed — easy to miss a gate and get silent
+misconfiguration.
 
 ## Still code-keyed (not in `harness:` yet)
 

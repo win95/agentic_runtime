@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from runtime.deep_agent import ADMIN_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT
+from runtime.harness.schema import GuestChannelHarness, MissionHarness
 from runtime.harness.loader import (
     load_mission_harness_from_file,
     parse_agent_harness,
@@ -20,12 +21,20 @@ from runtime.harness.registry import (
     guest_output_capabilities,
     mission_denies_builtin_tools,
     reset_harness_cache_for_tests,
-    user_runnable_mission_ids,
     use_flow_subgraph_harness,
+    user_runnable_mission_ids,
 )
+from runtime.harness.validation import format_deny_message, validate_cross_mission_harness
+from runtime.skills.loader import load_skills, select_skills
 from seeds import load_missions
 
 BASE = Path(__file__).resolve().parents[1] / "seeds"
+HOTEL_DENY_SUFFIX = (
+    "the hotel receptionist has no file or subagent tools — all room, "
+    "guest, booking, staff and policy actions go through the MCP tools "
+    "(check_room_availability, get_booking, create_booking, ...). Do not "
+    "retry this tool; use the MCP tool for the task instead."
+)
 
 
 @pytest.fixture(autouse=True)
@@ -45,6 +54,23 @@ def test_defaults_validate():
 def test_deny_requires_message_template():
     with pytest.raises(ValueError, match="deny_message_template"):
         parse_mission_harness({"builtin_tools": {"deny": True}})
+
+
+def test_harness_rejects_unknown_builtin_keys():
+    with pytest.raises(ValueError):
+        parse_mission_harness({"builtin_tools": {"deni": True}})
+
+
+def test_deny_template_rejects_invalid_fields():
+    with pytest.raises(ValueError, match="only"):
+        parse_mission_harness(
+            {
+                "builtin_tools": {
+                    "deny": True,
+                    "deny_message_template": "Tool '{other}' denied",
+                }
+            }
+        )
 
 
 def test_hotel_equivalence():
@@ -79,11 +105,45 @@ def test_registry_matches_old_constants():
     assert guest_output_capabilities() == ["hotel_reception"]
 
 
-def test_builtin_deny_message_uses_template():
+def test_builtin_deny_message_exact_hotel_text():
+    tpl = load_mission_harness_from_file(
+        BASE / "missions" / "hotel_reception.yaml"
+    ).builtin_tools.deny_message_template
+    assert tpl is not None
+    expected = format_deny_message(tpl, "read_file")
     msg = builtin_deny_message("hotel_reception", "read_file")
-    assert msg is not None
-    assert "read_file" in msg
-    assert "MCP tools" in msg
+    assert msg == expected
+    assert msg.startswith(
+        "Tool 'read_file' denied by hook 'deny_builtin_tools': "
+    )
+    assert HOTEL_DENY_SUFFIX in msg
+
+
+def test_execution_config_harness_overrides_seed_for_builtin_deny():
+    override = {
+        "harness": {
+            "builtin_tools": {
+                "deny": False,
+                "deny_message_template": None,
+            }
+        }
+    }
+    assert mission_denies_builtin_tools("hotel_reception") is True
+    assert mission_denies_builtin_tools("hotel_reception", override) is False
+    assert use_flow_subgraph_harness(
+        "hotel_reception", ["reception"], {"harness": {"flow_subgraph": {"enabled": False}}}
+    ) is False
+
+
+def test_duplicate_guest_chat_mission_rejected_at_validation():
+    hotel = load_mission_harness_from_file(BASE / "missions" / "hotel_reception.yaml")
+    other = MissionHarness(
+        guest_channel=GuestChannelHarness(exposes_public_chat=True),
+    )
+    with pytest.raises(ValueError, match="exposes_public_chat"):
+        validate_cross_mission_harness(
+            [("hotel_reception", hotel), ("other_mission", other)]
+        )
 
 
 def test_load_mission_file_embeds_harness():
@@ -109,20 +169,47 @@ def test_agent_harness_prompt_fallbacks():
     assert adm["system_prompt"] == ADMIN_SYSTEM_PROMPT
 
 
+def test_new_agent_skill_slug_uses_removesuffix():
+    from scripts.new_agent import validate_agent_name
+
+    assert validate_agent_name("my_bottle_bot") == "my_bottle_bot"
+    # skill dir uses removesuffix('_bot'): my_bottle not mytle
+
+
 def test_scaffolded_agent_resolves_without_python(tmp_path):
     from scripts.new_agent import scaffold
 
-    paths = scaffold("pytest_demo_bot", capability="pytest_demo")
+    paths = scaffold(
+        "pytest_demo_bot",
+        capability="pytest_demo",
+        repo_root=tmp_path,
+    )
+    reset_harness_cache_for_tests()
+    mission = load_missions.load_mission_file(paths["mission"])
+    agent = load_missions.load_agent_file(paths["agent"])
+    assert agent["id"] == "pytest_demo_bot"
+    assert mission["id"] == "pytest_demo_bot_mission"
+    h = effective_harness(mission["id"], mission["execution_config"])
+    assert h.security.user_runnable is False
+    skill_slug = "pytest-demo"
+    from runtime.skills import loader as skills_loader
+
+    original = skills_loader.DEFAULT_SKILLS_DIR
     try:
-        reset_harness_cache_for_tests()
-        mission = load_missions.load_mission_file(paths["mission"])
-        agent = load_missions.load_agent_file(paths["agent"])
-        assert agent["id"] == "pytest_demo_bot"
-        assert mission["id"] == "pytest_demo_bot_mission"
-        h = effective_harness(mission["id"], mission["execution_config"])
-        assert h.security.user_runnable is False
-        parse_mission_harness(None)  # defaults still valid
+        skills_loader.DEFAULT_SKILLS_DIR = tmp_path / "skills"
+        loaded = load_skills()
+        names = {s.name for s in loaded}
+        assert skill_slug in names
+        mission_dict = {
+            "mission_id": mission["id"],
+            "objective": mission["objective"],
+            "execution": mission["execution_config"],
+        }
+        selected = select_skills(
+            mission_dict,
+            {"message": "pytest demo request"},
+            skills=loaded,
+        )
+        assert any(s.name == skill_slug for s in selected)
     finally:
-        for p in paths.values():
-            p.unlink(missing_ok=True)
-        paths["skill"].parent.rmdir()
+        skills_loader.DEFAULT_SKILLS_DIR = original
