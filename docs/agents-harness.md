@@ -48,3 +48,20 @@ example:
 
 That was on the order of **12–15 edits across Python, YAML, env, and docs**
 before the first seed — easy to miss a gate and get silent misconfiguration.
+
+## Still code-keyed (not in `harness:` yet)
+
+These remain allowlists or literals; extending them still means editing Python
+or env unless a later harness pass covers them:
+
+| Concern | Location |
+|---------|----------|
+| Capability subgraph (`fault_analysis` only) | `runtime/mission_graph.py` (`CAPABILITY_BUILDERS`, `capability_to_graph`) |
+| Admin Slack notifications | `runtime/notifications/slack.py` (`ADMIN_MISSION_ID`) |
+| Admin prompt fallback without AgentVersion | `mission_graph` (`agent_id == "admin_bot"`) |
+| Tool → capability registration (fault/admin/Hotel MCP) | `runtime/tools/*`, `MCP_TOOL_CAPABILITIES` in `.env` |
+| Manual / eval script mission constants | `scripts/manual/*.py`, `scripts/eval_mission.py`, etc. |
+
+New agents that reuse existing capabilities and skills generally only need
+YAML + seed; a **new capability subgraph** or **new registered tool family**
+still needs registry/code work as today.
