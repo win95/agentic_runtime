@@ -58,11 +58,15 @@ def create_app() -> FastAPI:
     app = FastAPI(title="Agentic Runtime", version=__version__, lifespan=lifespan)
     @app.get("/health", response_model=schemas.HealthResponse, tags=["health"])
     def health() -> schemas.HealthResponse:
+        from runtime.harness.registry import harness_index_degraded
+
+        degraded = harness_index_degraded()
         return schemas.HealthResponse(
-            status="ok",
+            status="ok" if not degraded else "degraded",
             app=settings.app_name,
             version=__version__,
             environment=settings.environment,
+            harness_index_degraded=degraded,
         )
 
     app.include_router(missions.router)

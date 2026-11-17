@@ -3,25 +3,30 @@
 from __future__ import annotations
 
 import logging
-import os
+import re
 import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any
 
 from runtime.harness.loader import (
-    iter_mission_seed_paths,
-    load_mission_harness_from_file,
+    iter_seed_mission_harnesses,
     parse_mission_harness,
 )
 from runtime.harness.schema import MissionHarness
 
 logger = logging.getLogger(__name__)
 
+_AGENT_ID_RE = re.compile(r"^[a-z][a-z0-9_]{0,127}$")
+
 _LOCK = threading.Lock()
+_REFRESH_LOCK = threading.Lock()
 _INDEX: HarnessIndex | None = None
+_LAST_GOOD_INDEX: HarnessIndex | None = None
 _INDEX_LOADED_AT: float = 0.0
-_TTL_SECONDS = 30.0
+_DB_BACKOFF_UNTIL: float = 0.0
+_DB_BACKOFF_SECONDS: float = 5.0
+_INDEX_DEGRADED: bool = False
 
 
 class GuestChatMisconfiguredError(RuntimeError):
@@ -36,46 +41,39 @@ class HarnessIndex:
     guest_output_capabilities: list[str] = field(default_factory=list)
 
 
-_DB_HARNESS_DISABLED = False
-
-
 def reset_harness_cache_for_tests() -> None:
-    global _INDEX, _INDEX_LOADED_AT, _DB_HARNESS_DISABLED
+    global _INDEX, _LAST_GOOD_INDEX, _INDEX_LOADED_AT, _DB_BACKOFF_UNTIL
+    global _DB_BACKOFF_SECONDS, _INDEX_DEGRADED
     with _LOCK:
         _INDEX = None
+        _LAST_GOOD_INDEX = None
         _INDEX_LOADED_AT = 0.0
-        _DB_HARNESS_DISABLED = False
+        _DB_BACKOFF_UNTIL = 0.0
+        _DB_BACKOFF_SECONDS = 5.0
+        _INDEX_DEGRADED = False
 
 
-def _use_db_for_harness_index() -> bool:
-    if _DB_HARNESS_DISABLED:
-        return False
-    url = (os.environ.get("DATABASE_URL") or "").lower()
-    if url.startswith("sqlite"):
-        return False
-    return True
+def harness_index_degraded() -> bool:
+    with _LOCK:
+        return _INDEX_DEGRADED
 
 
-def _harness_from_seed_file(path) -> tuple[str, MissionHarness | None]:
-    try:
-        harness = load_mission_harness_from_file(path)
-        import yaml
+def _settings():
+    from app.config import settings
 
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        mission_id = str(data.get("mission_id") or path.stem)
-        return mission_id, harness
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Skipping harness from seed file %s: %s", path, exc)
-        return path.stem, None
+    return settings
 
 
-def _merge_seed_fallbacks(index: HarnessIndex) -> None:
-    for path in iter_mission_seed_paths():
-        mission_id, harness = _harness_from_seed_file(path)
-        if harness is None:
-            continue
-        if mission_id not in index.by_mission:
-            index.by_mission[mission_id] = harness
+def _harness_source() -> str:
+    return _settings().harness_source
+
+
+def _ttl_seconds() -> float:
+    return float(_settings().harness_index_ttl_seconds)
+
+
+def _seed_by_mission_id() -> dict[str, MissionHarness]:
+    return {mid: h for mid, h, _p in iter_seed_mission_harnesses()}
 
 
 def _derive_guest_routing(index: HarnessIndex) -> None:
@@ -105,96 +103,125 @@ def _derive_guest_routing(index: HarnessIndex) -> None:
         index.guest_chat_duplicate = False
 
 
-def _seed_paths_by_mission_id() -> dict[str, Any]:
-    import yaml
-    from pathlib import Path
-
-    out: dict[str, Path] = {}
-    for path in iter_mission_seed_paths():
-        try:
-            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-            mid = str(data.get("mission_id") or path.stem)
-            out[mid] = path
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("Skipping mission seed %s: %s", path, exc)
-    return out
-
-
-def _load_index_from_db_fixed() -> HarnessIndex | None:
-    global _DB_HARNESS_DISABLED
-    if not _use_db_for_harness_index():
-        return None
-    try:
-        from app import models
-        from app.core.db import SessionLocal
-
-        db = SessionLocal()
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("Harness DB load skipped: %s", exc)
-        _DB_HARNESS_DISABLED = True
-        return None
-    index = HarnessIndex()
-    seed_by_mid = _seed_paths_by_mission_id()
-    try:
-        rows = db.query(models.Mission).all()
-        if not rows:
-            return None
-        for mission in rows:
-            ec = mission.execution_config or {}
-            raw = ec.get("harness")
-            if isinstance(raw, dict):
-                try:
-                    index.by_mission[mission.id] = parse_mission_harness(
-                        raw, source=f"db:{mission.id}"
-                    )
-                except ValueError as exc:
-                    logger.warning(
-                        "Invalid harness in DB for mission %s: %s", mission.id, exc
-                    )
-            else:
-                path = seed_by_mid.get(mission.id)
-                if path is not None:
-                    _, harness = _harness_from_seed_file(path)
-                    if harness is not None:
-                        index.by_mission[mission.id] = harness
-        return index
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("Harness DB query failed: %s", exc)
-        _DB_HARNESS_DISABLED = True
-        return None
-    finally:
-        db.close()
-
-
 def _load_index_from_seeds_only() -> HarnessIndex:
     index = HarnessIndex()
-    for path in iter_mission_seed_paths():
-        mission_id, harness = _harness_from_seed_file(path)
-        if harness is not None:
-            index.by_mission[mission_id] = harness
+    for mission_id, harness, _path in iter_seed_mission_harnesses():
+        index.by_mission[mission_id] = harness
+    _derive_guest_routing(index)
     return index
 
 
+def _load_index_from_db() -> HarnessIndex:
+    """Load harness for missions present in DB only (per-row seed fallback)."""
+    from sqlalchemy import select
+
+    from app import models
+    from app.core.db import SessionLocal, engine
+
+    timeout = _settings().harness_index_db_timeout_seconds
+    seed_fallback = _seed_by_mission_id()
+    index = HarnessIndex()
+    db = SessionLocal()
+    try:
+        if engine.dialect.name == "postgresql":
+            from sqlalchemy import text
+
+            db.execute(
+                text(f"SET LOCAL statement_timeout = '{int(timeout * 1000)}'")
+            )
+        stmt = select(models.Mission.id, models.Mission.execution_config)
+        rows = db.execute(stmt).all()
+        for mission_id, execution_config in rows:
+            ec = execution_config or {}
+            raw = ec.get("harness")
+            if isinstance(raw, dict):
+                try:
+                    index.by_mission[str(mission_id)] = parse_mission_harness(
+                        raw, source=f"db:{mission_id}"
+                    )
+                except ValueError as exc:
+                    logger.error(
+                        "Invalid harness in DB for mission %s: %s", mission_id, exc
+                    )
+                    index.by_mission[str(mission_id)] = MissionHarness()
+            elif str(mission_id) in seed_fallback:
+                index.by_mission[str(mission_id)] = seed_fallback[str(mission_id)]
+            else:
+                index.by_mission[str(mission_id)] = MissionHarness()
+    finally:
+        db.close()
+    _derive_guest_routing(index)
+    return index
+
+
+def _build_fresh_index() -> HarnessIndex:
+    if _harness_source() == "seed":
+        return _load_index_from_seeds_only()
+    return _load_index_from_db()
+
+
+def _refresh_index() -> HarnessIndex:
+    """Query outside the hot lock; stale-while-error on failure."""
+    global _INDEX, _LAST_GOOD_INDEX, _INDEX_LOADED_AT, _DB_BACKOFF_UNTIL
+    global _DB_BACKOFF_SECONDS, _INDEX_DEGRADED
+
+    now = time.monotonic()
+    if now < _DB_BACKOFF_UNTIL:
+        with _LOCK:
+            if _LAST_GOOD_INDEX is not None:
+                return _LAST_GOOD_INDEX
+            if _INDEX is not None:
+                return _INDEX
+        return _load_index_from_seeds_only()
+
+    if not _REFRESH_LOCK.acquire(blocking=False):
+        with _LOCK:
+            if _LAST_GOOD_INDEX is not None:
+                return _LAST_GOOD_INDEX
+            if _INDEX is not None:
+                return _INDEX
+        return _load_index_from_seeds_only()
+
+    try:
+        try:
+            fresh = _build_fresh_index()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Harness index refresh failed: %s", exc, exc_info=True)
+            with _LOCK:
+                _INDEX_DEGRADED = True
+                ttl = _ttl_seconds()
+                _DB_BACKOFF_SECONDS = min(_DB_BACKOFF_SECONDS * 2, ttl)
+                _DB_BACKOFF_UNTIL = now + _DB_BACKOFF_SECONDS
+                if _LAST_GOOD_INDEX is not None:
+                    return _LAST_GOOD_INDEX
+                if _INDEX is not None:
+                    return _INDEX
+            return _load_index_from_seeds_only()
+
+        with _LOCK:
+            _INDEX = fresh
+            _LAST_GOOD_INDEX = fresh
+            _INDEX_LOADED_AT = now
+            _INDEX_DEGRADED = False
+            _DB_BACKOFF_SECONDS = 5.0
+            _DB_BACKOFF_UNTIL = 0.0
+        return fresh
+    finally:
+        _REFRESH_LOCK.release()
+
+
 def _get_index(*, force: bool = False) -> HarnessIndex:
-    global _INDEX, _INDEX_LOADED_AT
     now = time.monotonic()
     with _LOCK:
+        cached = _INDEX
+        loaded_at = _INDEX_LOADED_AT
         if (
             not force
-            and _INDEX is not None
-            and (now - _INDEX_LOADED_AT) < _TTL_SECONDS
+            and cached is not None
+            and (now - loaded_at) < _ttl_seconds()
         ):
-            return _INDEX
-        db_index = _load_index_from_db_fixed()
-        if db_index is not None and db_index.by_mission:
-            _merge_seed_fallbacks(db_index)
-            index = db_index
-        else:
-            index = _load_index_from_seeds_only()
-        _derive_guest_routing(index)
-        _INDEX = index
-        _INDEX_LOADED_AT = now
-        return index
+            return cached
+    return _refresh_index()
 
 
 def effective_harness(
@@ -272,17 +299,6 @@ def guest_output_capabilities() -> list[str]:
     return list(_get_index().guest_output_capabilities)
 
 
-def resolved_harness_for_seed(
-    raw_harness: dict[str, Any] | None,
-    *,
-    source: str,
-) -> dict[str, Any]:
-    from runtime.harness.loader import harness_dict_from_model
-
-    model = parse_mission_harness(raw_harness, source=source)
-    return harness_dict_from_model(model)
-
-
 def resolve_no_version_system_prompt(agent_id: str | None) -> str:
     """Prompt when no AgentVersion exists: harness fallback or seed YAML text."""
     from pathlib import Path
@@ -291,24 +307,25 @@ def resolve_no_version_system_prompt(agent_id: str | None) -> str:
 
     from runtime.deep_agent import ADMIN_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT
 
+    if not agent_id or not _AGENT_ID_RE.match(agent_id):
+        return DEFAULT_SYSTEM_PROMPT
     fb = agent_system_prompt_fallback(agent_id)
     if fb == "admin":
         return ADMIN_SYSTEM_PROMPT
     if fb == "default":
         return DEFAULT_SYSTEM_PROMPT
-    if agent_id:
-        path = Path(__file__).resolve().parents[2] / "seeds" / "agents" / f"{agent_id}.yaml"
-        if path.is_file():
-            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-            prompt = data.get("system_prompt")
-            if isinstance(prompt, str) and prompt.strip():
-                return prompt
+    path = Path(__file__).resolve().parents[2] / "seeds" / "agents" / f"{agent_id}.yaml"
+    if path.is_file() and fb in ("seed", None):
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        prompt = data.get("system_prompt")
+        if isinstance(prompt, str) and prompt.strip():
+            return prompt
     return DEFAULT_SYSTEM_PROMPT
 
 
 def agent_system_prompt_fallback(agent_id: str | None) -> str | None:
-    """``default`` / ``admin`` from agent seed harness, else None."""
-    if not agent_id:
+    """``default`` / ``admin`` / ``seed`` from agent seed harness, else None."""
+    if not agent_id or not _AGENT_ID_RE.match(agent_id):
         return None
     from pathlib import Path
 

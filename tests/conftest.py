@@ -13,6 +13,7 @@ os.environ["CELERY_BROKER_URL"] = "memory://"
 os.environ["CELERY_RESULT_BACKEND"] = "cache+memory://"
 os.environ["LANGSMITH_TRACING"] = "false"
 os.environ["CHECKPOINT_ENABLED"] = "false"
+os.environ["HARNESS_SOURCE"] = "seed"
 
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402

@@ -1,10 +1,11 @@
 """Guest API (demo) — public guest chat.
 
 JWT-only: guests register/login via the user service and call with a
-Bearer token. The mission comes from harness config (the mission with
-``guest_channel.exposes_public_chat``). Guests cannot invoke other
-missions (``POST /executions`` is not public for the hotel mission only
-when ``security.user_runnable`` allows it).
+Bearer token. The mission is whichever mission has
+``harness.guest_channel.exposes_public_chat`` in the harness index (DB
+when ``HARNESS_SOURCE=db``). Guests use this route instead of
+``POST /executions``, which is limited to missions with
+``harness.security.user_runnable`` for JWT users.
 
 Flow: ``POST /guest/chat`` creates a QUEUED execution and returns
 immediately; the client polls ``GET /executions/{id}/result`` with
@@ -19,6 +20,8 @@ impersonate another user to the agent.
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
@@ -27,6 +30,8 @@ from app.core.db import get_db
 from app.core.rate_limit import check_guest_rate_limit
 from app.core.security import require_jwt_user
 from app.services import execution_service, session_service
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/guest", tags=["guest"])
 
@@ -46,9 +51,10 @@ def guest_chat(
     try:
         mission_id = guest_chat_mission_id()
     except GuestChatMisconfiguredError as exc:
+        logger.error("Guest chat unavailable: %s", exc)
         raise HTTPException(
             status_code=503,
-            detail=f"Guest chat is not configured: {exc}",
+            detail="Guest chat is temporarily unavailable",
         ) from exc
     execution, problems = execution_service.create_execution(
         db,

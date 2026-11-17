@@ -15,6 +15,10 @@ def validate_deny_message_template(template: str) -> None:
     """Only ``{tool_name}`` may appear — no format specs, attrs, or indices."""
     if not template.strip():
         raise ValueError("deny_message_template is empty")
+    if "{{" in template or "}}" in template:
+        raise ValueError("deny_message_template: escaped braces not allowed")
+    if template.count("{") != 1 or template.count("}") != 1:
+        raise ValueError("deny_message_template: must contain exactly {tool_name}")
     formatter = string.Formatter()
     try:
         for _literal, field_name, format_spec, conversion in formatter.parse(template):

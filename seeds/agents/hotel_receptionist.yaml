@@ -5,6 +5,8 @@
 # servers must expose; when they connect, map each one to capability
 # "hotel_reception" in MCP_TOOL_CAPABILITIES (see docs/hotel-reception.md).
 # The model follows .env like the other agents (model: ${LLM_MODEL}).
+harness:
+  system_prompt_fallback: seed
 id: hotel_receptionist
 name: Hotel Receptionist
 provider: openai

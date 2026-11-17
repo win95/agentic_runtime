@@ -86,4 +86,4 @@ class AgentHarness(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    system_prompt_fallback: Literal["default", "admin"] | None = None
+    system_prompt_fallback: Literal["default", "admin", "seed"] | None = None

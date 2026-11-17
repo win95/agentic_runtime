@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -41,12 +42,32 @@ def render(template_name: str, **kwargs: str) -> str:
     return text.format(**kwargs)
 
 
+def _git_tracked(path: Path, repo_root: Path) -> bool:
+    if not path.is_file():
+        return False
+    try:
+        rel = path.relative_to(repo_root)
+    except ValueError:
+        return False
+    try:
+        subprocess.run(
+            ["git", "ls-files", "--error-unmatch", str(rel)],
+            cwd=repo_root,
+            capture_output=True,
+            check=True,
+        )
+        return True
+    except (subprocess.CalledProcessError, FileNotFoundError, OSError):
+        return False
+
+
 def scaffold(
     name: str,
     *,
     capability: str | None = None,
     repo_root: Path | None = None,
     force: bool = False,
+    allow_overwrite_tracked: bool = False,
 ) -> dict[str, Path]:
     root = repo_root or REPO
     agent_id = validate_agent_name(name)
@@ -70,6 +91,7 @@ def scaffold(
     agent_path = agents_dir / f"{agent_id}.yaml"
     mission_path = missions_dir / f"{mission_id}.yaml"
     skill_path = skill_dir / "SKILL.md"
+    targets = (agent_path, mission_path, skill_path)
     if not force:
         if agent_path.exists() or mission_path.exists():
             raise FileExistsError(
@@ -78,6 +100,14 @@ def scaffold(
         if skill_path.exists() or (skill_dir.exists() and any(skill_dir.iterdir())):
             raise FileExistsError(
                 f"skill directory already exists: {skill_dir.relative_to(root)}"
+            )
+    elif not allow_overwrite_tracked:
+        tracked = [p for p in targets if _git_tracked(p, root)]
+        if tracked:
+            names = ", ".join(p.relative_to(root).as_posix() for p in tracked)
+            raise FileExistsError(
+                f"refusing to overwrite git-tracked files ({names}); "
+                "pass --allow-overwrite-tracked"
             )
     agent_path.parent.mkdir(parents=True, exist_ok=True)
     mission_path.parent.mkdir(parents=True, exist_ok=True)
@@ -104,9 +134,19 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="overwrite existing seed/skill files",
     )
+    parser.add_argument(
+        "--allow-overwrite-tracked",
+        action="store_true",
+        help="with --force, allow overwriting git-tracked seed/skill files",
+    )
     args = parser.parse_args(argv)
     try:
-        paths = scaffold(args.name, capability=args.capability, force=args.force)
+        paths = scaffold(
+            args.name,
+            capability=args.capability,
+            force=args.force,
+            allow_overwrite_tracked=args.allow_overwrite_tracked,
+        )
     except (ValueError, FileExistsError) as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

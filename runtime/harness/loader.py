@@ -71,10 +71,32 @@ def harness_dict_from_model(model: MissionHarness) -> dict[str, Any]:
     return model.model_dump(mode="json")
 
 
-def load_mission_harness_from_file(path: pathlib.Path) -> MissionHarness:
+def _read_mission_seed_file(path: pathlib.Path) -> tuple[str, dict[str, Any]]:
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     if not isinstance(data, dict):
         raise ValueError(f"Mission file must be a mapping: {path}")
+    mission_id = str(data.get("mission_id") or path.stem)
+    return mission_id, data
+
+
+def iter_seed_mission_harnesses(
+) -> list[tuple[str, MissionHarness, pathlib.Path]]:
+    """``(mission_id, harness, path)`` from each seeds/missions YAML (one read)."""
+    out: list[tuple[str, MissionHarness, pathlib.Path]] = []
+    for path in iter_mission_seed_paths():
+        try:
+            mission_id, data = _read_mission_seed_file(path)
+            harness = parse_mission_harness(
+                data.get("harness"), source=str(path)
+            )
+            out.append((mission_id, harness, path))
+        except ValueError:
+            continue
+    return out
+
+
+def load_mission_harness_from_file(path: pathlib.Path) -> MissionHarness:
+    mission_id, data = _read_mission_seed_file(path)
     return parse_mission_harness(data.get("harness"), source=str(path))
 
 
@@ -101,11 +123,7 @@ def guest_output_capabilities_from_seed_files() -> list[str]:
     """Capabilities for guest reply tools — seed YAML only, never raises."""
     caps: list[str] = []
     seen: set[str] = set()
-    for path in iter_mission_seed_paths():
-        try:
-            harness = load_mission_harness_from_file(path)
-        except ValueError:
-            continue
+    for _mid, harness, _path in iter_seed_mission_harnesses():
         if not harness.guest_output.register_reply_tools:
             continue
         cap = (harness.guest_output.capability or "").strip()

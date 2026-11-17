@@ -9,6 +9,8 @@ LLM_API_BASE, LLM_API_KEY, LLM_MODEL and EMBEDDING_MODEL (see
 *shape* of a value — they are not real endpoints or model names.
 """
 
+from typing import Literal
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -144,6 +146,13 @@ class Settings(BaseSettings):
     sandbox_use_server_proxy: bool = False
     # Beat reaps sandboxes idle longer than this (seconds).
     sandbox_idle_ttl_seconds: int = 3600
+
+    # Mission harness index: ``db`` reads missions.execution_config.harness
+    # from Postgres (per-row seed YAML fallback when the key is missing);
+    # ``seed`` loads only seeds/missions/*.yaml (tests / no DB).
+    harness_source: Literal["db", "seed"] = "db"
+    harness_index_ttl_seconds: int = 30
+    harness_index_db_timeout_seconds: float = 2.0
 
     # Runtime
     checkpoint_enabled: bool = False

@@ -61,6 +61,18 @@ def test_harness_rejects_unknown_builtin_keys():
         parse_mission_harness({"builtin_tools": {"deni": True}})
 
 
+def test_deny_template_rejects_doubled_braces():
+    with pytest.raises(ValueError, match="escaped braces"):
+        parse_mission_harness(
+            {
+                "builtin_tools": {
+                    "deny": True,
+                    "deny_message_template": "Tool '{{tool_name}}' denied",
+                }
+            }
+        )
+
+
 def test_deny_template_rejects_invalid_fields():
     with pytest.raises(ValueError, match="only"):
         parse_mission_harness(
@@ -169,11 +181,11 @@ def test_agent_harness_prompt_fallbacks():
     assert adm["system_prompt"] == ADMIN_SYSTEM_PROMPT
 
 
-def test_new_agent_skill_slug_uses_removesuffix():
-    from scripts.new_agent import validate_agent_name
+def test_new_agent_skill_slug_uses_removesuffix(tmp_path):
+    from scripts.new_agent import scaffold
 
-    assert validate_agent_name("my_bottle_bot") == "my_bottle_bot"
-    # skill dir uses removesuffix('_bot'): my_bottle not mytle
+    paths = scaffold("my_bottle_bot", repo_root=tmp_path)
+    assert paths["skill"].parent.name == "my-bottle"
 
 
 def test_scaffolded_agent_resolves_without_python(tmp_path):
