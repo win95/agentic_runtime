@@ -295,7 +295,7 @@ make mlflow-report
   ```bash
   export NO_PROXY=127.0.0.1,localhost
   export no_proxy=127.0.0.1,localhost
-  .venv/bin/python -m scripts.mock_hotel_mcp_server   # 127.0.0.1:8081/mcp
+  .venv/bin/python -m scripts.mock_hotel_mcp_server   # 127.0.0.1:8082/mcp
   ```
 
   The API and worker read `.env` at startup, and pydantic does not export

@@ -11,9 +11,9 @@ afterwards — e.g.::
 
 Run it, then point the runtime at it::
 
-    python -m scripts.mock_hotel_mcp_server   # http://127.0.0.1:8081/mcp
+    python -m scripts.mock_hotel_mcp_server   # http://127.0.0.1:8082/mcp
 
-    MCP_SERVER_URL=http://127.0.0.1:8081/mcp
+    MCP_SERVER_URL=http://127.0.0.1:8082/mcp
     MCP_TRANSPORT=streamable_http
     MCP_TOOL_CAPABILITIES='{"check_room_availability": "hotel_reception", ...}'
 
@@ -28,7 +28,7 @@ opens keep what is there. ``--reseed`` wipes and re-seeds (the clean
 state for a manual run), ``--dump`` prints the whole store as JSON
 and exits. Tests point the store at a temp file instead.
 
-Port: 8081 by default (8080 is the OpenSandbox server),
+Port: 8082 by default (8080 is the OpenSandbox server),
 ``MOCK_HOTEL_MCP_PORT`` or ``--port`` overrides it.
 """
 
@@ -45,12 +45,17 @@ import threading
 import anyio
 from mcp.server.fastmcp import FastMCP
 
+from scripts.mock_hotel_mcp_defaults import (
+    DEFAULT_MOCK_HOTEL_MCP_PORT,
+    mock_hotel_mcp_port,
+)
+
 # The tool functions below are plain functions (tests call them
 # directly). `create_server()` registers them on a fresh FastMCP
 # instance — a new instance per server start, because the MCP SDK's
 # StreamableHTTPSessionManager can only run once per instance.
 
-DEFAULT_PORT = 8081
+DEFAULT_PORT = DEFAULT_MOCK_HOTEL_MCP_PORT
 CURRENCY = "VND"
 
 # Free cancellation up to this many days before check-in; inside the
@@ -960,8 +965,7 @@ _install_sse_teardown_filter()
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Mock hotel MCP server")
-    parser.add_argument("--port", type=int,
-                        default=int(os.environ.get("MOCK_HOTEL_MCP_PORT", DEFAULT_PORT)))
+    parser.add_argument("--port", type=int, default=mock_hotel_mcp_port())
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--allow-host", action="append", default=[],
                         help="Extra Host header value allowed by the MCP transport"

@@ -269,11 +269,11 @@ delete ghi thẳng xuống DB nên còn lại sau khi restart và kiểm chứng
 sạch cho một lần chạy manual: `--reseed` (restart không còn reset
 nữa). `--db` đổi file DB; test dùng file tạm riêng.
 
-    python -m scripts.mock_hotel_mcp_server   # http://127.0.0.1:8081/mcp
+    python -m scripts.mock_hotel_mcp_server   # http://127.0.0.1:8082/mcp
 
 `.env` (xem `.env.example`):
 
-    MCP_SERVER_URL=http://127.0.0.1:8081/mcp
+    MCP_SERVER_URL=http://127.0.0.1:8082/mcp
     MCP_TRANSPORT=streamable_http
     MCP_TOOL_CAPABILITIES={"check_room_availability": "hotel_reception", ...}
 

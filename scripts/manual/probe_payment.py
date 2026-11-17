@@ -20,7 +20,7 @@ the real MCP protocol instead:
    (paid - POL-CANCEL fee, as a PENDING refund record).
 
 Preconditions: the mock server is running
-(``python -m scripts.mock_hotel_mcp_server`` — 127.0.0.1:8081/mcp)
+(``python -m scripts.mock_hotel_mcp_server`` — 127.0.0.1:8082/mcp)
 and ``MCP_SERVER_URL`` points at it (``--mcp-url`` overrides the env).
 ``.env`` is loaded from the repo root at import, so the documented
 invocation works without exporting the capability map by hand.
@@ -56,6 +56,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 # os.environ, so the repo-root `.env` must be in it — without this the
 # documented invocation denies every tool (empty MCP_TOOL_CAPABILITIES).
 from _api import load_dotenv  # noqa: E402
+from scripts.mock_hotel_mcp_defaults import mock_hotel_mcp_url  # noqa: E402
 
 load_dotenv()
 
@@ -175,8 +176,8 @@ async def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--mcp-url",
-        default=os.environ.get("MCP_SERVER_URL") or "http://127.0.0.1:8081/mcp",
-        help="mock MCP server URL (default: $MCP_SERVER_URL or 127.0.0.1:8081/mcp)",
+        default=os.environ.get("MCP_SERVER_URL") or mock_hotel_mcp_url(),
+        help="mock MCP server URL (default: $MCP_SERVER_URL or mock_hotel_mcp_url())",
     )
     args = parser.parse_args()
     probe = Probe()

@@ -155,11 +155,11 @@ services:
       MINIO_BUCKET: ${MINIO_BUCKET:-agentic-runtime}
       MINIO_REPORTS_BUCKET: ${MINIO_REPORTS_BUCKET:-reports}
       MLFLOW_TRACKING_URI: http://mlflow:5000
-      # The hotel mock MCP server runs on the host (127.0.0.1:8081) during
+      # The hotel mock MCP server runs on the host (127.0.0.1:8082) during
       # manual testing; from inside the container that address is the
       # container itself, so reach it through host-gateway instead. Set
       # MCP_SERVER_URL_IN_CONTAINER to point at a real server.
-      MCP_SERVER_URL: ${MCP_SERVER_URL_IN_CONTAINER:-http://host.docker.internal:8081/mcp}
+      MCP_SERVER_URL: ${MCP_SERVER_URL_IN_CONTAINER:-http://host.docker.internal:${MOCK_HOTEL_MCP_PORT:-8082}/mcp}
       NO_PROXY: 127.0.0.1,localhost,host.docker.internal
       no_proxy: 127.0.0.1,localhost,host.docker.internal
     extra_hosts:
@@ -229,7 +229,7 @@ services:
       MINIO_REPORTS_BUCKET: ${MINIO_REPORTS_BUCKET:-reports}
       MLFLOW_TRACKING_URI: http://mlflow:5000
       # See the api service: the mock MCP server lives on the host.
-      MCP_SERVER_URL: ${MCP_SERVER_URL_IN_CONTAINER:-http://host.docker.internal:8081/mcp}
+      MCP_SERVER_URL: ${MCP_SERVER_URL_IN_CONTAINER:-http://host.docker.internal:${MOCK_HOTEL_MCP_PORT:-8082}/mcp}
       NO_PROXY: 127.0.0.1,localhost,host.docker.internal
       no_proxy: 127.0.0.1,localhost,host.docker.internal
     extra_hosts:
@@ -276,7 +276,7 @@ services:
       MINIO_REPORTS_BUCKET: ${MINIO_REPORTS_BUCKET:-reports}
       MLFLOW_TRACKING_URI: http://mlflow:5000
       # See the api service: the mock MCP server lives on the host.
-      MCP_SERVER_URL: ${MCP_SERVER_URL_IN_CONTAINER:-http://host.docker.internal:8081/mcp}
+      MCP_SERVER_URL: ${MCP_SERVER_URL_IN_CONTAINER:-http://host.docker.internal:${MOCK_HOTEL_MCP_PORT:-8082}/mcp}
       NO_PROXY: 127.0.0.1,localhost,host.docker.internal
       no_proxy: 127.0.0.1,localhost,host.docker.internal
     extra_hosts:
