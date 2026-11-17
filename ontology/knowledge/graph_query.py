@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Iterable
 
 from ontology.graph.protocol import GraphStore
 from ontology.projection.provider import get_graph_store
@@ -45,6 +45,73 @@ def list_entity_keys(
     return sorted(key for key in keys if isinstance(key, str) and key)
 
 
+def _neighbour_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Shape one raw neighbour row into the public neighbour shape."""
+    return {
+        "from": row.get("from_id"),
+        "type": row.get("rel_type"),
+        "to": row.get("to_id"),
+        "to_label": row.get("to_label"),
+    }
+
+
+def neighbors_many(
+    keys: Iterable[tuple[str, str] | str],
+    *,
+    limit_per_key: int = 200,
+    store: GraphStore | None = None,
+) -> dict[str, list[dict[str, Any]]]:
+    """1-hop neighbours for MANY nodes in ONE Cypher round trip (B9).
+
+    The expansion + live-adjacency builders used to call ``neighbors``
+    once per seed/node — up to ~51 sequential Neo4j calls inside a
+    single 150 ms budget, so on non-localhost Neo4j the budget
+    almost certainly exhausted mid-way and left a partial
+    adjacency. This one call serves the whole batch:
+    ``MATCH (a)-[r]-(b) WHERE a.id IN [...]``.
+
+    ``keys`` are ``(entity_type, key)`` pairs; a bare key string is
+    matched without a label (ids are unique across labels by
+    construction). Returns ``{key: [row, ...]}`` with rows shaped
+    exactly like ``neighbors`` returns them; rows per key are
+    sorted by (to, type) and capped at ``limit_per_key`` — the cap
+    is applied deterministically in Python after the fetch, so a
+    hub node cannot eat another key's rows, and the same key set
+    always yields the same rows. A key with no neighbours (or an
+    unknown key) maps to []. Raises on store failure (callers
+    degrade to expansion-only / vector-only, as before).
+    """
+    wanted: list[str] = []
+    for item in keys:
+        key = item[1] if isinstance(item, tuple) else item
+        if key not in wanted:
+            wanted.append(key)
+    if not wanted:
+        return {}
+    graph = store or get_graph_store()
+    if graph is None:
+        raise RuntimeError(
+            "Graph store unavailable (is Neo4j up? Seed ontology demo + projection drain)"
+        )
+    rows = graph.run_query(
+        "UNWIND $keys AS key "
+        "MATCH (a {id: key})-[r]-(b) "
+        "RETURN a.id AS from_id, type(r) AS rel_type, b.id AS to_id, labels(b)[0] AS to_label",
+        {"keys": wanted},
+    )
+    grouped: dict[str, list[dict[str, Any]]] = {key: [] for key in wanted}
+    for row in rows:
+        from_id = row.get("from_id")
+        if from_id in grouped:
+            grouped[from_id].append(_neighbour_row(row))
+    for key in grouped:
+        group = grouped[key]
+        group.sort(key=lambda r: (r.get("to") or "", r.get("type") or ""))
+        if len(group) > limit_per_key:
+            grouped[key] = group[:limit_per_key]
+    return grouped
+
+
 def neighbors(
     entity_type: str,
     entity_key: str,
@@ -71,17 +138,7 @@ def neighbors(
             "labels(b)[0] AS to_label LIMIT $limit"
         )
     rows = store.run_query(cypher, {"key": entity_key, "limit": limit})
-    out: list[dict[str, Any]] = []
-    for row in rows:
-        out.append(
-            {
-                "from": row.get("from_id"),
-                "type": row.get("rel_type"),
-                "to": row.get("to_id"),
-                "to_label": row.get("to_label"),
-            }
-        )
-    return out
+    return [_neighbour_row(row) for row in rows]
 
 
 def linked_documents(

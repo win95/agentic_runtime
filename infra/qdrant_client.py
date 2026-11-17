@@ -18,6 +18,7 @@ surface that error — repositories never return fake documents.
 from __future__ import annotations
 
 import logging
+import time
 import uuid
 
 from app.config import settings
@@ -54,21 +55,40 @@ def reset_client() -> None:
 
 
 def embed_texts(texts: list[str], embeddings=None) -> list[list[float]]:
-    """Embed texts with the index-time embedding model (LiteLLM proxy)."""
+    """Embed texts with the index-time embedding model (LiteLLM proxy).
+
+    When the embeddings object is built here it is wrapped with the
+    process embedding cache (``runtime/embedding_cache.py``): the
+    same text embedded twice in one process reuses its vector.
+    Explicitly injected embeddings are used as-is.
+    """
     if embeddings is None:
+        from runtime.embedding_cache import wrap_embeddings
         from runtime.llm_factory import build_embeddings
 
-        embeddings = build_embeddings(model=settings.resolved_embedding_model_index)
+        embeddings = wrap_embeddings(
+            build_embeddings(model=settings.resolved_embedding_model_index)
+        )
     return embeddings.embed_documents(list(texts))
 
 
 def embed_query(text: str, embeddings=None) -> list[float]:
-    """Embed one query string with the query-time embedding model."""
+    """Embed one query string with the query-time embedding model.
+
+    Same caching rule as ``embed_texts`` (see above).
+    """
     if embeddings is None:
+        from runtime.embedding_cache import wrap_embeddings
         from runtime.llm_factory import build_embeddings
 
-        embeddings = build_embeddings(model=settings.resolved_embedding_model_query)
+        embeddings = wrap_embeddings(
+            build_embeddings(model=settings.resolved_embedding_model_query)
+        )
     return embeddings.embed_query(text)
+
+
+# B10: probed dimensions, cached per index model (see probe_dimension).
+_probe_dimension_cache: dict[str, int] = {}
 
 
 def probe_dimension(embeddings=None) -> int:
@@ -79,13 +99,30 @@ def probe_dimension(embeddings=None) -> int:
     measured, never assumed. The probe uses the INDEX-time model: the
     collection stores index-time vectors, so its dimension is the index
     model's dimension.
+
+    B10: the dimension is a property of the model, so when the
+    embeddings object is built here (``embeddings=None``) the probed
+    value is cached per process keyed by the index model name — one
+    probe per model, not one per documents file. An explicitly
+    injected embeddings object is always probed fresh (test fakes
+    keep exact call counts).
     """
-    if embeddings is None:
+    built_here = embeddings is None
+    model = settings.resolved_embedding_model_index if built_here else None
+    if built_here:
+        cached = _probe_dimension_cache.get(model)
+        if cached is not None:
+            return cached
         from runtime.llm_factory import build_embeddings
 
-        embeddings = build_embeddings(model=settings.resolved_embedding_model_index)
+        embeddings = build_embeddings(model=model)
     vector = embed_query("dimension probe", embeddings=embeddings)
-    return len(vector)
+    dim = len(vector)
+    if built_here:
+        if len(_probe_dimension_cache) >= 8:
+            _probe_dimension_cache.pop(next(iter(_probe_dimension_cache)))
+        _probe_dimension_cache[model] = dim
+    return dim
 
 
 def collection_exists(client=None, collection_name: str | None = None) -> bool:
@@ -123,6 +160,15 @@ def get_collection_dim(client=None, collection_name: str | None = None) -> int |
     return int(size) if size is not None else None
 
 
+# B10: (collection, dim) pairs already verified against a given
+# client object, so ``ensure_collection`` does not re-read the
+# collection metadata on every documents file. Keyed by client
+# identity with a strong reference held (a different client — e.g.
+# another test's mock — never gets a stale hit; a deleted
+# collection would surface loudly at upsert time, not silently).
+_collection_verified: dict[tuple[int, str, int], object] = {}
+
+
 def ensure_collection(dim: int, client=None, collection_name: str | None = None) -> str:
     """Create the collection with `dim` if missing; verify dim if present.
 
@@ -135,6 +181,9 @@ def ensure_collection(dim: int, client=None, collection_name: str | None = None)
     if client is None:
         raise RuntimeError("Qdrant not configured (QDRANT_URL empty)")
     name = collection_name or settings.qdrant_collection
+    verified_key = (id(client), name, dim)
+    if verified_key in _collection_verified:
+        return "exists"
     existing_dim = get_collection_dim(client, name)
     if existing_dim is not None:
         if existing_dim != dim:
@@ -144,13 +193,30 @@ def ensure_collection(dim: int, client=None, collection_name: str | None = None)
                 f"size {dim}. Change EMBEDDING_MODEL_INDEX back, or delete the "
                 f"collection and re-index real documents."
             )
+        if len(_collection_verified) >= 16:
+            _collection_verified.pop(next(iter(_collection_verified)))
+        _collection_verified[verified_key] = client
         return "exists"
     client.create_collection(
         collection_name=name,
         vectors_config=VectorParams(size=dim, distance=Distance.COSINE),
     )
     logger.info("Created Qdrant collection %r (dim=%d)", name, dim)
+    if len(_collection_verified) >= 16:
+        _collection_verified.pop(next(iter(_collection_verified)))
+    _collection_verified[verified_key] = client
     return "created"
+
+
+def reset_qdrant_caches() -> None:
+    """Drop the process caches in this module (tests / reconnect).
+
+    Substrate (counts/links), probed dimensions and verified
+    collections are all recomputed on next use.
+    """
+    _substrate_cache.clear()
+    _probe_dimension_cache.clear()
+    _collection_verified.clear()
 
 
 def upsert_documents(
@@ -199,7 +265,49 @@ def upsert_documents(
         for (d, pid), vector in zip(todo, vectors)
     ]
     client.upsert(collection_name=name, points=points, wait=True)
+    invalidate_qdrant_substrate_cache(name)
     return {"upserted": len(points), "skipped": len(docs) - len(points)}
+
+
+_PAYLOAD_BATCH_SIZE = 100
+
+
+def _apply_payload_updates(
+    client, name: str, updates: list[tuple[str, dict]]
+) -> int:
+    """Apply (point id, payload) updates, batched when the client allows.
+
+    One ``batch_update_points`` call carries up to
+    ``_PAYLOAD_BATCH_SIZE`` SetPayload operations (distinct payloads
+    per point — grouping by identical payload would not help, the
+    payloads differ per doc). Clients without ``batch_update_points``
+    (older fakes) fall back to one ``set_payload`` per point. Returns
+    the number of points updated.
+    """
+    if not updates:
+        return 0
+    batch = getattr(client, "batch_update_points", None)
+    if batch is None:
+        for point_id, payload in updates:
+            client.set_payload(
+                collection_name=name, payload=dict(payload), points=[point_id], wait=True
+            )
+        return len(updates)
+    from qdrant_client.http.models import SetPayload, SetPayloadOperation
+
+    for start in range(0, len(updates), _PAYLOAD_BATCH_SIZE):
+        chunk = updates[start:start + _PAYLOAD_BATCH_SIZE]
+        batch(
+            collection_name=name,
+            update_operations=[
+                SetPayloadOperation(
+                    set_payload=SetPayload(payload=dict(payload), points=[point_id])
+                )
+                for point_id, payload in chunk
+            ],
+            wait=True,
+        )
+    return len(updates)
 
 
 def set_document_payloads(
@@ -208,19 +316,19 @@ def set_document_payloads(
     """Payload-only update for existing points (no re-embedding).
 
     ``payloads_by_point_id`` maps point id (uuid5 of the doc id, as
-    in ``upsert_documents``) to the payload fields to set. Returns
+    in ``upsert_documents``) to the payload fields to set. Updates
+    are sent batched (see ``_apply_payload_updates``). Returns
     ``{"updated": n}``.
     """
     client = client or get_client()
     if client is None:
         raise RuntimeError("Qdrant not configured (QDRANT_URL empty)")
     name = collection_name or settings.qdrant_collection
-    updated = 0
-    for point_id, payload in payloads_by_point_id.items():
-        client.set_payload(
-            collection_name=name, payload=dict(payload), points=[point_id], wait=True
-        )
-        updated += 1
+    updated = _apply_payload_updates(
+        client, name, list(payloads_by_point_id.items())
+    )
+    if updated:
+        invalidate_qdrant_substrate_cache(name)
     return {"updated": updated}
 
 
@@ -249,6 +357,7 @@ def backfill_document_links(client=None, collection_name: str | None = None) -> 
         points, offset = client.scroll(
             collection_name=name, limit=100, offset=offset, with_payload=True
         )
+        page_updates: list[tuple[str, dict]] = []
         for point in points:
             payload = dict(getattr(point, "payload", {}) or {})
             doc_id = payload.get("doc_id")
@@ -256,7 +365,14 @@ def backfill_document_links(client=None, collection_name: str | None = None) -> 
             if not doc_id:
                 unknown += 1
                 continue
-            links = compute_document_links({"id": doc_id})
+            links = compute_document_links(
+                {
+                    "id": doc_id,
+                    "asset_id": payload.get("asset_id"),
+                    "component_id": payload.get("component_id"),
+                    "building_id": payload.get("building_id"),
+                }
+            )
             if not links["node_ids"]:
                 unknown += 1
                 continue
@@ -269,12 +385,12 @@ def backfill_document_links(client=None, collection_name: str | None = None) -> 
             if all(payload.get(k) == v for k, v in wanted.items()):
                 unchanged += 1
                 continue
-            client.set_payload(
-                collection_name=name, payload=wanted, points=[point.id], wait=True
-            )
-            updated += 1
+            page_updates.append((point.id, wanted))
+        updated += _apply_payload_updates(client, name, page_updates)
         if offset is None:
             break
+    if updated:
+        invalidate_qdrant_substrate_cache(name)
     logger.info(
         "Qdrant link backfill: scanned=%d updated=%d unchanged=%d unknown=%d",
         scanned, updated, unchanged, unknown,
@@ -306,6 +422,76 @@ def _scroll_payloads(client, name):
             break
 
 
+# --- Retrieval substrate cache (B6) --------------------------------------
+# ``count_documents_per_node`` + ``get_document_links`` both scroll the
+# WHOLE collection (limit 100/page) — and a HybridRetriever used to be
+# rebuilt per ``hybrid_documents`` call, so one execution paid for the
+# same two full scrolls twice. The counts and the links come from the
+# same payloads, so one scroll computes both; the result is cached
+# per process, keyed by collection, with the client object held for
+# an identity check (a different client — e.g. another test's mock —
+# never gets a stale hit). TTL 60 s (the drain cadence) is the
+# fallback; every Qdrant write in this module invalidates the cache
+# immediately, so invalidation-on-write is the primary freshness
+# rule and the TTL only bounds a missed invalidation. NEVER
+# unbounded/uninvalidated: the cache is one entry per collection.
+_SUBSTRATE_TTL_SECONDS = 60
+_substrate_cache: dict[str, dict] = {}
+
+
+def invalidate_qdrant_substrate_cache(collection_name: str | None = None) -> None:
+    """Drop cached Qdrant substrate (counts + links).
+
+    Called after every Qdrant write in this module. ``None`` drops
+    all collections; a name drops just that one.
+    """
+    if collection_name is None:
+        _substrate_cache.clear()
+    else:
+        _substrate_cache.pop(collection_name, None)
+
+
+def get_qdrant_substrate(
+    client=None, collection_name: str | None = None
+) -> tuple[dict[str, int], dict[str, list[str]]]:
+    """(doc counts per node, doc -> node ids) from ONE full scroll.
+
+    Cached per process (see above): a fresh entry is computed by a
+    single scroll and shared by both readers. Returns COPIES — the
+    caller mutating the result must never poison the cache.
+    """
+    client = _live_client(client)
+    name = collection_name or settings.qdrant_collection
+    now = time.monotonic()
+    entry = _substrate_cache.get(name)
+    if (
+        entry is not None
+        and entry["client"] is client
+        and now - entry["at"] < _SUBSTRATE_TTL_SECONDS
+    ):
+        return dict(entry["counts"]), {
+            doc_id: list(node_ids) for doc_id, node_ids in entry["links"].items()
+        }
+    counts: dict[str, int] = {}
+    links: dict[str, list[str]] = {}
+    for payload in _scroll_payloads(client, name):
+        doc_id = payload.get("doc_id")
+        node_ids = list(payload.get("node_ids") or [])
+        for node_key in node_ids:
+            counts[node_key] = counts.get(node_key, 0) + 1
+        if doc_id and node_ids:
+            links[doc_id] = node_ids
+    _substrate_cache[name] = {
+        "client": client,
+        "at": now,
+        "counts": counts,
+        "links": links,
+    }
+    return dict(counts), {
+        doc_id: list(node_ids) for doc_id, node_ids in links.items()
+    }
+
+
 def _live_client(client):
     """Resolve an explicit client, or the configured one; fail fast."""
     client = client or get_client()
@@ -317,41 +503,28 @@ def _live_client(client):
 def count_documents_per_node(client=None, collection_name: str | None = None) -> dict[str, int]:
     """Live corpus counts: node key -> number of docs linked to it.
 
-    Scrolls every point and counts its payload ``node_ids`` — the
-    live replacement for the demo ``DOCUMENT_LINKS`` table in the
-    hybrid retriever's seed-specificity (``runtime/retrieval_ppr.py::
-    seed_specificity`` treats a missing/empty count as maximally
-    specific, so an empty store degrades to ``{}`` here, never a
-    crash). Raises RuntimeError when Qdrant is unreachable.
+    Read from the shared substrate cache (one scroll computes counts
+    + links together — see ``get_qdrant_substrate``). A missing/empty
+    count is maximally specific in ``runtime/retrieval_ppr.py::
+    seed_specificity``, so an empty store degrades to ``{}`` here,
+    never a crash. Raises RuntimeError when Qdrant is unreachable.
     """
-    client = _live_client(client)
-    name = collection_name or settings.qdrant_collection
-    counts: dict[str, int] = {}
-    for payload in _scroll_payloads(client, name):
-        for node_key in payload.get("node_ids") or []:
-            counts[node_key] = counts.get(node_key, 0) + 1
+    counts, _links = get_qdrant_substrate(client, collection_name)
     return counts
 
 
 def get_document_links(client=None, collection_name: str | None = None) -> dict[str, list[str]]:
     """Live doc -> node ids mapping, from Qdrant payload ``node_ids``.
 
-    The live replacement for the demo ``DOCUMENT_LINKS`` table in the
-    hybrid retriever's graph arm: a doc is a graph candidate when
-    its linked nodes touch a seed or a 1-hop neighbour. Docs with no
+    Read from the shared substrate cache (see
+    ``get_qdrant_substrate``). A doc is a graph candidate when its
+    linked nodes touch a seed or a 1-hop neighbour. Docs with no
     payload ``node_ids`` are omitted (an unlinked doc scores
     ``graph_score = 0`` and the vector arm carries it). An empty
     store returns ``{}``. Raises RuntimeError when Qdrant is
     unreachable.
     """
-    client = _live_client(client)
-    name = collection_name or settings.qdrant_collection
-    links: dict[str, list[str]] = {}
-    for payload in _scroll_payloads(client, name):
-        doc_id = payload.get("doc_id")
-        node_ids = payload.get("node_ids") or []
-        if doc_id and node_ids:
-            links[doc_id] = list(node_ids)
+    _counts, links = get_qdrant_substrate(client, collection_name)
     return links
 
 
@@ -391,12 +564,21 @@ def get_document_payloads(
 
 
 def search_documents(
-    query_text: str, limit: int = 5, embeddings=None, client=None
+    query_text: str, limit: int = 5, embeddings=None, client=None, *, slim: bool = False
 ) -> list[dict]:
     """Vector search over the technical-documents collection.
 
     Raises RuntimeError when Qdrant or the embedding model is unreachable,
     or when the collection does not exist yet (index real documents first).
+
+    B14: ``slim=True`` fetches only ``doc_id`` + ``node_ids`` (+ short
+    ``title``) — no ``content``. The hybrid path uses it: the vector
+    arm ranks 40 docs but fusion keeps 6, so shipping up to 10,000
+    chars of content per doc for all 40 is pure waste. Content is
+    fetched only for the docs that survive (see
+    ``HybridRetriever._candidate_rows`` / ``_fill_top_contents``).
+    The plain path (``repositories.search_documents``) keeps the
+    default full payload + its 4,000-char cut.
     """
     client = client or get_client()
     if client is None:
@@ -406,13 +588,26 @@ def search_documents(
             f"Qdrant collection {settings.qdrant_collection!r} does not exist yet. "
             "Index real documents into it first (see README §3)."
         )
-    vector = embed_query(query_text, embeddings=embeddings)
+    # B4: the question embedding goes through the shared B13
+    # process cache keyed by (model, text) — the same cached
+    # vector the plan path's intent scoring reuses, so the
+    # question is embedded once per (model, text), not once per
+    # call site. An embeddings object with no readable model name
+    # is not cached (test fakes take this path — call counts
+    # stay exact). ``embeddings=None`` keeps the existing path
+    # (build + wrap with the cache).
+    if embeddings is None:
+        vector = embed_query(query_text)
+    else:
+        from runtime.embedding_cache import cached_embed_query
+
+        vector = cached_embed_query(embeddings, query_text)
     try:
         response = client.query_points(
             collection_name=settings.qdrant_collection,
             query=vector,
             limit=limit,
-            with_payload=True,
+            with_payload=["doc_id", "node_ids", "title"] if slim else True,
         )
     except Exception as exc:  # noqa: BLE001 — surface Qdrant errors clearly
         raise RuntimeError(f"Qdrant search failed: {exc}") from exc

@@ -310,6 +310,9 @@ def build_query_plan(
     vocabulary: set[str] | None = None,
     paraphrase_generator=None,
     decomposition_generator=None,
+    seeds: list | None = None,
+    expansion: dict | None = None,
+    adjacency_source: str | None = None,
 ) -> QueryPlan:
     """Build the QueryPlan for one question.
 
@@ -326,13 +329,19 @@ def build_query_plan(
     callables; when omitted the LIVE generators apply (lazy
     model build — no LLM call until a gated query needs one,
     and no call at all for a gated-off question).
+    B3: ``seeds`` / ``expansion`` / ``adjacency_source`` let a
+    caller that already built them (``hybrid_documents`` on the
+    plan path) pass them in: the seeds are reused for intent
+    scoring, and the expansion/adjacency are passed into the
+    gating ``_candidate_rows`` call instead of rebuilding the
+    same expansion + live-adjacency a second time.
     """
     if adjacency is None:
         raise ValueError(
             "build_query_plan requires 'adjacency' (the live graph "
             "adjacency); no default adjacency exists."
         )
-    seeds = gazetteer_seeds(question or "")
+    seeds = seeds if seeds is not None else gazetteer_seeds(question or "")
     intent_result = score_intents(
         question or "",
         seeds=seeds,
@@ -351,7 +360,16 @@ def build_query_plan(
     # twice (see below).
     plan_rows: tuple | None = None
     if retriever is not None:
-        base_rows, _s, _e, _gm = retriever._candidate_rows(question or "")
+        # B3: reuse the caller's prebuilt expansion/adjacency
+        # (passed in) instead of rebuilding them inside
+        # _candidate_rows; the plan's seeds are the same ones.
+        base_rows, _s, _e, _gm = retriever._candidate_rows(
+            question or "",
+            seeds=seeds,
+            expansion=expansion,
+            adjacency=adjacency,
+            adjacency_source=adjacency_source,
+        )
         plan_rows = (base_rows, _s, _e, _gm)
         gating = gating_decision(question or "", base_rows)
     else:

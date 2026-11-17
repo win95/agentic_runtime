@@ -21,8 +21,10 @@ Asset/Component/Building/Document keys only.
 Expansion runs over an allowlisted relation set on an adjacency
 supplied by the caller (``build_live_adjacency`` /
 ``build_expansion_adjacency`` over real store data); the live path
-calls the existing ``ontology/knowledge/graph_query.py`` read
-functions instead (``expand_via_graph_query``) — no new Cypher.
+reads the store through ``ontology/knowledge/graph_query.py``
+(``expand_via_graph_query`` / ``build_live_adjacency`` call
+``neighbors_many`` — one batched UNWIND Cypher per seed set /
+BFS level, B9 — instead of one ``neighbors`` call per node).
 
 Per candidate the module returns G1 (min hop distance), G2
 (path_score = max over paths of prod(w_rel) * 0.6**hops, §4.2
@@ -89,6 +91,11 @@ ALLOWED_RELATIONS = frozenset(RELATION_WEIGHTS)
 MAX_FANOUT_PER_TYPE = 10
 MAX_EXPANSION_NODES = 50
 DEFAULT_TIMEOUT_SECONDS = 0.15  # 150 ms Neo4j budget, report §3.2
+# B9: the live-adjacency build gets its OWN budget, separate from
+# the expansion's 150 ms — it serves PPR/coverage/hub over up to
+# ~200 nodes, and sharing the expansion budget meant it almost
+# certainly exhausted mid-way on non-localhost Neo4j.
+LIVE_ADJACENCY_TIMEOUT_SECONDS = 0.30  # 300 ms Neo4j budget
 
 # Live-adjacency cap (Phase 5 follow-up): the PPR candidate subgraph
 # is <= ~200 nodes by design (report §11.3 PPR cap). The live builder
@@ -203,6 +210,28 @@ _DYNAMIC_ENTITY_TYPES: tuple[tuple[str, str], ...] = (
 _DYNAMIC_CODES: dict[str, list[str]] = {}
 _DYNAMIC_PATTERNS: list[tuple[str, str, re.Pattern[str], re.Pattern[str]]] = []
 
+# B7: once-per-process refresh flag. The gazetteer keys change only
+# when the ontology changes (seed / drain), so re-fetching them on
+# every retriever build (4 Neo4j calls per build) is pure waste.
+# ``refresh_gazetteer_codes`` with no explicit store returns the
+# cached summary when a refresh already succeeded in this process
+# RECENTLY (within ``_GAZETTEER_REFRESH_MIN_INTERVAL_SECONDS``) —
+# the interval, not a bare boolean, is deliberate: the seed's
+# synchronous drain runs in the seed process, not in the worker, so
+# a bare once-per-process flag would leave a long-running worker's
+# cache stale forever after a seed (the old per-build refresh
+# self-healed on the next query). The 60 s interval (the drain
+# cadence) keeps the saving — builds minutes apart re-fetch at
+# most once a minute — and self-heals after any seed within 60 s.
+# A refresh that FAILS never updates the timestamp (the next build
+# retries — fail-closed is preserved: a failed refresh leaves the
+# cache EMPTY). An explicitly passed store always refreshes for
+# real (an explicit refresh request — tests and manual calls), and
+# ``force=True`` refreshes regardless (drain / seed after a write).
+_GAZETTEER_REFRESH_MIN_INTERVAL_SECONDS = 60
+_GAZETTEER_LAST_REFRESH: float = 0.0
+_GAZETTEER_SUMMARY: dict | None = None
+
 
 def _dynamic_key_parts(key: str) -> list[str]:
     """Atomic parts of a key for the normalised-variant pattern.
@@ -243,7 +272,7 @@ def _dynamic_patterns_for(
     return verbatim, variant
 
 
-def refresh_gazetteer_codes(store=None) -> dict:
+def refresh_gazetteer_codes(store=None, *, force: bool = False) -> dict:
     """Load the live ontology's entity keys into the gazetteer cache.
 
     Fetches keys per label via ``ontology/knowledge/graph_query.py::
@@ -253,6 +282,15 @@ def refresh_gazetteer_codes(store=None) -> dict:
     "documents": n, "source": "ontology"}``. Called explicitly by
     the live factory (and by hand); never on a timer.
 
+    B7: with no explicit store and no ``force``, a refresh that
+    already succeeded in this process RECENTLY (within 60 s, the
+    drain cadence) returns the cached summary without touching
+    Neo4j again — keys change only via seed/drain, which refresh
+    with ``force=True`` after writing, and the interval (not a bare
+    once-per-process flag) keeps a long-running worker self-healing
+    after a seed that drained in another process. An explicitly
+    passed store always refreshes for real.
+
     On ANY store failure — including a failure halfway through
     the four fetches, or no graph store being configured — it
     returns ``{"assets": 0, "components": 0, "buildings": 0,
@@ -260,9 +298,18 @@ def refresh_gazetteer_codes(store=None) -> dict:
     EMPTY (clearing any earlier successful refresh: a stale cache
     could link codes the ontology no longer has, and a wrong link
     is worse than no link), so the gazetteer links nothing, and
-    never raises.
+    never raises. A failed refresh never updates the timestamp,
+    so the next build retries.
     """
-    global _DYNAMIC_CODES, _DYNAMIC_PATTERNS
+    global _DYNAMIC_CODES, _DYNAMIC_PATTERNS, _GAZETTEER_LAST_REFRESH, _GAZETTEER_SUMMARY
+    if (
+        store is None
+        and not force
+        and _GAZETTEER_SUMMARY is not None
+        and time.monotonic() - _GAZETTEER_LAST_REFRESH
+        < _GAZETTEER_REFRESH_MIN_INTERVAL_SECONDS
+    ):
+        return dict(_GAZETTEER_SUMMARY)
     try:
         from ontology.knowledge.graph_query import list_entity_keys
 
@@ -273,6 +320,8 @@ def refresh_gazetteer_codes(store=None) -> dict:
         logger.warning("dynamic gazetteer refresh failed: %s", exc)
         _DYNAMIC_CODES = {}
         _DYNAMIC_PATTERNS = []
+        _GAZETTEER_LAST_REFRESH = 0.0
+        _GAZETTEER_SUMMARY = None
         return {
             "assets": 0,
             "components": 0,
@@ -293,13 +342,15 @@ def refresh_gazetteer_codes(store=None) -> dict:
     # cache wholesale, so no stale keys survive it.
     _DYNAMIC_CODES = codes
     _DYNAMIC_PATTERNS = patterns
-    return {
+    _GAZETTEER_LAST_REFRESH = time.monotonic()
+    _GAZETTEER_SUMMARY = {
         "assets": len(codes["Asset"]),
         "components": len(codes["Component"]),
         "buildings": len(codes["Building"]),
         "documents": len(codes["Document"]),
         "source": "ontology",
     }
+    return dict(_GAZETTEER_SUMMARY)
 
 
 def clear_gazetteer_codes() -> None:
@@ -307,11 +358,14 @@ def clear_gazetteer_codes() -> None:
 
     Test helper (also the manual way to clear the cache): after
     this call ``gazetteer_seeds`` returns [] until
-    ``refresh_gazetteer_codes`` loads keys again.
+    ``refresh_gazetteer_codes`` loads keys again. Also clears the
+    once-per-process refresh timestamp (B7), so the next refresh is real.
     """
-    global _DYNAMIC_CODES, _DYNAMIC_PATTERNS
+    global _DYNAMIC_CODES, _DYNAMIC_PATTERNS, _GAZETTEER_LAST_REFRESH, _GAZETTEER_SUMMARY
     _DYNAMIC_CODES = {}
     _DYNAMIC_PATTERNS = []
+    _GAZETTEER_LAST_REFRESH = 0.0
+    _GAZETTEER_SUMMARY = None
 
 
 def _dynamic_gazetteer_seeds(question: str) -> list[dict]:
@@ -427,29 +481,31 @@ def expand_via_graph_query(
 ) -> dict:
     """1-hop expansion through the live graph_query read functions.
 
-    Calls ``ontology/knowledge/graph_query.py::neighbors`` (depth 1)
-    per seed and converts the rows into the same shape as
-    ``expand_one_hop``. Any store error / timeout degrades to an
-    empty expansion (``graph_missing`` upstream) instead of failing
-    the query.
+    Calls ``ontology/knowledge/graph_query.py::neighbors_many``
+    (depth 1) ONCE for all seeds — one Cypher round trip instead
+    of one ``neighbors`` call per seed (B9) — and converts the
+    rows into the same shape as ``expand_one_hop``. Any store
+    error / timeout degrades to an empty expansion
+    (``graph_missing`` upstream) instead of failing the query.
     """
-    from ontology.knowledge.graph_query import neighbors as graph_neighbors
+    from ontology.knowledge.graph_query import neighbors_many as graph_neighbors_many
 
     started = time.monotonic()
+    if time.monotonic() - started > timeout_seconds:
+        return {"nodes": {}, "truncated": True, "nodes_returned": 0}
+    try:
+        grouped = graph_neighbors_many(
+            [(seed["type"], seed["key"]) for seed in seeds],
+            limit_per_key=MAX_FANOUT_PER_TYPE * 4,
+            store=store,
+        )
+    except Exception as exc:  # noqa: BLE001 — graph is advisory only
+        logger.warning("graph expansion failed: %s", exc)
+        return {"nodes": {}, "truncated": True, "nodes_returned": 0, "error": str(exc)}
     nodes: dict[str, dict] = {}
     truncated = False
     for seed in seeds:
-        if time.monotonic() - started > timeout_seconds:
-            truncated = True
-            break
-        try:
-            rows = graph_neighbors(
-                seed["type"], seed["key"], depth=1, limit=MAX_FANOUT_PER_TYPE * 4,
-                store=store,
-            )
-        except Exception as exc:  # noqa: BLE001 — graph is advisory only
-            logger.warning("graph expansion failed for seed %s: %s", seed["key"], exc)
-            return {"nodes": {}, "truncated": True, "nodes_returned": 0, "error": str(exc)}
+        rows = grouped.get(seed["key"], [])
         by_type: dict[str, list] = {}
         for row in rows:
             if row.get("type") not in ALLOWED_RELATIONS:
@@ -533,7 +589,7 @@ def build_live_adjacency(
     expansion: dict,
     *,
     store=None,
-    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+    timeout_seconds: float = LIVE_ADJACENCY_TIMEOUT_SECONDS,
     max_nodes: int = MAX_LIVE_ADJACENCY_NODES,
 ) -> dict:
     """Live adjacency for PPR (G7), coverage (G6) and hub (G8).
@@ -549,13 +605,18 @@ def build_live_adjacency(
 
     Rules:
     - Only ``ALLOWED_RELATIONS`` edges; neighbours are fetched via
-      ``ontology/knowledge/graph_query.py::neighbors`` (depth 1)
-      per node — no new Cypher.
+      ``ontology/knowledge/graph_query.py::neighbors_many`` — ONE
+      batched Cypher call per BFS level (B9), not one call per
+      node: the old per-node loop made up to ~51 sequential
+      Neo4j calls inside one shared budget.
     - Deterministic under the caps: nodes are visited in BFS
       order (seeds in given order, then expansion nodes sorted by
       key, then second-hop nodes in discovery order) and each
       node's neighbours are processed sorted by key, so the same
-      store contents always yield the same adjacency.
+      store contents always yield the same adjacency. Level
+      batching preserves that order exactly: a level's nodes are
+      processed in queue order, and discoveries append in the
+      same order as the sequential loop.
     - Total nodes capped at ``max_nodes`` (default 200, the §11.3
       PPR cap — counting seeds + expansion + second-hop nodes).
       Seeds + expansion nodes are always present (they are the
@@ -563,14 +624,15 @@ def build_live_adjacency(
       only: an edge to a not-yet-known node past the cap is
       dropped, edges between known nodes are still added, and the
       truncation is reported with a warning log.
-    - One shared wall-clock budget (``timeout_seconds``, default
-      the same 0.15 s as the 1-hop expansion, §3.2): the budget is
-      checked before every ``neighbors`` call, NOT per call — a
-      per-call budget over up to ~51 calls (seeds + expansion)
-      could stretch to ~7.6 s and blow the retrieval latency
-      budget. On timeout the build stops and returns the partial
-      adjacency built so far (seeds + expansion nodes are always
-      in it, so it is never empty for a non-empty seed set).
+    - Its OWN wall-clock budget (``timeout_seconds``, default
+      0.30 s — B9, separate from the expansion's 0.15 s, §3.2):
+      the budget is checked before every batched level call, NOT
+      per call — a per-call budget over up to ~51 calls (seeds +
+      expansion) could stretch to ~7.6 s and blow the retrieval
+      latency budget. On timeout the build stops and returns the
+      partial adjacency built so far (seeds + expansion nodes
+      are always in it, so it is never empty for a non-empty
+      seed set).
     - A store error RAISES (it is not swallowed here): the caller
       (``HybridRetriever._candidate_rows``) treats a failed live
       build as a degradation and falls back to
@@ -581,7 +643,7 @@ def build_live_adjacency(
     Returns ``{}`` only when there are no seeds (the caller never
     calls it then — ``graph_missing`` applies instead).
     """
-    from ontology.knowledge.graph_query import neighbors as graph_neighbors
+    from ontology.knowledge.graph_query import neighbors_many as graph_neighbors_many
 
     adjacency: dict[str, dict] = {}
 
@@ -598,42 +660,47 @@ def build_live_adjacency(
     truncated = False
     # Seeds may also appear as expansion nodes (the live expansion
     # does not exclude them); dedup so each node is fetched once.
-    queue = list(dict.fromkeys([s["key"] for s in seeds] + sorted(expansion_nodes)))
-    queued = set(queue)
-    index = 0
-    while index < len(queue):
-        key = queue[index]
-        index += 1
+    # B9: BFS by LEVELS — one batched neighbors_many call per
+    # level, not one call per node. A level's nodes are processed
+    # in queue order and discoveries append in discovery order,
+    # exactly as the old per-node loop did, so the result is
+    # identical for the same store contents.
+    level = list(dict.fromkeys([s["key"] for s in seeds] + sorted(expansion_nodes)))
+    queued = set(level)
+    while level:
         if time.monotonic() - started > timeout_seconds:
             truncated = True
             break
-        # Limit 200 (the graph_query max): degree fidelity matters
-        # for PPR/hub — truncating a node's neighbour list at the
-        # expansion fan-out (40) would understate real hub degrees.
-        # The total-node cap above bounds the memory instead.
-        rows = graph_neighbors(
-            adjacency[key]["type"],
-            key,
-            depth=1,
-            limit=200,
+        # Limit 200 per key (the graph_query max): degree fidelity
+        # matters for PPR/hub — truncating a node's neighbour list
+        # at the expansion fan-out (40) would understate real hub
+        # degrees. The total-node cap above bounds the memory
+        # instead. neighbours_many sorts per key and caps at
+        # limit_per_key, so rows arrive in deterministic order.
+        grouped = graph_neighbors_many(
+            [(adjacency[key]["type"], key) for key in level],
+            limit_per_key=200,
             store=store,
         )
-        rows.sort(key=lambda r: (r.get("to") or "", r.get("type") or ""))
-        for row in rows:
-            rel = row.get("type")
-            to_key = row.get("to")
-            if rel not in ALLOWED_RELATIONS or not to_key or to_key == key:
-                continue
-            to_type = row.get("to_label") or "Entity"
-            if to_key not in adjacency:
-                if len(adjacency) >= max_nodes:
-                    truncated = True
+        next_level: list[str] = []
+        for key in level:
+            rows = grouped.get(key, [])
+            for row in rows:
+                rel = row.get("type")
+                to_key = row.get("to")
+                if rel not in ALLOWED_RELATIONS or not to_key or to_key == key:
                     continue
-                _ensure(to_key, to_type)
-                if to_key not in queued:
-                    queued.add(to_key)
-                    queue.append(to_key)
-            _live_adjacency_edge(adjacency, key, rel, to_key, to_type)
+                to_type = row.get("to_label") or "Entity"
+                if to_key not in adjacency:
+                    if len(adjacency) >= max_nodes:
+                        truncated = True
+                        continue
+                    _ensure(to_key, to_type)
+                    if to_key not in queued:
+                        queued.add(to_key)
+                        next_level.append(to_key)
+                _live_adjacency_edge(adjacency, key, rel, to_key, to_type)
+        level = next_level
     for entry in adjacency.values():
         entry["neighbors"] = sorted(set(entry["neighbors"]), key=lambda e: (e[1], e[0]))
     if truncated:

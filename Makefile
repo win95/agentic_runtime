@@ -56,7 +56,7 @@ docker-down:
 	docker compose down
 
 # Seed demo data (asset O21, October 2026): missions + agents +
-# schedules + Postgres rows + Qdrant docs + FalkorDB relations.
+# schedules + Postgres rows + Qdrant docs + Neo4j relations (via L1 + drain).
 # Idempotent — re-running changes nothing. Needs the stores up
 # (docker compose up -d) and the LiteLLM proxy for Qdrant embeddings.
 seed:

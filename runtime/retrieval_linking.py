@@ -85,19 +85,50 @@ DOCUMENT_LINKS: dict[str, dict] = {
 def compute_document_links(doc: dict) -> dict:
     """Payload link fields for one document dict (``id``/``title``/``content``).
 
-    Known demo docs return the grounded table above. Unknown docs get
-    no links (``node_ids: []``) — the caller must not invent a link;
-    an unlinked doc simply scores ``graph_score = 0`` and the vector
-    arm carries it (guardrail 3 fallback).
+    Generic rules, from fields already on the row — no model, no
+    guessing:
+    - known demo docs keep the grounded table above (it encodes the
+      deliberate M05 asymmetry: ``doc-motor-overheat`` links to O21 /
+      motor-M2 only, never O22 / motor-M3);
+    - any other doc links from its explicit fields: ``asset_id`` /
+      ``component_id`` / ``building_id`` become ``node_ids`` entries,
+      and the doc's own id is included when the doc is an ontology
+      Document node (``doc-`` prefix: the id is the node key — the
+      DOCUMENTED_BY edge targets exactly this id);
+    - a doc with no explicit link field gets no links
+      (``node_ids: []``) — the caller must not invent a link; an
+      unlinked doc simply scores ``graph_score = 0`` and the vector
+      arm carries it (guardrail 3 fallback).
     """
     links = DOCUMENT_LINKS.get(doc.get("id", ""))
-    if links is None:
-        return {"node_ids": [], "asset_id": None, "component_id": None, "building_id": None}
+    if links is not None:
+        return {
+            "node_ids": list(links["node_ids"]),
+            "asset_id": links["asset_id"],
+            "component_id": links["component_id"],
+            "building_id": links["building_id"],
+        }
+    node_ids: list[str] = []
+    asset_id = doc.get("asset_id")
+    component_id = doc.get("component_id")
+    building_id = doc.get("building_id")
+    for key in (asset_id, component_id, building_id):
+        if key and key not in node_ids:
+            node_ids.append(key)
+    doc_id = doc.get("id", "")
+    # The doc's own id is a Document node exactly when ingest creates
+    # its DOCUMENTED_BY edge — i.e. when it has an asset_id
+    # (``ingest/loaders.py::documented_by_relations`` + ``load_relations``
+    # ensure both endpoints, so the Document node exists). A doc with
+    # no asset_id gets no edge and no Document node, so its own id
+    # must not be listed.
+    if asset_id and doc_id and doc_id not in node_ids:
+        node_ids.append(doc_id)
     return {
-        "node_ids": list(links["node_ids"]),
-        "asset_id": links["asset_id"],
-        "component_id": links["component_id"],
-        "building_id": links["building_id"],
+        "node_ids": node_ids,
+        "asset_id": asset_id or None,
+        "component_id": component_id or None,
+        "building_id": building_id or None,
     }
 
 

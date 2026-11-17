@@ -1,5 +1,5 @@
 """One-command seed: missions + agents + schedules + Postgres demo rows
-+ Qdrant docs + FalkorDB relations.
++ Qdrant docs + Neo4j relations (via L1 + drain).
 
 Usage:
     python -m seeds.seed_demo_data [--dry-run]
@@ -8,7 +8,7 @@ Usage:
     docker compose --profile setup run --rm seed
 
 Postgres + missions are required and fail the command on error. Qdrant and
-FalkorDB are best-effort: a failure prints a clear WARNING (usually a
+Neo4j are best-effort: a failure prints a clear WARNING (usually a
 missing LiteLLM key/proxy or a service that is not up yet) and the
 command still exits 0 — re-run it after fixing the cause; everything is
 idempotent, so nothing is duplicated.

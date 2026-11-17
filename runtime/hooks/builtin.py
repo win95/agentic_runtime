@@ -537,7 +537,52 @@ def _load_documents(ctx: HookContext, asset_id: str):
     return repositories.search_documents(f"{asset_id} {query}", limit=doc_limit)
 
 
+def _expansion_relations(ctx: HookContext, asset_id: str) -> list[dict]:
+    """Asset relations from the stashed hybrid expansion (B8).
+
+    The documents section (which runs before relations in the
+    default source order) already fetched this asset's 1-hop
+    neighbours into the execution retriever's expansion — reuse
+    those rows instead of calling Neo4j again for the same
+    neighbours. Returns [] when nothing is stashed, when the
+    expansion holds no row from this asset (the asset was not a
+    seed of the documents question), or when the retriever is
+    unavailable — the caller then falls back to Neo4j. Rows are
+    shaped exactly like ``query_asset_relationships`` returns
+    them (``from`` / ``type`` / ``to`` / ``to_label``) and sorted
+    deterministically by (to, type).
+    """
+    try:
+        from runtime.retrieval_live import get_stashed_execution_retriever
+
+        retriever = get_stashed_execution_retriever(ctx.execution_id or None)
+    except Exception:  # noqa: BLE001 — fallback, never fatal
+        return []
+    expansion = getattr(retriever, "_last_expansion", None) if retriever else None
+    if not expansion:
+        return []
+    rows = [
+        {
+            "from": asset_id,
+            "type": node.get("rel") or "RELATED_TO",
+            "to": to_key,
+            "to_label": node.get("type") or "Entity",
+        }
+        for to_key, node in (expansion.get("nodes") or {}).items()
+        if (node.get("from_seed") or "") == asset_id
+    ]
+    rows.sort(key=lambda r: (r["to"] or "", r["type"] or ""))
+    return rows
+
+
 def _load_relations(ctx: HookContext, asset_id: str):
+    # B8: the expansion the hybrid documents section just built
+    # already holds this asset's neighbours — reuse them; call
+    # Neo4j only when the expansion is empty (no hybrid section
+    # ran, the asset was not a seed, or the hybrid call failed).
+    rows = _expansion_relations(ctx, asset_id)
+    if rows:
+        return rows, False
     from infra import repositories
 
     return repositories.query_asset_relationships(asset_id)
@@ -593,6 +638,9 @@ def _hybrid_documents_lines(ctx: HookContext, asset_id: str) -> list[str]:
         result = hybrid_documents(
             f"{asset_id} {query}",
             query_plan=bool(retrieval.get("query_plan")),
+            # B2: the execution's retriever — the capability node
+            # (Seam B) reuses this same retriever when it runs.
+            execution_id=ctx.execution_id or None,
         )
     except Exception as exc:  # noqa: BLE001 — fallback, never fatal
         logger.warning(

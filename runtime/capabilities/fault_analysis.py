@@ -107,7 +107,7 @@ def maintenance_node(state: MissionState) -> dict:
     return {"evidence": items}
 
 
-def _load_knowledge_documents(retrieval: dict, asset_id: str):
+def _load_knowledge_documents(retrieval: dict, asset_id: str, execution_id: str = ""):
     """Document rows for the knowledge_retrieval node.
 
     Hybrid first when the mission opts in (Seam B, never a plan —
@@ -122,7 +122,11 @@ def _load_knowledge_documents(retrieval: dict, asset_id: str):
         from runtime.retrieval_live import hybrid_documents
 
         try:
-            return hybrid_documents(question)["docs"], False
+            # B2: the execution's retriever — the SessionStart hook
+            # (Seam A) reuses this same retriever when it runs.
+            return hybrid_documents(
+                question, execution_id=execution_id or None
+            )["docs"], False
         except Exception as exc:  # noqa: BLE001 — fallback, never fatal
             logger.warning(
                 "knowledge_retrieval: hybrid documents failed (%s); "
@@ -139,7 +143,9 @@ def knowledge_retrieval_node(state: MissionState) -> dict:
         (state.get("mission") or {}).get("execution") or {}
     ).get("retrieval") or {}
     try:
-        docs, is_stub = _load_knowledge_documents(retrieval, asset_id)
+        docs, is_stub = _load_knowledge_documents(
+            retrieval, asset_id, execution_id=state.get("execution_id") or ""
+        )
     except Exception as exc:  # noqa: BLE001 — any store failure is error evidence
         # No invented documents: record the failure as evidence.
         return {

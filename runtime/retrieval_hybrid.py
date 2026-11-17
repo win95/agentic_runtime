@@ -268,7 +268,15 @@ class HybridRetriever:
             graph_missing=graph_missing,
         )
 
-    def _candidate_rows(self, question: str, seeds: list[dict] | None = None):
+    def _candidate_rows(
+        self,
+        question: str,
+        seeds: list[dict] | None = None,
+        *,
+        expansion: dict | None = None,
+        adjacency: dict | None = None,
+        adjacency_source: str | None = None,
+    ):
         """Per-question candidate rows (pre-RRF, pre-fusion).
 
         Returns ``(candidates, seeds, expansion, graph_missing)``.
@@ -283,20 +291,37 @@ class HybridRetriever:
         default) re-derives them from the question, exactly as
         before — the no-plan path is unchanged. An explicitly
         empty list means "no confident link" (vector-only).
+        B3: ``expansion`` / ``adjacency`` let a caller that already
+        built them (``hybrid_documents`` on the plan path) pass
+        them in instead of rebuilding the same seeds +
+        expansion + live-adjacency a second time. When given,
+        they are used as-is (the caller built them from the same
+        question's seeds); ``adjacency_source`` names which build
+        the adjacency came from (``"live"`` /
+        ``"expansion-only"``) so the trace marking matches the
+        build-it-here path. ``None`` (the default) rebuilds them
+        here, exactly as before.
         """
         from infra.qdrant_client import search_documents
 
+        # B14: slim vector fetch — doc_id + node_ids (+ title) only,
+        # no content. The vector arm ranks 40 docs but fusion keeps
+        # 6, so shipping up to 10,000 chars of content per doc for
+        # all 40 is pure waste; content is fetched only for the docs
+        # that survive (RRF top-30 below, then top-6 in retrieve).
         vector_docs = search_documents(
-            question, limit=VECTOR_LIMIT, embeddings=self.embeddings, client=self.client
+            question, limit=VECTOR_LIMIT, embeddings=self.embeddings, client=self.client,
+            slim=True,
         )
         vec_by_id = {d["doc_id"]: d for d in vector_docs}
         vec_scores = {d["doc_id"]: float(d.get("score", 0.0)) for d in vector_docs}
 
         seeds = seeds if seeds is not None else gazetteer_seeds(question)
-        if self.use_live_graph:
-            expansion = expand_via_graph_query(seeds, store=self.graph_store)
-        else:
-            expansion = expand_one_hop(seeds, self.adjacency)
+        if expansion is None:
+            if self.use_live_graph:
+                expansion = expand_via_graph_query(seeds, store=self.graph_store)
+            else:
+                expansion = expand_one_hop(seeds, self.adjacency)
         graph_missing = not seeds or not expansion.get("nodes")
 
         # Substrate for PPR (G7), coverage (G6) and hub (G8): on the
@@ -313,21 +338,28 @@ class HybridRetriever:
         # (no live build is attempted).
         graph_adjacency = self.adjacency
         if self.use_live_graph and not graph_missing:
-            try:
-                live_adjacency = build_live_adjacency(seeds, expansion, store=self.graph_store)
-            except Exception as exc:  # noqa: BLE001 — live graph is advisory
-                logger.warning("live adjacency build failed: %s", exc)
-                live_adjacency = {}
-            if live_adjacency:
-                graph_adjacency = live_adjacency
-                expansion["graph_adjacency_source"] = "live"
+            if adjacency is not None:
+                # B3: prebuilt by the caller (hybrid_documents plan
+                # path) — reuse it instead of rebuilding the same
+                # live adjacency a second time.
+                graph_adjacency = adjacency
+                expansion["graph_adjacency_source"] = adjacency_source or "live"
             else:
-                graph_adjacency = build_expansion_adjacency(seeds, expansion)
-                expansion["graph_adjacency_source"] = "expansion-only"
-                logger.warning(
-                    "live adjacency empty/failed; using expansion-only adjacency (%d nodes)",
-                    len(graph_adjacency),
-                )
+                try:
+                    live_adjacency = build_live_adjacency(seeds, expansion, store=self.graph_store)
+                except Exception as exc:  # noqa: BLE001 — live graph is advisory
+                    logger.warning("live adjacency build failed: %s", exc)
+                    live_adjacency = {}
+                if live_adjacency:
+                    graph_adjacency = live_adjacency
+                    expansion["graph_adjacency_source"] = "live"
+                else:
+                    graph_adjacency = build_expansion_adjacency(seeds, expansion)
+                    expansion["graph_adjacency_source"] = "expansion-only"
+                    logger.warning(
+                        "live adjacency empty/failed; using expansion-only adjacency (%d nodes)",
+                        len(graph_adjacency),
+                    )
             expansion["graph_adjacency_nodes"] = len(graph_adjacency)
 
         # PPR (once per query, over the candidate subgraph —
@@ -405,7 +437,84 @@ class HybridRetriever:
                 "arms": arms,
                 **{f"graph_{k}": v for k, v in features.items()},
             })
+        # B14: the slim vector fetch carries no content, but the
+        # exact feature (0.10) reads title+content — a vector doc
+        # whose code lives only in its content would score exact=0
+        # and fusion would change. RRF uses vec/graph ranks only,
+        # so its top-30 is identical with or without content:
+        # fetch content for exactly that set (one batched call,
+        # cached — a doc fetched here is never re-fetched for a
+        # variant or for the top-6 fill), recompute exact on the
+        # filled text, and set title/content on those rows. Docs
+        # outside the top-30 never reach fusion, so their exact is
+        # never scored. Content is cut to 4,000 chars via
+        # clean_text_fields — the same cut the plain
+        # repositories.search_documents path applies.
+        self._fill_candidate_contents(question, candidates, vec_by_id, seeds=seeds)
         return candidates, seeds, expansion, graph_missing
+
+    def _fill_candidate_contents(
+        self, question: str, candidates: list[dict], vec_by_id: dict, *, seeds: list[dict]
+    ) -> None:
+        """Fill title/content for the RRF top-30 and recompute exact (B14)."""
+        from runtime.security import clean_text_fields
+
+        top_ids = [c["doc_id"] for c in rrf_prefusion(candidates)]
+        if not top_ids:
+            return
+        self._fetch_doc_texts(top_ids)
+        by_id = {c["doc_id"]: c for c in candidates}
+        for doc_id in top_ids:
+            row = by_id.get(doc_id)
+            if row is None:
+                continue
+            # The fetched payload is authoritative: _doc_for prefers
+            # the slim vector row (title only) over the fetched
+            # text, which would leave content empty here.
+            doc = (
+                self._fetched_texts.get(doc_id)
+                or self._docs.get(doc_id)
+                or vec_by_id.get(doc_id)
+                or {}
+            )
+            if not doc.get("content") and not doc.get("title"):
+                continue
+            row["title"] = row.get("title") or doc.get("title") or ""
+            row["content"] = clean_text_fields(
+                {"content": doc.get("content") or ""}
+            )["content"]
+            row["exact"] = _exact_match(question, doc, seeds=seeds)
+
+    def _fill_top_contents(self, final: list[dict], rows: list[dict]) -> None:
+        """Fetch content for the fused top-6 and set it on their rows (B14).
+
+        The final ranking may include a doc whose content was not
+        fetched yet (merged plan rows take their content from the
+        best-graph row, which may not have been in its variant's
+        RRF top-30). One batched ``_fetch_doc_texts`` call,
+        cached — rows that already carry content are untouched.
+        Content is cut to 4,000 chars, same as the plain path.
+        """
+        from runtime.security import clean_text_fields
+
+        top_ids = [c["doc_id"] for c in final]
+        if not top_ids:
+            return
+        by_id = {row["doc_id"]: row for row in rows}
+        wanted = [d for d in top_ids if not (by_id.get(d) or {}).get("content")]
+        if wanted:
+            self._fetch_doc_texts(wanted)
+        for doc_id in top_ids:
+            row = by_id.get(doc_id)
+            if row is None or row.get("content"):
+                continue
+            doc = self._fetched_texts.get(doc_id) or self._docs.get(doc_id) or {}
+            if not doc.get("content") and not doc.get("title"):
+                continue
+            row["title"] = row.get("title") or doc.get("title") or ""
+            row["content"] = clean_text_fields(
+                {"content": doc.get("content") or ""}
+            )["content"]
 
     def retrieve(self, question: str, query_plan=None):
         """Rank docs for one question, optionally through a QueryPlan.
@@ -483,6 +592,14 @@ class HybridRetriever:
                 "gating": dict(query_plan.gating or {}),
                 "variants": [],
             }
+            # B14/B5: the fused top-6 carry content; stash the rows
+            # so hybrid_documents reads them without re-fetching.
+            self._fill_top_contents(base_final, base_rows)
+            self._last_candidate_rows = base_rows
+            # B8: stash the expansion so the SessionStart hook's
+            # relations section can reuse these 1-hop neighbours
+            # instead of re-fetching them from Neo4j.
+            self._last_expansion = expansion
             return ranked_ids, trace
         variant_rows = []
         variant_rankings = []
@@ -511,6 +628,12 @@ class HybridRetriever:
             "gating": dict(query_plan.gating or {}),
             "variants": expansion_texts,
         }
+        # B14/B5: the fused top-6 carry content; stash the rows so
+        # hybrid_documents reads them without re-fetching.
+        self._fill_top_contents(merged_final, merged)
+        self._last_candidate_rows = merged
+        # B8: stash the base expansion (see above).
+        self._last_expansion = expansion
         return ranked_ids, trace
 
     def _trace(self, candidates, final, seeds, expansion, graph_missing):
@@ -556,6 +679,15 @@ class HybridRetriever:
         final = self._rank_candidates(candidates, graph_missing)
         ranked_ids = [c["doc_id"] for c in final]
         trace = self._trace(candidates, final, seeds, expansion, graph_missing)
+        # B14/B5: the fused top-6 carry content (filled in
+        # _candidate_rows for the RRF top-30); stash the rows so
+        # hybrid_documents reads them without re-fetching.
+        self._fill_top_contents(final, candidates)
+        self._last_candidate_rows = candidates
+        # B8: stash the expansion so the SessionStart hook's
+        # relations section can reuse these 1-hop neighbours
+        # instead of re-fetching them from Neo4j.
+        self._last_expansion = expansion
         return ranked_ids, trace
 
 

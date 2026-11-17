@@ -280,6 +280,15 @@ def run_execution(self, execution_id: str) -> dict:
         raise
     finally:
         db.close()
+        # B2: drop the execution's stashed hybrid retriever (its
+        # doc/payload caches die with the execution). Best effort
+        # only — cleanup never masks the run's outcome.
+        try:
+            from runtime.retrieval_live import drop_execution_retriever
+
+            drop_execution_retriever(execution_id)
+        except Exception:  # noqa: BLE001 — cleanup, never fatal
+            pass
 
 
 @celery_app.task(name="app.worker.tasks.run_due_schedules")

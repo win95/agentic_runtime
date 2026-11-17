@@ -177,8 +177,9 @@ docker compose up -d neo4j
 make migrate
 
 # Seed the demo ontology (17 entities + 15 relations: O21/O22/O23/O24,
-# O20 archived, 2 buildings, 6 components, 3 Document nodes) and
-# project it:
+# O20 archived, 2 buildings, 6 components, 3 Document nodes) into the
+# L1 canonical tables; Neo4j gets the data only after the drain
+# (the seed drains synchronously, the beat drains every 60 s):
 make seed
 # or ontology only: python -m seeds.seed_ontology_demo
 

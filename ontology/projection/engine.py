@@ -230,6 +230,18 @@ class ProjectionEngine:
                 "need a manual fix (upsert_projection_pending re-queues one)",
                 depth["dead_total"],
             )
+        if processed > 0:
+            # B7: the ontology changed — refresh the retrieval
+            # gazetteer once, so the next retriever build links the
+            # new keys without re-fetching on every build. Best
+            # effort only: a refresh failure must never fail the
+            # drain (the gazetteer fails closed to linking nothing).
+            try:
+                from runtime.retrieval_graph import refresh_gazetteer_codes
+
+                refresh_gazetteer_codes(force=True)
+            except Exception as exc:  # noqa: BLE001 — refresh never fails a drain
+                logger.debug("Post-drain gazetteer refresh failed: %s", exc)
         return {
             "processed": processed,
             "errors": errors,

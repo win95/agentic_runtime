@@ -483,9 +483,21 @@ def score_intents(
     if embeddings is None:
         raw_vec = {intent: 0.0 for intent in INTENT_ORDER}
     else:
-        q_vec = embeddings.embed_query(question or "")
+        # B4: the question + the 6 static prototypes used to cost 7
+        # embed calls per question (and the question was embedded
+        # AGAIN in the vector search). All of them go through the
+        # shared B13 process cache keyed by (model, text):
+        # the prototypes are computed once per model per process,
+        # and the question vector is the SAME cached vector the
+        # vector search reuses (see search_documents) — one embed
+        # per (model, text), not one per call. An embeddings object
+        # with no readable model name is not cached (test fakes
+        # take this path — call counts stay exact).
+        from runtime.embedding_cache import cached_embed_query
+
+        q_vec = cached_embed_query(embeddings, question or "")
         raw_vec = {
-            intent: _cosine(q_vec, embeddings.embed_query(PROTOTYPES[intent]))
+            intent: _cosine(q_vec, cached_embed_query(embeddings, PROTOTYPES[intent]))
             for intent in INTENT_ORDER
         }
     z_vec = dict(zip(INTENT_ORDER, zscores([raw_vec[i] for i in INTENT_ORDER])))
