@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from dataclasses import dataclass, field
@@ -35,11 +36,24 @@ class HarnessIndex:
     guest_output_capabilities: list[str] = field(default_factory=list)
 
 
+_DB_HARNESS_DISABLED = False
+
+
 def reset_harness_cache_for_tests() -> None:
-    global _INDEX, _INDEX_LOADED_AT
+    global _INDEX, _INDEX_LOADED_AT, _DB_HARNESS_DISABLED
     with _LOCK:
         _INDEX = None
         _INDEX_LOADED_AT = 0.0
+        _DB_HARNESS_DISABLED = False
+
+
+def _use_db_for_harness_index() -> bool:
+    if _DB_HARNESS_DISABLED:
+        return False
+    url = (os.environ.get("DATABASE_URL") or "").lower()
+    if url.startswith("sqlite"):
+        return False
+    return True
 
 
 def _harness_from_seed_file(path) -> tuple[str, MissionHarness | None]:
@@ -107,6 +121,9 @@ def _seed_paths_by_mission_id() -> dict[str, Any]:
 
 
 def _load_index_from_db_fixed() -> HarnessIndex | None:
+    global _DB_HARNESS_DISABLED
+    if not _use_db_for_harness_index():
+        return None
     try:
         from app import models
         from app.core.db import SessionLocal
@@ -114,11 +131,14 @@ def _load_index_from_db_fixed() -> HarnessIndex | None:
         db = SessionLocal()
     except Exception as exc:  # noqa: BLE001
         logger.debug("Harness DB load skipped: %s", exc)
+        _DB_HARNESS_DISABLED = True
         return None
     index = HarnessIndex()
     seed_by_mid = _seed_paths_by_mission_id()
     try:
         rows = db.query(models.Mission).all()
+        if not rows:
+            return None
         for mission in rows:
             ec = mission.execution_config or {}
             raw = ec.get("harness")
@@ -140,6 +160,7 @@ def _load_index_from_db_fixed() -> HarnessIndex | None:
         return index
     except Exception as exc:  # noqa: BLE001
         logger.warning("Harness DB query failed: %s", exc)
+        _DB_HARNESS_DISABLED = True
         return None
     finally:
         db.close()
@@ -164,11 +185,12 @@ def _get_index(*, force: bool = False) -> HarnessIndex:
             and (now - _INDEX_LOADED_AT) < _TTL_SECONDS
         ):
             return _INDEX
-        index = _load_index_from_db_fixed()
-        if index is None or not index.by_mission:
-            index = _load_index_from_seeds_only()
+        db_index = _load_index_from_db_fixed()
+        if db_index is not None and db_index.by_mission:
+            _merge_seed_fallbacks(db_index)
+            index = db_index
         else:
-            _merge_seed_fallbacks(index)
+            index = _load_index_from_seeds_only()
         _derive_guest_routing(index)
         _INDEX = index
         _INDEX_LOADED_AT = now

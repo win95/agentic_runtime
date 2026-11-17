@@ -95,3 +95,21 @@ def iter_agent_seed_paths() -> list[pathlib.Path]:
     if not _SEEDS_AGENTS.is_dir():
         return []
     return sorted(_SEEDS_AGENTS.glob("*.yaml"))
+
+
+def guest_output_capabilities_from_seed_files() -> list[str]:
+    """Capabilities for guest reply tools — seed YAML only, never raises."""
+    caps: list[str] = []
+    seen: set[str] = set()
+    for path in iter_mission_seed_paths():
+        try:
+            harness = load_mission_harness_from_file(path)
+        except ValueError:
+            continue
+        if not harness.guest_output.register_reply_tools:
+            continue
+        cap = (harness.guest_output.capability or "").strip()
+        if cap and cap not in seen:
+            seen.add(cap)
+            caps.append(cap)
+    return caps

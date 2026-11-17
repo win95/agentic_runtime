@@ -62,11 +62,6 @@ class ToolRegistry:
         return self._tools.get(name)
 
     def list(self) -> list[ToolEntry]:
-        from runtime.tools.guest_channel_tools import (
-            ensure_guest_channel_tools_registered,
-        )
-
-        ensure_guest_channel_tools_registered()
         return sorted(self._tools.values(), key=lambda e: e.name)
 
     def check(self, tool_name: str, context: dict) -> bool:
