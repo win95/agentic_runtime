@@ -200,3 +200,296 @@ def subgraph(
         "nodes": nodes[:limit],
         "relationships": relationships[:limit],
     }
+
+
+# ----------------------------------------------------------------------
+# B5 — query API helpers (design §7, Query and Retrieval)
+# ----------------------------------------------------------------------
+
+#: Labels that hold ontology metadata, never instances — excluded
+#: from entity search so a query never returns a Class node.
+_METADATA_LABELS = ("OntologyClass", "ObjectProperty", "DataProperty")
+
+#: First meaningful keyword of a read-only Cypher statement (design
+#: §7: "chỉ đọc"). ``CALL`` is allowed as a first word only for
+#: non-APOC procedure calls — ``CALL apoc.*`` is banned by the
+#: whole-query scan below.
+_READ_ONLY_FIRST_KEYWORDS = frozenset(
+    {"MATCH", "WITH", "RETURN", "CALL", "UNWIND", "OPTIONAL"}
+)
+
+#: Whole-query banned words (matched as standalone words, \b...\b,
+#: case-insensitive, after stripping -- and /* */ comments). ``SET``
+#: also blocks ``SET`` inside a later clause of a MATCH... query.
+_BANNED_KEYWORDS = (
+    "MERGE",
+    "CREATE",
+    "DELETE",
+    "DETACH",
+    "SET",
+    "REMOVE",
+    "DROP",
+    "LOAD",
+)
+
+_LINE_COMMENT_RE = re.compile(r"--[^\n]*")
+_BLOCK_COMMENT_RE = re.compile(r"/\*.*?\*/", re.DOTALL)
+_FIRST_WORD_RE = re.compile(r"^\s*([A-Za-z]+)", re.IGNORECASE)
+
+
+def _strip_cypher_comments(cypher: str) -> str:
+    """Remove ``--`` line comments and ``/* */`` block comments.
+
+    The read-only scan runs on the stripped text so a banned word
+    inside a comment cannot trip (or hide) the guard. String
+    literals are NOT stripped: a banned word inside a string literal
+    (e.g. a property value ``"deleted"``) is still rejected — a
+    deliberate fail-closed choice for a read-only endpoint.
+    """
+    return _BLOCK_COMMENT_RE.sub(" ", _LINE_COMMENT_RE.sub(" ", cypher))
+
+
+def _assert_read_only_cypher(cypher: str) -> str:
+    """Guard for ``POST /ontology/query`` (design §7).
+
+    Raises ValueError unless (a) the first meaningful keyword is one
+    of MATCH / WITH / RETURN / CALL / UNWIND / OPTIONAL, and (b) no
+    banned keyword (MERGE, CREATE, DELETE, DETACH, SET, REMOVE, DROP,
+    LOAD) appears as a standalone word anywhere in the query, and no
+    ``CALL apoc.*`` appears. Returns the original query unchanged.
+    """
+    if not isinstance(cypher, str) or not cypher.strip():
+        raise ValueError("cypher must be a non-empty string")
+    stripped = _strip_cypher_comments(cypher)
+    match = _FIRST_WORD_RE.match(stripped)
+    first = match.group(1).upper() if match else ""
+    if first not in _READ_ONLY_FIRST_KEYWORDS:
+        raise ValueError(
+            f"read-only query must start with one of "
+            f"{sorted(_READ_ONLY_FIRST_KEYWORDS)}, got {first!r}"
+        )
+    for keyword in _BANNED_KEYWORDS:
+        if re.search(rf"\b{keyword}\b", stripped, re.IGNORECASE):
+            raise ValueError(f"read-only query must not contain {keyword}")
+    if re.search(r"\bCALL\s+apoc\.", stripped, re.IGNORECASE):
+        raise ValueError("read-only query must not call apoc.* procedures")
+    return cypher
+
+
+def _entity_row(row: dict[str, Any]) -> dict[str, Any] | None:
+    """Shape one ``(id, label, properties)`` row into an entity dict."""
+    entity_key = row.get("id")
+    if not isinstance(entity_key, str) or not entity_key:
+        return None
+    label = row.get("label")
+    entity_type = label if isinstance(label, str) and label else UNKNOWN_NODE_TYPE
+    props = row.get("properties")
+    properties = (
+        {k: v for k, v in dict(props).items() if k != "id"}
+        if isinstance(props, dict)
+        else {}
+    )
+    return {"entity_type": entity_type, "entity_key": entity_key, "properties": properties}
+
+
+def entities_by_class(
+    store: GraphStore,
+    class_id: str,
+    *,
+    include_subclasses: bool = True,
+    limit: int = 100,
+) -> list[dict]:
+    """Instances of ``class_id`` — plus its subclasses (R1) by default.
+
+    The subclass set comes from
+    :func:`ontology.reasoning.subclass_descendants` (BFS down
+    ``SUBCLASS_OF``, cycle-safe). One ``MATCH (n:Label)`` per class in
+    the set; rows are merged, sorted by entity key and cut to the
+    total ``limit`` so the result is deterministic.
+    """
+    from ontology.reasoning import subclass_descendants
+
+    label = _label(class_id)
+    limit = max(1, min(limit, 500))
+    classes = [label]
+    if include_subclasses:
+        classes.extend(
+            _label(child) for child in subclass_descendants(store, label)
+        )
+    found: list[dict] = []
+    for class_label in classes:
+        rows = store.run_query(
+            f"MATCH (n:{class_label}) "
+            "RETURN n.id AS id, labels(n)[0] AS label, "
+            "properties(n) AS properties ORDER BY n.id LIMIT $limit",
+            {"limit": limit},
+        )
+        for row in rows:
+            shaped = _entity_row(row)
+            if shaped is not None:
+                found.append(shaped)
+    found.sort(key=lambda item: item["entity_key"])
+    return found[:limit]
+
+
+def search_entities(
+    store: GraphStore,
+    query: str,
+    *,
+    limit: int = 50,
+) -> list[dict]:
+    """Find entities whose ``id`` or ``name`` contains ``query``.
+
+    Case-insensitive ``CONTAINS`` (``toLower`` on both sides), over
+    instance nodes only — ontology metadata nodes (OntologyClass /
+    ObjectProperty / DataProperty) are excluded. No Neo4j full-text
+    index is used (design §12 open question): this is a label scan
+    with a ``CONTAINS`` filter, fine for the demo-scale graph and to
+    be revisited (full-text index or gazetteer prefix) if the graph
+    grows. An empty/blank query returns [] instead of everything.
+    """
+    text = (query or "").strip()
+    if not text:
+        return []
+    limit = max(1, min(limit, 500))
+    exclusions = " AND ".join(f"NOT n:{label}" for label in _METADATA_LABELS)
+    rows = store.run_query(
+        "MATCH (n) WHERE " + exclusions + " AND "
+        "(toLower(n.id) CONTAINS toLower($query) "
+        "OR toLower(coalesce(n.name, '')) CONTAINS toLower($query)) "
+        "RETURN n.id AS id, labels(n)[0] AS label, "
+        "properties(n) AS properties ORDER BY n.id LIMIT $limit",
+        {"query": text, "limit": limit},
+    )
+    found: list[dict] = []
+    for row in rows:
+        shaped = _entity_row(row)
+        if shaped is not None:
+            found.append(shaped)
+    return found[:limit]
+
+
+def traverse(
+    store: GraphStore,
+    root_type: str,
+    root_key: str,
+    *,
+    depth: int = 2,
+    limit: int = 100,
+    rel_types: list[str] | None = None,
+) -> dict[str, Any]:
+    """Multi-hop traversal from a root, optionally filtered by relation type.
+
+    Same shape as :func:`subgraph` (``nodes`` + ``relationships``).
+    Without ``rel_types`` this is exactly :func:`subgraph`. With
+    ``rel_types`` it runs its own Cypher —
+    ``(a)-[r:T1|T2*1..depth]-(b)`` — so the filter applies to EVERY
+    hop of the path, not just the first: a node reachable only
+    through a filtered-out relationship is dropped with it (the
+    root node always stays). Filtering the ``neighbors`` output
+    instead would be wrong here: ``neighbors`` reports the FIRST
+    hop's type (``r[0]``) for a multi-hop row, so a second hop of a
+    filtered-out type would still look like an allowed one.
+    """
+    if rel_types is None:
+        return subgraph(root_type, root_key, depth=depth, limit=limit, store=store)
+    allowed = [_label(rel_type) for rel_type in rel_types]
+    label = _label(root_type)
+    depth = max(1, min(depth, 3))
+    limit = max(1, min(limit, 500))
+    rel_filter = "|".join(allowed)
+    cypher = (
+        f"MATCH (a:{label} {{id: $key}})-[r:{rel_filter}*1..{depth}]-(b) "
+        "WITH a, b, r[0] AS rel "
+        "RETURN DISTINCT a.id AS from_id, type(rel) AS rel_type, b.id AS to_id, "
+        "labels(b)[0] AS to_label LIMIT $limit"
+    )
+    rows = store.run_query(cypher, {"key": root_key, "limit": limit})
+    nodes: list[dict[str, Any]] = [{"id": root_key, "labels": [root_type]}]
+    seen = {root_key}
+    relationships: list[dict[str, Any]] = []
+    for row in rows:
+        to_id = row.get("to_id")
+        if to_id and to_id not in seen:
+            seen.add(to_id)
+            nodes.append(
+                {"id": to_id, "labels": [row.get("to_label") or UNKNOWN_NODE_TYPE]}
+            )
+        relationships.append(
+            {
+                "type": row.get("rel_type"),
+                "start": row.get("from_id") or root_key,
+                "end": to_id,
+            }
+        )
+    return {
+        "root_type": root_type,
+        "root_key": root_key,
+        "nodes": nodes[:limit],
+        "relationships": relationships[:limit],
+    }
+
+
+def list_derived_edges(
+    store: GraphStore,
+    *,
+    entity_type: str | None = None,
+    entity_key: str | None = None,
+    limit: int = 100,
+) -> list[dict]:
+    """Derived edges (``derived=true``, design §4.3).
+
+    Whole graph when no entity is given; when ``entity_key`` is
+    given, only edges touching that entity (either endpoint). When
+    ``entity_type`` is also given, the entity endpoint must carry
+    that label. Each row carries ``rule`` and ``base_ref`` so the
+    edge traces back to its base edge.
+    """
+    limit = max(1, min(limit, 500))
+    params: dict[str, Any] = {"limit": limit}
+    if entity_key is not None:
+        if not isinstance(entity_key, str) or not entity_key:
+            raise ValueError("Invalid (empty) entity_key")
+        where = "WHERE (a.id = $entity_key OR b.id = $entity_key)"
+        params["entity_key"] = entity_key
+        if entity_type is not None:
+            label = _label(entity_type)
+            where += (
+                " AND (a.id = $entity_key AND $label = labels(a)[0]"
+                " OR b.id = $entity_key AND $label = labels(b)[0])"
+            )
+            params["label"] = label
+        cypher = (
+            "MATCH (a)-[r {derived: true}]->(b) " + where + " "
+            "RETURN a.id AS source_key, labels(a)[0] AS source_type, "
+            "type(r) AS rel_type, b.id AS target_key, "
+            "labels(b)[0] AS target_type, r.rule AS rule, "
+            "r.base_ref AS base_ref ORDER BY source_key, rel_type, target_key "
+            "LIMIT $limit"
+        )
+    else:
+        if entity_type is not None:
+            raise ValueError(
+                "entity_type without entity_key is not supported for derived edges"
+            )
+        cypher = (
+            "MATCH (a)-[r {derived: true}]->(b) "
+            "RETURN a.id AS source_key, labels(a)[0] AS source_type, "
+            "type(r) AS rel_type, b.id AS target_key, "
+            "labels(b)[0] AS target_type, r.rule AS rule, "
+            "r.base_ref AS base_ref ORDER BY source_key, rel_type, target_key "
+            "LIMIT $limit"
+        )
+    rows = store.run_query(cypher, params)
+    return [
+        {
+            "source_type": row.get("source_type"),
+            "source_key": row.get("source_key"),
+            "rel_type": row.get("rel_type"),
+            "target_type": row.get("target_type"),
+            "target_key": row.get("target_key"),
+            "rule": row.get("rule"),
+            "base_ref": row.get("base_ref"),
+        }
+        for row in rows
+    ]

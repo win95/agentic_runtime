@@ -64,7 +64,6 @@ from ontology.models import (  # noqa: E402
     OntologyEntity,
     OntologyProjectionState,
     OntologyRelationship,
-    OntologyVersion,
 )
 from ontology.projection.engine import drain_pending_projections  # noqa: E402
 from ontology.projection.provider import get_graph_store  # noqa: E402
@@ -684,9 +683,8 @@ def cleanup_all(report: Report, db, cleanup: dict) -> None:
             db.query(OntologyProjectionState).filter(
                 OntologyProjectionState.subject_ref.in_(refs)
             ).delete(synchronize_session=False)
-            db.query(OntologyVersion).filter(
-                OntologyVersion.subject_ref.in_(refs)
-            ).delete(synchronize_session=False)
+            # No OntologyVersion delete: the versions table is gone
+            # (L1 state-only, design 2026-11-17 §3.2).
             db.query(OntologyRelationship).filter(
                 OntologyRelationship.relationship_type == "DOCUMENTED_BY",
                 OntologyRelationship.target_type == "Document",

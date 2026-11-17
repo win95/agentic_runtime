@@ -69,7 +69,9 @@ class EntityStatus(str, Enum):
 
 
 class ChangeType(str, Enum):
-    """What a canonical write did (``OntologyVersion.change_type``).
+    """What a canonical write did (stored on
+    ``OntologyProjectionState.change_type`` and reported on
+    ``CanonicalWriteResult.change_type``).
 
     ``ARCHIVED``/``DELETED`` double as change types: a write that
     moves a row to an inactive status reports that status as its

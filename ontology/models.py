@@ -1,11 +1,19 @@
-"""Canonical ontology ORM — shares app.models.Base for Alembic."""
+"""Canonical ontology ORM — shares app.models.Base for Alembic.
+
+L1 is state-only (design 2026-11-17 §3): the tables keep identity +
+state (status, version, trace/provenance, projection state) and NO
+object data. ``properties`` and ``state_hash`` are gone (object data
+lives on Neo4j; change detection compares against the Neo4j node),
+and the ``ontology_versions`` snapshot table is gone entirely (tran's
+decision 2 — audit of WHAT-changed is lost by design).
+"""
 
 from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
 
-from sqlalchemy import JSON, DateTime, Index, Integer, String, Text, UniqueConstraint, text
+from sqlalchemy import DateTime, Index, Integer, String, Text, UniqueConstraint
 
 from app.models import Base, Mapped, mapped_column
 
@@ -24,8 +32,6 @@ class OntologyEntity(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
     entity_type: Mapped[str] = mapped_column(String(64), nullable=False)
     entity_key: Mapped[str] = mapped_column(String(200), nullable=False)
-    properties: Mapped[dict | None] = mapped_column(JSON, default=None)
-    state_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
     trace_id: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -48,8 +54,6 @@ class OntologyRelationship(Base):
     source_key: Mapped[str] = mapped_column(String(200), nullable=False)
     target_type: Mapped[str] = mapped_column(String(64), nullable=False)
     target_key: Mapped[str] = mapped_column(String(200), nullable=False)
-    properties: Mapped[dict | None] = mapped_column(JSON, default=None)
-    state_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
     trace_id: Mapped[str] = mapped_column(String(100), nullable=False)
@@ -68,34 +72,6 @@ class OntologyRelationship(Base):
         ),
         Index("ix_ontology_relationships_source", "source_type", "source_key"),
         Index("ix_ontology_relationships_target", "target_type", "target_key"),
-    )
-
-
-class OntologyVersion(Base):
-    __tablename__ = "ontology_versions"
-
-    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_new_id)
-    subject_kind: Mapped[str] = mapped_column(String(16), nullable=False)
-    subject_ref: Mapped[str] = mapped_column(String(300), nullable=False)
-    version: Mapped[int] = mapped_column(Integer, nullable=False)
-    change_type: Mapped[str] = mapped_column(String(16), nullable=False)
-    snapshot: Mapped[dict | None] = mapped_column(JSON, default=None)
-    trace_id: Mapped[str] = mapped_column(String(100), nullable=False)
-    source_event_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    transaction_time: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
-
-    __table_args__ = (
-        UniqueConstraint(
-            "subject_kind",
-            "subject_ref",
-            "version",
-            name="uq_ontology_versions_ref_version",
-        ),
-        Index(
-            "ix_ontology_versions_subject_version",
-            "subject_ref",
-            text("version DESC"),
-        ),
     )
 
 

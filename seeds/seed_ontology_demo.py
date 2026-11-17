@@ -14,7 +14,13 @@ from app.core.db import SessionLocal
 from ontology.canonical.provenance import WriteProvenance
 from ontology.canonical.repository import CanonicalOntologyRepository
 from ontology.canonical.write_service import OntologyWriteService
+from ontology.metadata.store import (
+    create_class,
+    create_data_property,
+    create_object_property,
+)
 from ontology.projection.engine import drain_pending_projections
+from ontology.projection.provider import get_graph_store
 from seeds.demo_data import ASSET_ID, RELATIONS
 
 logger = logging.getLogger(__name__)
@@ -126,12 +132,99 @@ ENTITY_PROPERTIES = {
 ENTITY_STATUS = {(t, k): s for t, k, _, s in EXTRA_ENTITIES}
 
 
+# --- Ontology metadata (design §4.1, B2) --------------------------------
+# Domain/range taken from the actual demo data, not from the design
+# doc's prose:
+# - PART_OF / HAS_COMPONENT / DOCUMENTED_BY: direction and endpoints
+#   straight from RELATIONS in seeds/demo_data.py
+#   (Asset -PART_OF-> Building, Asset -HAS_COMPONENT-> Component,
+#   Asset -DOCUMENTED_BY-> Document — the same direction ingest's
+#   documented_by_relations writes: (Asset, asset_id) -> (Document, doc id)).
+# - LOCATED_IN: no demo relation writes it (neither seed nor ingest);
+#   Asset -> Building is the reading retrieval assumes ("{s} is
+#   located in {o}", runtime/retrieval_context.py). No inverse.
+# - RELATED_TO: unconstrained both ends (domain/range "any").
+# Data properties: every key the demo entities actually carry,
+# datatype inferred from the sample values (floors is the only int;
+# installed / last_pad_change are date *strings*). The user "status"
+# key on motor-M0 is NOT a data property — it is a system key, exempt
+# from validation (ontology.metadata.validate.SYSTEM_PROPERTY_KEYS).
+METADATA_CLASSES = [
+    ("Asset", "Asset", "Physical asset, e.g. a passenger elevator"),
+    ("Building", "Building", "A building containing assets"),
+    ("Component", "Component", "A component of an asset"),
+    ("Document", "Document", "A technical document"),
+]
+
+METADATA_OBJECT_PROPERTIES = [
+    # (id, domain, range, inverse_of)
+    ("PART_OF", "Asset", "Building", "HAS_COMPONENT"),
+    ("HAS_COMPONENT", "Asset", "Component", "PART_OF"),
+    ("LOCATED_IN", "Asset", "Building", None),
+    ("RELATED_TO", "any", "any", None),
+    ("DOCUMENTED_BY", "Asset", "Document", None),
+]
+
+METADATA_DATA_PROPERTIES = [
+    # (id, domain, datatype, required)
+    ("name", "Asset", "str", False),
+    ("building_id", "Asset", "str", False),
+    ("asset_class", "Asset", "str", False),
+    ("name", "Building", "str", False),
+    ("address", "Building", "str", False),
+    ("floors", "Building", "int", False),
+    ("asset_class", "Building", "str", False),
+    ("name", "Component", "str", False),
+    ("component_class", "Component", "str", False),
+    ("manufacturer", "Component", "str", False),
+    ("installed", "Component", "str", False),
+    ("location", "Component", "str", False),
+    ("firmware", "Component", "str", False),
+    ("last_pad_change", "Component", "str", False),
+    ("title", "Document", "str", False),
+    ("category", "Document", "str", False),
+]
+
+
+def seed_ontology_metadata(store) -> dict:
+    """Seed the metadata nodes (idempotent MERGE — re-running changes
+    nothing). Returns counts per node kind."""
+    for class_id, name, description in METADATA_CLASSES:
+        create_class(store, class_id=class_id, name=name, description=description)
+    for property_id, domain, range_, inverse_of in METADATA_OBJECT_PROPERTIES:
+        create_object_property(
+            store,
+            property_id=property_id,
+            domain=domain,
+            range=range_,
+            inverse_of=inverse_of,
+        )
+    for property_id, domain, datatype, required in METADATA_DATA_PROPERTIES:
+        create_data_property(
+            store,
+            property_id=property_id,
+            domain=domain,
+            datatype=datatype,
+            required=required,
+        )
+    return {
+        "classes": len(METADATA_CLASSES),
+        "object_properties": len(METADATA_OBJECT_PROPERTIES),
+        "data_properties": len(METADATA_DATA_PROPERTIES),
+    }
+
+
 def seed_ontology_demo(*, trace_id: str = "seed-ontology-demo") -> dict:
     db = SessionLocal()
     try:
         repo = CanonicalOntologyRepository(db)
         writer = OntologyWriteService(repo)
         prov = WriteProvenance(trace_id=trace_id)
+
+        # Metadata first (idempotent): on a real store the instance
+        # writes below then validate against it; on a fake store the
+        # metadata calls no-op and validation falls back to v1.
+        metadata = seed_ontology_metadata(get_graph_store())
 
         written: set[tuple[str, str]] = set()
 
@@ -168,15 +261,17 @@ def seed_ontology_demo(*, trace_id: str = "seed-ontology-demo") -> dict:
         projection = drain_pending_projections(db)
         db.commit()
         logger.info(
-            "Ontology seed: entities=%s rels=%s projection=%s",
+            "Ontology seed: entities=%s rels=%s projection=%s metadata=%s",
             len(written),
             relations_written,
             projection,
+            metadata,
         )
         return {
             "entities": len(written),
             "relations": relations_written,
             "projection": projection,
+            "metadata": metadata,
         }
     finally:
         db.close()

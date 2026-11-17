@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
 
 
 def entity_ref(entity_type: str, entity_key: str) -> str:
@@ -34,22 +33,23 @@ class CanonicalWriteResult:
 
 @dataclass
 class EntityRecord:
+    """L1 state row shape (state only — no object properties and no
+    state_hash anymore; the object lives on Neo4j, design §3.1)."""
+
     entity_type: str
     entity_key: str
-    properties: dict[str, Any] | None
     status: str
     version: int
-    state_hash: str
 
 
 @dataclass
 class RelationshipRecord:
+    """L1 state row shape for a relationship (as EntityRecord)."""
+
     relationship_type: str
     source_type: str
     source_key: str
     target_type: str
     target_key: str
-    properties: dict[str, Any] | None
     status: str
     version: int
-    state_hash: str

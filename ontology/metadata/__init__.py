@@ -1,0 +1,67 @@
+"""Ontology metadata (design §4.1, B2): CRUD + cache over Neo4j,
+and write-time validation against the metadata.
+"""
+
+from __future__ import annotations
+
+from ontology.metadata.store import (
+    ANY_CLASS,
+    DATATYPE_NAMES,
+    add_subclass,
+    clear_metadata_cache,
+    create_class,
+    create_data_property,
+    create_object_property,
+    delete_class,
+    delete_data_property,
+    delete_object_property,
+    get_class,
+    get_data_property,
+    get_metadata,
+    get_object_property,
+    invalidate_metadata_cache,
+    list_classes,
+    list_data_properties,
+    list_object_properties,
+    remove_subclass,
+    update_class,
+    update_data_property,
+    update_object_property,
+)
+from ontology.metadata.validate import (
+    SYSTEM_PROPERTY_KEYS,
+    default_entity_validator,
+    default_relationship_validator,
+    validate_entity,
+    validate_relationship,
+)
+
+__all__ = [
+    "ANY_CLASS",
+    "DATATYPE_NAMES",
+    "SYSTEM_PROPERTY_KEYS",
+    "add_subclass",
+    "clear_metadata_cache",
+    "create_class",
+    "create_data_property",
+    "create_object_property",
+    "default_entity_validator",
+    "default_relationship_validator",
+    "delete_class",
+    "delete_data_property",
+    "delete_object_property",
+    "get_class",
+    "get_data_property",
+    "get_metadata",
+    "get_object_property",
+    "invalidate_metadata_cache",
+    "list_classes",
+    "list_data_properties",
+    "list_object_properties",
+    "remove_subclass",
+    "update_class",
+    "update_data_property",
+    "update_object_property",
+    "validate_entity",
+    "validate_relationship",
+]

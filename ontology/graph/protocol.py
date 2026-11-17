@@ -16,6 +16,17 @@ class GraphStore(Protocol):
 
     def node_exists(self, label: str, node_id: str) -> bool: ...
 
+    def get_node(self, label: str, node_id: str) -> dict[str, Any] | None: ...
+
+    def get_relationship(
+        self,
+        source_label: str,
+        source_id: str,
+        rel_type: str,
+        target_label: str,
+        target_id: str,
+    ) -> dict[str, Any] | None: ...
+
     def delete_node(self, label: str, node_id: str) -> None: ...
 
     def merge_relationship(

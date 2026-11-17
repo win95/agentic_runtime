@@ -87,7 +87,6 @@ from ontology.models import (  # noqa: E402
     OntologyEntity,
     OntologyProjectionState,
     OntologyRelationship,
-    OntologyVersion,
 )
 from ontology.projection.engine import drain_pending_projections  # noqa: E402
 from ontology.projection.provider import get_graph_store  # noqa: E402
@@ -169,7 +168,10 @@ def _snapshot(db, store) -> dict:
         "ingest_quarantine": db.query(IngestQuarantine).count(),
         "ontology_entities": db.query(OntologyEntity).count(),
         "ontology_relationships": db.query(OntologyRelationship).count(),
-        "ontology_versions": db.query(OntologyVersion).count(),
+        # No "ontology_versions" total: the versions table is gone
+        # (L1 state-only, design 2026-11-17 §3.2) — version history is
+        # the state rows' ``version`` column, checked per subject by
+        # _state_version_sum below.
         "projection_state": db.query(OntologyProjectionState).count(),
         "qdrant_points": _qdrant_count(),
         "neo4j_nodes": nodes,
@@ -177,14 +179,49 @@ def _snapshot(db, store) -> dict:
     }
 
 
-def _version_count(db, refs: list[str]) -> int:
+def _state_version_sum(db, refs: list[str]) -> int:
+    """Sum of the L1 state-row ``version`` column over ``refs``.
+
+    Replaces the old ``_version_count`` (which counted
+    ``ontology_versions`` rows): with L1 state-only there is no
+    version table, so replay-safety is checked on the state rows
+    themselves — a replay must not raise the sum, and after cleanup
+    (state rows deleted) the sum is 0. ``refs`` are ``entity:`` /
+    ``rel:`` subject refs (see ``ontology.canonical.types``).
+    """
     if not refs:
         return 0
-    return (
-        db.query(OntologyVersion)
-        .filter(OntologyVersion.subject_ref.in_(refs))
-        .count()
-    )
+    total = 0
+    for ref in refs:
+        parts = ref.split(":")
+        if parts[0] == "entity" and len(parts) == 3:
+            row = (
+                db.query(OntologyEntity)
+                .filter_by(entity_type=parts[1], entity_key=parts[2])
+                .first()
+            )
+        elif parts[0] == "rel" and len(parts) == 6:
+            row = (
+                db.query(OntologyRelationship)
+                .filter_by(
+                    relationship_type=parts[1],
+                    source_type=parts[2],
+                    source_key=parts[3],
+                    target_type=parts[4],
+                    target_key=parts[5],
+                )
+                .first()
+            )
+        else:
+            continue
+        if row is not None:
+            total += row.version
+    return total
+
+
+def _version_count(db, refs: list[str]) -> int:
+    """Backward-compatible name for the state-version sum."""
+    return _state_version_sum(db, refs)
 
 
 def _refs_for(cleanup: dict) -> list[str]:
@@ -1107,9 +1144,8 @@ def cleanup_all(report: Report, db, store, cleanup: dict) -> None:
             db.query(OntologyProjectionState).filter(
                 OntologyProjectionState.subject_ref.in_(refs)
             ).delete(synchronize_session=False)
-            db.query(OntologyVersion).filter(
-                OntologyVersion.subject_ref.in_(refs)
-            ).delete(synchronize_session=False)
+            # No OntologyVersion delete: the versions table is gone
+            # (L1 state-only, design 2026-11-17 §3.2).
             for entity_type, entity_key in cleanup["entities"]:
                 db.query(OntologyEntity).filter_by(
                     entity_type=entity_type, entity_key=entity_key,

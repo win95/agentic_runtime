@@ -68,10 +68,39 @@ class Neo4jGraphStore:
             logger.warning("Neo4j health check failed: %s", exc)
             return False
 
-    def run_query(self, cypher: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    def run_query(
+        self,
+        cypher: str,
+        params: dict[str, Any] | None = None,
+        *,
+        timeout: float | None = None,
+    ) -> list[dict[str, Any]]:
+        """Run one Cypher query, optionally with a transaction timeout.
+
+        ``timeout`` (seconds) is passed through to the Neo4j 5 driver
+        as ``session.run(..., timeout=timeout)`` — the server
+        terminates a transaction that runs longer. When ``timeout``
+        is None the call is exactly as before. If the driver in use
+        does not accept the keyword (older driver / recording stub),
+        the query is retried once without it and a warning is logged
+        — the timeout is a guard, never a reason to fail a read. For
+        a server-side default that applies to every transaction
+        (including ones that never pass a timeout), set
+        ``db.transaction.timeout`` in ``neo4j.conf`` instead.
+        """
         params = params or {}
         with self._driver.session(database=self._database) as session:
-            result = session.run(cypher, params)
+            if timeout is None:
+                result = session.run(cypher, params)
+            else:
+                try:
+                    result = session.run(cypher, params, timeout=timeout)
+                except TypeError:
+                    logger.warning(
+                        "Neo4j driver does not accept run(timeout=...); "
+                        "retrying without a timeout"
+                    )
+                    result = session.run(cypher, params)
             return [dict(record) for record in result]
 
     def merge_node(self, label: str, node_id: str, properties: dict[str, Any]) -> None:
@@ -90,6 +119,46 @@ class Neo4jGraphStore:
             {"id": node_id},
         )
         return len(rows) > 0
+
+    def get_node(self, label: str, node_id: str) -> dict[str, Any] | None:
+        """All properties of one node (``None`` when it does not exist).
+
+        The L1 state-only read/write paths compare against this: the
+        node carries the object (user properties + ``status`` +
+        ``version``), L1 carries only state.
+        """
+        label = _assert_identifier(label, "label")
+        rows = self.run_query(
+            f"MATCH (n:{label} {{id: $id}}) RETURN properties(n) AS props",
+            {"id": node_id},
+        )
+        if not rows:
+            return None
+        return dict(rows[0].get("props") or {})
+
+    def get_relationship(
+        self,
+        source_label: str,
+        source_id: str,
+        rel_type: str,
+        target_label: str,
+        target_id: str,
+    ) -> dict[str, Any] | None:
+        """All properties of one edge (``None`` when it does not exist)."""
+        source_label = _assert_identifier(source_label, "source_label")
+        target_label = _assert_identifier(target_label, "target_label")
+        rel_type = _assert_identifier(rel_type, "rel_type")
+        cypher = (
+            f"MATCH (a:{source_label} {{id: $source_id}})-[r:{rel_type}]->"
+            f"(b:{target_label} {{id: $target_id}}) "
+            "RETURN properties(r) AS props"
+        )
+        rows = self.run_query(
+            cypher, {"source_id": source_id, "target_id": target_id}
+        )
+        if not rows:
+            return None
+        return dict(rows[0].get("props") or {})
 
     def delete_node(self, label: str, node_id: str) -> None:
         label = _assert_identifier(label, "label")

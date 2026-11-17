@@ -1,10 +1,14 @@
-"""Sync canonical ontology repository."""
+"""Sync canonical ontology repository — state only (design §3).
+
+L1 keeps no object data: this repository only reads/writes state
+rows (status, version, trace/provenance) and the projection-state
+(outbox) rows. Object reads/writes go through the Neo4j store.
+"""
 
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Any
 
 from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
@@ -15,7 +19,6 @@ from ontology.models import (
     OntologyEntity,
     OntologyProjectionState,
     OntologyRelationship,
-    OntologyVersion,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,13 +47,22 @@ class CanonicalOntologyRepository:
         )
         return self._session.scalars(stmt).first()
 
-    def list_entities_by_type(self, entity_type: str, *, limit: int = 200) -> list[OntologyEntity]:
-        stmt = (
-            select(OntologyEntity)
-            .where(OntologyEntity.entity_type == entity_type)
-            .limit(limit)
+    def get_entity_by_source_event_id(
+        self, entity_type: str, entity_key: str, source_event_id: str
+    ) -> OntologyEntity | None:
+        """The state row for THIS entity whose last write carried
+        ``source_event_id`` — the replay lookup (design §5 step 2).
+
+        Scoped to the subject on purpose: callers share one event id
+        across several subjects (ingest stamps one id on both endpoints
+        and the edge), so a global lookup could return the wrong row.
+        """
+        stmt = select(OntologyEntity).where(
+            OntologyEntity.entity_type == entity_type,
+            OntologyEntity.entity_key == entity_key,
+            OntologyEntity.source_event_id == source_event_id,
         )
-        return list(self._session.scalars(stmt).all())
+        return self._session.scalars(stmt).first()
 
     def get_relationship(
         self,
@@ -69,6 +81,28 @@ class CanonicalOntologyRepository:
         )
         return self._session.scalars(stmt).first()
 
+    def get_relationship_by_source_event_id(
+        self,
+        relationship_type: str,
+        source_type: str,
+        source_key: str,
+        target_type: str,
+        target_key: str,
+        source_event_id: str,
+    ) -> OntologyRelationship | None:
+        """The state row for THIS edge whose last write carried
+        ``source_event_id`` — the replay lookup (design §5 step 2),
+        scoped to the subject like ``get_entity_by_source_event_id``."""
+        stmt = select(OntologyRelationship).where(
+            OntologyRelationship.relationship_type == relationship_type,
+            OntologyRelationship.source_type == source_type,
+            OntologyRelationship.source_key == source_key,
+            OntologyRelationship.target_type == target_type,
+            OntologyRelationship.target_key == target_key,
+            OntologyRelationship.source_event_id == source_event_id,
+        )
+        return self._session.scalars(stmt).first()
+
     def save_entity(self, row: OntologyEntity) -> OntologyEntity:
         self._session.add(row)
         self._session.flush()
@@ -78,43 +112,6 @@ class CanonicalOntologyRepository:
         self._session.add(row)
         self._session.flush()
         return row
-
-    def get_latest_version(self, subject_ref: str) -> tuple[int, dict[str, Any]] | None:
-        stmt = (
-            select(OntologyVersion)
-            .where(OntologyVersion.subject_ref == subject_ref)
-            .order_by(OntologyVersion.version.desc())
-            .limit(1)
-        )
-        row = self._session.scalars(stmt).first()
-        if row is None:
-            return None
-        return row.version, row.snapshot or {}
-
-    def append_version(
-        self,
-        *,
-        subject_kind: str,
-        subject_ref: str,
-        version: int,
-        change_type: str | ChangeType,
-        snapshot: dict[str, Any],
-        trace_id: str,
-        source_event_id: str | None,
-    ) -> None:
-        self._session.add(
-            OntologyVersion(
-                subject_kind=subject_kind,
-                subject_ref=subject_ref,
-                version=version,
-                change_type=change_type,
-                snapshot=snapshot,
-                trace_id=trace_id,
-                source_event_id=source_event_id,
-                transaction_time=_utcnow(),
-            )
-        )
-        self._session.flush()
 
     def upsert_projection_pending(
         self,

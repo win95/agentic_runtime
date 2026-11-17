@@ -1,4 +1,21 @@
-"""ProjectionEngine — drain pending rows from ontology_projection_state."""
+"""ProjectionEngine — drain pending rows from ontology_projection_state.
+
+The drain is a STATE RECONCILER now (design §5.4), not a projection:
+L1 holds no object data, so no row carries a payload to copy. Each
+outbox row is a state-sync intent — "subject (type, key) is at
+version V, status S" — and the drain converges the Neo4j object to
+that state:
+
+- L1 active + object present with drifted status/version → SET them.
+- L1 archived/deleted + object present → delete the object.
+- L1 active + object missing → UNRECOVERABLE: L1 cannot rebuild the
+  object, so the row goes dead at once (no retry) with last_error +
+  a warning (operator restores from the Neo4j backup).
+- A missing L1 state row (orphaned intent) → drop the object, mark done.
+- An active edge whose endpoint is gone from L1 is invalid, not
+  drifted: drop the edge and mark done (the old "endpoint gone"
+  rule, kept).
+"""
 
 from __future__ import annotations
 
@@ -12,6 +29,7 @@ from ontology.canonical.repository import CanonicalOntologyRepository
 from ontology.canonical.schema import ChangeType, EntityStatus
 from ontology.graph.protocol import GraphStore
 from ontology.models import OntologyProjectionState
+from ontology.projection.handlers import UnrecoverableDriftError
 from ontology.projection.handlers.entity import project_entity
 from ontology.projection.handlers.relationship import project_relationship
 
@@ -96,23 +114,16 @@ class ProjectionEngine:
             etype, ekey = _parse_entity_ref(row.subject_ref)
             entity = self._repo.get_entity(etype, ekey)
             if entity is None:
+                # No L1 state at all: orphaned intent — drop the node.
                 store.delete_node(etype, ekey)
                 self._mark_done(row, row.canonical_version)
                 return
-            props = dict(entity.properties or {})
-            props.update(
-                {
-                    "status": entity.status,
-                    "trace_id": entity.trace_id,
-                    "canonical_version": entity.version,
-                }
-            )
             project_entity(
                 store,
                 entity_type=entity.entity_type,
                 entity_key=entity.entity_key,
-                properties=props,
                 status=entity.status,
+                version=entity.version,
                 change_type=change_type,
             )
             self._mark_done(row, entity.version)
@@ -135,51 +146,44 @@ class ProjectionEngine:
                 source_key=rel.source_key,
                 target_type=rel.target_type,
                 target_key=rel.target_key,
-                properties=rel.properties,
                 status=rel.status,
+                version=rel.version,
                 change_type=change_type,
             )
             self._mark_done(row, rel.version)
             return
-        # Active edge: both endpoints must already exist in the graph —
-        # merge_relationship never creates endpoint stubs.
-        missing = [
-            (etype, ekey)
-            for (etype, ekey) in ((st, sk), (tt, tk))
-            if not store.node_exists(etype, ekey)
-        ]
-        if missing:
+        # Active edge: is it on the graph?
+        edge = store.get_relationship(st, sk, rtype, tt, tk)
+        if edge is None:
             gone = []
-            for endpoint_type, endpoint_key in missing:
+            for endpoint_type, endpoint_key in ((st, sk), (tt, tk)):
                 endpoint = self._repo.get_entity(endpoint_type, endpoint_key)
                 if endpoint is None or endpoint.status != EntityStatus.ACTIVE:
                     gone.append((endpoint_type, endpoint_key))
             if gone:
-                # Endpoint legitimately gone from canonical: the edge is
-                # invalid — drop it from the graph and mark the row done.
+                # Endpoint legitimately gone from canonical: the edge
+                # is invalid — drop it from the graph and mark the row
+                # done. (The write service never creates such an edge
+                # on Neo4j; this covers edges the old projection left
+                # behind and edges whose endpoint was deleted after
+                # the edge was written.)
                 logger.warning(
-                    "Projection dropping relationship %s: endpoint(s) gone from canonical: %s",
+                    "Reconciler dropping relationship %s: endpoint(s) gone "
+                    "from canonical: %s",
                     row.subject_ref,
                     ", ".join(f"{t}:{k}" for t, k in gone),
                 )
                 store.delete_relationship(st, sk, rtype, tt, tk)
                 self._mark_done(row, rel.version)
                 return
-            # Endpoint active in canonical but not yet projected: fail
-            # the row so the drain retries it (its own pending row will
-            # project the endpoint first).
-            raise RuntimeError(
-                "Relationship endpoint(s) not yet projected for "
-                f"{row.subject_ref}: " + ", ".join(f"{t}:{k}" for t, k in missing)
+            # Endpoints are fine — the edge itself is lost. L1 cannot
+            # rebuild it (no object data), so this is unrecoverable.
+            raise UnrecoverableDriftError(
+                f"Relationship {row.subject_ref} is active in L1 "
+                f"(version {rel.version}) but missing on Neo4j; it "
+                f"cannot be recreated from L1 state — restore from "
+                f"the Neo4j backup"
             )
-        props = dict(rel.properties or {})
-        props.update(
-            {
-                "status": rel.status,
-                "trace_id": rel.trace_id,
-                "canonical_version": rel.version,
-            }
-        )
         project_relationship(
             store,
             relationship_type=rel.relationship_type,
@@ -187,8 +191,8 @@ class ProjectionEngine:
             source_key=rel.source_key,
             target_type=rel.target_type,
             target_key=rel.target_key,
-            properties=props,
             status=rel.status,
+            version=rel.version,
             change_type=change_type,
         )
         self._mark_done(row, rel.version)
@@ -224,6 +228,17 @@ class ProjectionEngine:
             try:
                 self.project_one(row)
                 processed += 1
+            except UnrecoverableDriftError as exc:
+                # Missing object, L1 cannot rebuild it: dead at once
+                # (retrying cannot heal this), with last_error + alert.
+                errors += 1
+                dead += 1
+                logger.warning(
+                    "Projection unrecoverable drift for %s: %s — marking dead",
+                    row.subject_ref,
+                    exc,
+                )
+                self._repo.mark_projection_dead(row, str(exc))
             except Exception as exc:  # noqa: BLE001
                 errors += 1
                 logger.exception("Projection failed for %s", row.subject_ref)

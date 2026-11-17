@@ -258,7 +258,126 @@ class OntologyEntityRead(BaseModel):
     properties: dict[str, Any] = Field(default_factory=dict)
     status: str
     version: int
-    state_hash: str | None = None
+
+
+class OntologyEntityCreate(BaseModel):
+    entity_type: str
+    entity_key: str
+    properties: dict[str, Any] = Field(default_factory=dict)
+
+
+class OntologyEntityUpdate(BaseModel):
+    """PATCH replaces the entity's properties wholesale (same
+    semantics as ``write_entity`` with an explicit dict — a missing
+    key is removed, an empty dict clears all properties)."""
+
+    properties: dict[str, Any] = Field(default_factory=dict)
+
+
+class OntologyEntityValidate(BaseModel):
+    properties: dict[str, Any] | None = None
+
+
+class OntologyValidateResult(BaseModel):
+    valid: bool = True
+    entity_type: str
+    entity_key: str
+
+
+class OntologyRelationshipCreate(BaseModel):
+    relationship_type: str
+    source_type: str
+    source_key: str
+    target_type: str
+    target_key: str
+    properties: dict[str, Any] | None = None
+
+
+class OntologyWriteResult(BaseModel):
+    """One canonical write, as reported by the instance CRUD
+    endpoints. ``ref`` is the ``CanonicalWriteResult.subject_ref``;
+    ``changed`` mirrors ``applied`` (the task's API shape names the
+    flag ``changed``)."""
+
+    ref: str
+    version: int
+    change_type: str
+    applied: bool
+    changed: bool
+    replayed: bool = False
+
+
+class OntologyClassCreate(BaseModel):
+    id: str
+    name: str
+    description: str | None = None
+
+
+class OntologyClassRead(BaseModel):
+    id: str
+    name: str
+    description: str | None = None
+
+
+class OntologyClassUpdate(BaseModel):
+    name: str | None = None
+    description: str | None = None
+
+
+class OntologySubclassCreate(BaseModel):
+    parent_id: str
+
+
+class OntologySubclassRead(BaseModel):
+    child_id: str
+    parent_id: str
+
+
+class OntologyObjectPropertyCreate(BaseModel):
+    id: str
+    domain: str
+    range: str
+    inverse_of: str | None = None
+
+
+class OntologyObjectPropertyRead(BaseModel):
+    id: str
+    # Nullable: the /ontology/schema v1 fallback has no domain/range
+    # definitions to report (only the relation id + inverse).
+    domain: str | None = None
+    range: str | None = None
+    inverse_of: str | None = None
+
+
+class OntologyObjectPropertyUpdate(BaseModel):
+    domain: str | None = None
+    range: str | None = None
+    inverse_of: str | None = None
+
+
+class OntologyDataPropertyCreate(BaseModel):
+    id: str
+    domain: str
+    datatype: str
+    required: bool = False
+
+
+class OntologyDataPropertyRead(BaseModel):
+    id: str
+    domain: str
+    datatype: str
+    required: bool = False
+
+
+class OntologyDataPropertyUpdate(BaseModel):
+    """PATCH a data property. ``domain`` narrows the update to the
+    definition for that class (a key defined for several classes
+    updates every definition when omitted); only ``datatype`` /
+    ``required`` change."""
+
+    domain: str | None = None
+    datatype: str | None = None
+    required: bool | None = None
 
 
 class EntityRelationshipRead(BaseModel):
@@ -296,3 +415,77 @@ class ProjectionDrainResult(BaseModel):
     # waiting, and terminal dead rows needing a manual fix.
     pending: int = 0
     dead_total: int = 0
+
+
+# --- Ontology query API (B5, design §7 Query and Retrieval) ---
+class CypherQueryRequest(BaseModel):
+    """POST /ontology/query body. Read-only: the router rejects any
+    write keyword before the query reaches Neo4j. ``timeout_seconds``
+    is a per-query transaction timeout (server terminates the
+    transaction when exceeded); None means the endpoint default
+    (30 s)."""
+
+    cypher: str
+    params: dict[str, Any] = Field(default_factory=dict)
+    limit: int = 100
+    timeout_seconds: float | None = None
+
+
+class CypherQueryResponse(BaseModel):
+    columns: list[str] = Field(default_factory=list)
+    rows: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class OntologySchemaConstraintRead(BaseModel):
+    name: str | None = None
+    labels: list[str] = Field(default_factory=list)
+    properties: list[str] = Field(default_factory=list)
+
+
+class OntologySchemaRead(BaseModel):
+    classes: list[OntologyClassRead] = Field(default_factory=list)
+    object_properties: list[OntologyObjectPropertyRead] = Field(
+        default_factory=list
+    )
+    data_properties: list[OntologyDataPropertyRead] = Field(default_factory=list)
+    constraints: list[OntologySchemaConstraintRead] = Field(default_factory=list)
+
+
+class OntologyGraphStatsRead(BaseModel):
+    nodes_by_label: dict[str, int] = Field(default_factory=dict)
+    edges_by_type: dict[str, int] = Field(default_factory=dict)
+    derived_edges: int = 0
+    total_nodes: int = 0
+    total_edges: int = 0
+
+
+class ReasoningRuleRead(BaseModel):
+    id: str
+    name: str
+    description: str = ""
+
+
+class DerivedEdgeRead(BaseModel):
+    source_type: str | None = None
+    source_key: str | None = None
+    rel_type: str | None = None
+    target_type: str | None = None
+    target_key: str | None = None
+    rule: str | None = None
+    base_ref: str | None = None
+
+
+class ReasoningRecomputeRequest(BaseModel):
+    """POST /ontology/reasoning/recompute body: exactly one of
+    ``all`` (whole graph) or an entity (``entity_type`` +
+    ``entity_key``). Anything else is a 400."""
+
+    entity_type: str | None = None
+    entity_key: str | None = None
+    all: bool = False
+
+
+class ReasoningRecomputeResponse(BaseModel):
+    removed: int = 0
+    created: list[dict[str, Any]] = Field(default_factory=list)
+    scope: str = ""
