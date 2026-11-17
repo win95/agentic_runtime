@@ -33,7 +33,7 @@ _MAX_ENTRIES = 512
 
 _lock = threading.Lock()
 # (model, text) -> (expires_at_monotonic, vector)
-_CACHE: OrderedDict[tuple[str, str], tuple[float, list[float]]] = {}
+_CACHE: OrderedDict[tuple[str, str], tuple[float, list[float]]] = OrderedDict()
 
 
 def _model_name(embeddings, model: str | None) -> str | None:

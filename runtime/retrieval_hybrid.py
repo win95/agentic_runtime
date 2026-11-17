@@ -736,7 +736,7 @@ def trace_feature_rows(candidates: list[dict], final: list[dict]) -> list[dict]:
     return rows
 
 
-def build_hybrid_retriever(
+def  build_hybrid_retriever(
     *,
     client=None,
     graph_store=None,
