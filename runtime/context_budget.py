@@ -112,6 +112,23 @@ COMPONENT_BUDGETS = {
 CHARS_PER_TOKEN = 4
 
 
+def effective_history_tokens(mission: dict | None) -> int:
+    """History budget for one mission's runs (tran 2026-11-19).
+
+    Missions that opt into pre-retrieval (``execution.retrieval``)
+    keep the plain HISTORY_TOKENS — their retrieval slice is spent
+    on the retrieval block. Missions without it never fill that
+    slice (the retrieval hook is silent without ``execution.retrieval``
+    + an asset_id), so it moves to history instead:
+    HISTORY + RETRIEVAL. The total stays MAX_CONTEXT_TOKENS either
+    way — this is a reallocation, not new budget.
+    """
+    retrieval = ((mission or {}).get("execution") or {}).get("retrieval")
+    if retrieval:
+        return HISTORY_TOKENS
+    return HISTORY_TOKENS + RETRIEVAL_TOKENS
+
+
 def estimate_tokens(text) -> int:
     """Rough token count for budgeting: ceil(chars / 4). See module docstring."""
     if text is None:

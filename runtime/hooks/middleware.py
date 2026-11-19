@@ -85,6 +85,7 @@ class HookMiddleware(AgentMiddleware):
         allowed_tools: list | None = None,
         capabilities: list | None = None,
         reserved_history_tokens: int = 0,
+        history_budget_tokens: int | None = None,
     ):
         self.registry = registry
         self.execution_id = execution_id
@@ -100,10 +101,17 @@ class HookMiddleware(AgentMiddleware):
         self.capabilities = list(capabilities or [])
         # History/LTM blocks rendered into the system prompt for this
         # run (see runtime/context_budget.py): the trim budget for the
-        # run's own turns is HISTORY_TOKENS minus these, so the
-        # history slice is shared instead of overspent. 0 keeps the
-        # old behaviour (turns alone may use the whole slice).
+        # run's own turns is the mission's effective history budget
+        # (HISTORY_TOKENS, or HISTORY + RETRIEVAL for missions without
+        # pre-retrieval — see effective_history_tokens) minus these,
+        # so the history slice is shared instead of overspent. 0 keeps
+        # the old behaviour (turns alone may use the whole slice).
         self.reserved_history_tokens = max(0, int(reserved_history_tokens or 0))
+        self.history_budget_tokens = (
+            int(history_budget_tokens)
+            if history_budget_tokens
+            else HISTORY_TOKENS
+        )
         self.tool_calls_made = 0
         self.continues = 0
         self.trimmed_messages = 0
@@ -151,7 +159,9 @@ class HookMiddleware(AgentMiddleware):
     def before_model(self, state, runtime):  # noqa: ARG002 - runtime unused
         try:
             messages = (state or {}).get("messages") or []
-            budget = max(0, HISTORY_TOKENS - self.reserved_history_tokens)
+            budget = max(
+                0, self.history_budget_tokens - self.reserved_history_tokens
+            )
             remove = trim_history(messages, budget)
             if not remove:
                 return None

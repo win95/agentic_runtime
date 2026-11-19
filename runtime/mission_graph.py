@@ -495,10 +495,15 @@ def deep_agent_node(state: MissionState) -> dict:
         # The stop cap comes from execution.stop_max_continues.
         # reserved_history_tokens: the history/LTM blocks rendered
         # above already occupy part of the history slice, so the
-        # trim budget for the run's own turns is HISTORY_TOKENS
-        # minus those (a fresh session with no history keeps the
-        # full slice for its own turns).
-        from runtime.context_budget import estimate_tokens
+        # trim budget for the run's own turns is the mission's
+        # effective history budget (HISTORY_TOKENS, or HISTORY +
+        # RETRIEVAL for missions without pre-retrieval — see
+        # effective_history_tokens) minus those (a fresh session
+        # with no history keeps the full slice for its own turns).
+        from runtime.context_budget import (
+            effective_history_tokens,
+            estimate_tokens,
+        )
 
         hook_middleware = HookMiddleware(
             hook_registry,
@@ -514,6 +519,7 @@ def deep_agent_node(state: MissionState) -> dict:
             allowed_tools=list(context.get("allowed_tools") or []),
             capabilities=list(context.get("capabilities") or []),
             reserved_history_tokens=estimate_tokens(history_block),
+            history_budget_tokens=effective_history_tokens(mission),
         )
         # Part 1 (b): the per-run middleware list. For missions that
         # must not see any built-in tool (hotel only), append the
