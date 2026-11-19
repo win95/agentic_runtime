@@ -66,7 +66,18 @@ def resolve_session_sandbox(
     the run proceeds without a sandbox.
     """
     cfg = settings if settings is not None else _default_settings
-    if not cfg.sandbox_enabled or not cfg.sandbox_api_key:
+    if not cfg.sandbox_enabled:
+        logger.warning(
+            "Sandbox disabled (SANDBOX_ENABLED=false); session %s uses in-memory backend",
+            session_id,
+        )
+        return None
+    if not cfg.sandbox_api_key:
+        logger.warning(
+            "Sandbox unavailable: SANDBOX_API_KEY is empty; session %s uses "
+            "in-memory backend",
+            session_id,
+        )
         return None
     from runtime.sandbox.provider import default_client
 

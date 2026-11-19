@@ -65,6 +65,7 @@ NEUTRAL_MISSION = {
 }
 
 ALL_SKILL_NAMES = {
+    "agent-analytis",
     "fault-investigation", "admin-operations", "report-writing",
     "data-access", "session-memory", "reception",
 }

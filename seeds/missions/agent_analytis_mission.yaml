@@ -39,7 +39,10 @@ capabilities:
 # security.user_runnable: true), builtin_tools.deny: false (agent cần
 # read_file / write_file / execute + task), flow_subgraph.enabled: false
 # (không có skill map, deep agent tự do).
-harness: {}
+harness:
+  context_budget:
+    # No pre-retrieval asset block — reclaim the retrieval slice for history.
+    reclaim_retrieval_for_history: true
 
 # Export trực tiếp (trả thẳng trong result, tran 2026-11-19): sau mỗi
 # run, runtime tải các file agent đã ghi vào thư mục `output/` trong

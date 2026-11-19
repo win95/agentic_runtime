@@ -44,7 +44,7 @@ def _client():
 def tavily_search(
     query: str,
     max_results: int = 5,
-    search_depth: str = "advanced",
+    search_depth: str = "basic",
     include_answer: bool = False,
 ) -> dict:
     """Search the web with Tavily; returns titles, URLs and snippets.
@@ -57,7 +57,7 @@ def tavily_search(
         return {"query": query, "results": [], "error": "query must not be empty",
                 "stub": False, "provenance": "tavily:search"}
     count = max(1, min(int(max_results), _MAX_SEARCH_RESULTS))
-    depth = search_depth if search_depth in ("basic", "advanced") else "advanced"
+    depth = search_depth if search_depth in ("basic", "advanced") else "basic"
     try:
         client = _client()
         response = client.search(
@@ -89,7 +89,11 @@ def tavily_search(
 
 
 @tool
-def tavily_extract(urls: list[str], query: str = "") -> dict:
+def tavily_extract(
+    urls: list[str],
+    query: str = "",
+    extract_depth: str = "basic",
+) -> dict:
     """Fetch the full text of up to 3 web pages with Tavily.
 
     Use after tavily_search to read the pages behind the most relevant
@@ -101,12 +105,13 @@ def tavily_extract(urls: list[str], query: str = "") -> dict:
         return {"urls": [], "pages": [], "error": "urls must not be empty",
                 "stub": False, "provenance": "tavily:extract"}
     picked = cleaned[:_MAX_EXTRACT_URLS]
+    depth = extract_depth if extract_depth in ("basic", "advanced") else "basic"
     try:
         client = _client()
         response = client.extract(
             urls=picked,
             query=query.strip() or None,
-            extract_depth="advanced",
+            extract_depth=depth,
             format="markdown",
             timeout=30,
         )

@@ -7,6 +7,8 @@ import yaml
 import runtime.tools  # noqa: F401 — importing registers the built-in tools
 from runtime.tools.registry import registry
 
+TAVILY_TOOLS = {"tavily_search", "tavily_extract"}
+
 EXPECTED_TOOLS = {
     "search_fault_history",
     "get_maintenance_records",
@@ -37,7 +39,8 @@ FAULT_CONTEXT = {
 
 def test_all_tools_registered():
     names = {entry.name for entry in registry.list()}
-    assert names == EXPECTED_TOOLS
+    assert names == EXPECTED_TOOLS | TAVILY_TOOLS
+    assert len(names) == len(EXPECTED_TOOLS) + len(TAVILY_TOOLS)
 
 
 def test_tool_schemas_valid():

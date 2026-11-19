@@ -26,6 +26,13 @@ ADMIN_TOOLS = {
 }
 
 
+def _registry_tool_count() -> int:
+    import runtime.tools  # noqa: F401
+    from runtime.tools.registry import registry
+
+    return len(registry.list())
+
+
 def _seed_agents(db_session):
     load_missions.main()
     return db_session
@@ -63,8 +70,12 @@ def _patch_capability_repositories(monkeypatch):
 
 
 def test_manifest_covers_all_built_in_tools():
+    import runtime.tools  # noqa: F401
+    from runtime.tools.registry import registry
+
     manifest, digest = avs.compute_tool_manifest()
-    assert len(manifest) == 16
+    registered = {e.name for e in registry.list()}
+    assert len(manifest) == len(registered) == _registry_tool_count()
     assert {e["name"] for e in manifest} == ADMIN_TOOLS | {
         "calculate_failure_rate",
         "confirm_guest_booking",
@@ -74,6 +85,8 @@ def test_manifest_covers_all_built_in_tools():
         "reply_to_guest",
         "search_fault_history",
         "search_technical_documents",
+        "tavily_search",
+        "tavily_extract",
     }
     entry = next(e for e in manifest if e["name"] == "get_sensor_data")
     assert entry["capability"] == "sensor_data"
@@ -93,7 +106,7 @@ def test_create_version_idempotent_then_new_on_change(db_session):
         # follows settings.llm_model (item 9, 2026-11-11).
         assert same.model == settings.llm_model and same.temperature == 0.0
         assert set(same.allowed_tools) == ADMIN_TOOLS
-        assert len(same.tool_manifest) == 16
+        assert len(same.tool_manifest) == _registry_tool_count()
         assert len(same.manifest_sha256) == 64
         assert len(avs.list_versions(db, "admin_bot")) == 1
 
@@ -348,7 +361,7 @@ def test_versions_router(db_session, client):
     assert [v["version"] for v in versions] == [2, 1]
     assert versions[0]["is_active"] is True
     assert versions[0]["temperature"] == 0.7
-    assert len(versions[0]["tool_manifest"]) == 16
+    assert len(versions[0]["tool_manifest"]) == _registry_tool_count()
 
     resp = client.get("/agents/admin_bot/versions/1")
     assert resp.status_code == 200

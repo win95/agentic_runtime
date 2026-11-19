@@ -5,6 +5,8 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from runtime.context_budget import (
     HISTORY_TOKENS,
     OUTPUT_RESERVE_TOKENS,
+    RETRIEVAL_TOKENS,
+    effective_history_tokens,
     message_tokens,
     trim_history,
 )
@@ -39,6 +41,32 @@ def _history(n_turns: int, chars: int = 6000) -> list:
 
 
 # --- Budget math -------------------------------------------------------
+
+
+def test_effective_history_default_without_harness_opt_in():
+    mission = {"mission_id": "system_admin", "execution": {}}
+    assert effective_history_tokens(mission) == HISTORY_TOKENS
+
+
+def test_effective_history_reclaim_opt_in_via_harness():
+    mission = {
+        "mission_id": "agent_analytis_mission",
+        "execution": {
+            "harness": {"context_budget": {"reclaim_retrieval_for_history": True}}
+        },
+    }
+    assert effective_history_tokens(mission) == HISTORY_TOKENS + RETRIEVAL_TOKENS
+
+
+def test_effective_history_retrieval_mission_stays_default_even_with_reclaim():
+    mission = {
+        "mission_id": "fault_analysis",
+        "execution": {
+            "retrieval": {"asset_id": True},
+            "harness": {"context_budget": {"reclaim_retrieval_for_history": True}},
+        },
+    }
+    assert effective_history_tokens(mission) == HISTORY_TOKENS
 
 
 # --- trim_history ------------------------------------------------------

@@ -246,6 +246,9 @@ def deep_agent_node(state: MissionState) -> dict:
     """
     mission = state.get("mission") or {}
     input_data = state.get("input") or {}
+    from runtime.sandbox.export import run_start_timestamp
+
+    export_run_started_at = run_start_timestamp()
     # "input" + "execution_config" feed Layer 4 execution scoping in the
     # registry: tools taking asset_id are wrapped to refuse any asset
     # other than this execution's, unless the mission opts out with
@@ -866,9 +869,16 @@ def deep_agent_node(state: MissionState) -> dict:
             # "Sandbox unavailable" note above already says why.
             from runtime.sandbox.export import export_output_files
 
-            exported, export_notes = export_output_files(sandbox_backend)
+            exported, export_notes = export_output_files(
+                sandbox_backend,
+                run_started_at=export_run_started_at,
+            )
             result["files"] = exported
             notes.extend(export_notes)
+            if not exported:
+                result["export_warnings"] = list(export_notes) or [
+                    "Export: output schema requires files but none were exported"
+                ]
         tool_failures = outcome.get("errors") or []
         graph_errors = _execution_diagnostic_errors(tool_failures)
         if tool_failures:
@@ -1004,12 +1014,13 @@ def _is_grounded(cause: str, evidence: list) -> bool:
     return not tokens
 
 
-def _allowed_tool_names(mission: dict) -> set[str] | None:
+def _allowed_tool_names(mission: dict, *, sandbox_enabled: bool = False) -> set[str] | None:
     """Tool names this mission's capabilities allow (None = cannot tell,
     e.g. the tool modules failed to import — the trace check is then
     skipped instead of flagging everything)."""
     try:
         import runtime.tools  # noqa: F401 — registers built-in tools
+        from runtime.deep_agent import allowed_builtin_tool_names
         from runtime.tools.registry import registry
     except Exception:  # noqa: BLE001 — validation must never crash
         return None
@@ -1017,6 +1028,11 @@ def _allowed_tool_names(mission: dict) -> set[str] | None:
         e.name
         for e in registry.list_for_context({"capabilities": mission.get("capabilities") or []})
     }
+    allowed |= allowed_builtin_tool_names(
+        mission.get("mission_id"),
+        mission.get("execution") or {},
+        sandbox_enabled=sandbox_enabled,
+    )
     return allowed or None
 
 
@@ -1109,7 +1125,8 @@ def validate_results(state: MissionState) -> dict:
                 flags.append({"type": "ungrounded_root_cause", "cause": str(cause)[:200]})
     actions = result.get("actions_taken")
     if isinstance(actions, list) and actions:
-        allowed = _allowed_tool_names(mission)
+        sandbox_cfg = bool((mission.get("execution") or {}).get("sandbox"))
+        allowed = _allowed_tool_names(mission, sandbox_enabled=sandbox_cfg)
         if allowed is not None:
             for name in actions:
                 if name not in allowed:

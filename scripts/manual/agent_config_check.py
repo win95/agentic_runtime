@@ -393,11 +393,20 @@ def check_static(report: Report, config: dict) -> None:
 
     declared_hooks = [str(name) for name in execution.get("hooks") or []]
     resolved_hooks = select_hooks(config["mission"])
-    report.check(
-        resolved_hooks == declared_hooks,
-        f"all {len(declared_hooks)} mission hooks resolve",
-        ", ".join(resolved_hooks) or "(none)",
-    )
+    if declared_hooks:
+        report.check(
+            resolved_hooks == declared_hooks,
+            f"all {len(declared_hooks)} mission hooks resolve",
+            ", ".join(resolved_hooks) or "(none)",
+        )
+    else:
+        from runtime.hooks import builtin
+
+        report.check(
+            set(resolved_hooks) == set(builtin.BUILTIN_HOOKS),
+            "default mission hooks resolve (no explicit hooks: key)",
+            f"{len(resolved_hooks)} built-in hook(s)",
+        )
 
 
 # --- Live run + trace --------------------------------------------------------

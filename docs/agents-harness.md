@@ -31,6 +31,7 @@ Docker images copy `seeds/` and `skills/` at build time — rebuild the image
 | `flow_subgraph.enabled` | Use the structured flow router when skills are mapped |
 | `guest_output.register_reply_tools` | Register `reply_to_guest` / booking confirmation tools (seed-time only) |
 | `guest_output.capability` | Registry capability for those synthetic tools |
+| `context_budget.reclaim_retrieval_for_history` | Opt-in: move unused retrieval slice into history trim budget |
 
 Agent YAML: `harness.system_prompt_fallback`:
 

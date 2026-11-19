@@ -69,6 +69,16 @@ class GuestOutputHarness(BaseModel):
         return self
 
 
+class ContextBudgetHarness(BaseModel):
+    """Optional context-window reallocations (opt-in per mission)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # When true, unused retrieval slice (8,024 tok) is added to the history
+    # trim budget — for missions that never fill the retrieval block.
+    reclaim_retrieval_for_history: StrictBool = False
+
+
 class MissionHarness(BaseModel):
     """Effective harness for one mission (merged with defaults)."""
 
@@ -79,6 +89,7 @@ class MissionHarness(BaseModel):
     builtin_tools: BuiltinToolsHarness = Field(default_factory=BuiltinToolsHarness)
     flow_subgraph: FlowSubgraphHarness = Field(default_factory=FlowSubgraphHarness)
     guest_output: GuestOutputHarness = Field(default_factory=GuestOutputHarness)
+    context_budget: ContextBudgetHarness = Field(default_factory=ContextBudgetHarness)
 
 
 class AgentHarness(BaseModel):

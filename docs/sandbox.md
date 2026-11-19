@@ -53,10 +53,14 @@ that only exists in the sandbox is lost. Missions that declare
 of every run, inline in the execution result:
 
 - The agent writes ALL its report files into the sandbox `output/`
-  dir (relative path, e.g. `output/bao-cao.html`) — the skill tells
-  it to; files anywhere else are not exported.
-- `runtime/sandbox/export.py::export_output_files` lists `output/`
-  (`backend.ls`), downloads the files (`backend.download_files`)
+  dir (prefer `/output/bao-cao.html`; `output/...` is also scanned) —
+  the skill tells it to; files anywhere else are not exported.
+- Only files created or modified during the current run are exported
+  (mtime ≥ run start when available); stale files from prior turns in
+  the same session are skipped with a note.
+- `runtime/sandbox/export.py::export_output_files` lists `/output` and
+  `output` (`backend.ls`), checks size via `stat` before download, then
+  fetches (`backend.download_files`)
   and inlines them into `result["files"]` as
   `{name, path, content_type, content}` with content decoded as
   UTF-8 text. The user gets them through the existing
@@ -109,7 +113,16 @@ of every run, inline in the execution result:
    in chat or the repo), `SANDBOX_DOMAIN=localhost:8080` (or the
    server's address). If the server runs in Docker and the worker on
    the host, set `SANDBOX_USE_SERVER_PROXY=true`.
-6. Restart the worker (and beat, for the reap task).
+6. **Dockerized worker:** the worker container must reach the sandbox
+   server at `SANDBOX_DOMAIN`. On Docker Desktop that is often
+   `host.docker.internal:8080` (not `localhost:8080` inside the
+   container). Bind the opensandbox-server to `0.0.0.0` so it accepts
+   container traffic (see the server's listen address in
+   `~/.sandbox.toml`). Use `SANDBOX_USE_SERVER_PROXY=true` when the
+   SDK should talk through the server proxy. A compose override for
+   `SANDBOX_DOMAIN` / `MCP_SERVER_URL` works the same way as other
+   host-reachable services.
+7. Restart the worker (and beat, for the reap task).
 
 Verify without an LLM: `GET /executions` notes — a sandbox run
 shows `Sandbox backend: <id>`; with the server down the same run

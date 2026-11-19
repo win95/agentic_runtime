@@ -157,8 +157,17 @@ def _run_once(api_url: str, message: str, session_id: str,
         raise _die(f"GET result thất bại ({exc}).", code=1)
     _print_answer(result)
     saved = _save_files(result, out_dir, execution_id)
+    output = result.get("output") or {}
+    warnings = output.get("export_warnings") or []
+    if warnings:
+        for line in warnings:
+            print(f"  export warning: {line}", file=sys.stderr)
     if not saved:
         print("  (không có file nào được xuất — xem lại output/ trong sandbox)", file=sys.stderr)
+        raise _die(
+            "output schema yêu cầu files nhưng không có file nào được export.",
+            code=1,
+        )
     return execution, result, saved
 
 

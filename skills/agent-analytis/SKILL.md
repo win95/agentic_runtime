@@ -23,7 +23,8 @@ quả dưới dạng **file, bảng, biểu đồ HTML** — không chỉ text.
    nhiều subagent trong cùng 1 message khi độc lập. Giao việc chặt:
    "Dùng `tavily_extract` đọc URL này, trích fact/số liệu/trích dẫn
    quan trọng + nguồn, trả lại bản draft tối đa ~800 token, và ghi
-   draft vào `output/drafts/<slug>.md`". Main agent KHÔNG tự
+   draft vào `/output/drafts/<slug>.md` (hoặc `output/drafts/...`).
+   Main agent KHÔNG tự
    `tavily_extract` toàn văn — chỉ đọc draft các subagent trả về rồi
    tổng hợp. Dữ liệu người dùng đưa: `read_file` / `ls` để xem file,
    không bịa nội dung file chưa đọc.
@@ -35,9 +36,10 @@ quả dưới dạng **file, bảng, biểu đồ HTML** — không chỉ text.
    luận. Tính sai thì sửa script và chạy lại — không sửa số liệu bằng
    tay cho khớp.
 4. **Xuất kết quả — bắt buộc ra file.** Xem bảng dưới. Ghi MỌI file
-   báo cáo vào thư mục `output/` (đường dẫn tương đối, ví dụ
-   `output/bao-cao.html`) — chỉ `.html` / `.csv` / `.md` (+ `.txt` /
-   `.json` khi cần), mỗi file ≤ 256KB. Runtime tự tải các file trong
+   báo cáo vào thư mục `/output/` (ưu tiên đường dẫn tuyệt đối, ví dụ
+   `/output/bao-cao.html`; `output/...` cũng được) — chỉ `.html` /
+   `.csv` / `.md` (+ `.txt` / `.json` khi cần), mỗi file ≤ 256KB.
+   Runtime tự tải các file trong
    `output/` ra ngoài và đưa vào kết quả; file nằm ngoài `output/`
    hoặc quá lớn sẽ KHÔNG tới được người đọc. Báo cáo HTML KHÔNG dán
    toàn bộ qua `write_file` — viết script Python nhỏ sinh HTML từ
