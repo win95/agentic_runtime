@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from runtime.deep_agent import _subagents_inherit_main_middleware, build_deep_agent
 from runtime.hooks import HookMiddleware, default_registry
 from runtime.hooks.events import HookDecision, HookEvent
+from runtime.hooks.middleware import builtin_subagent_hook_names
 from runtime.hooks.registry import HookRegistry
 
 
@@ -110,3 +111,36 @@ def test_compiled_create_deep_agent_accepts_gp_spec_with_skills_and_hooks():
     assert specs and specs[0].get("skills") == ["/skills/"]
     assert isinstance(specs[0]["middleware"][0], HookMiddleware)
     assert agent is not None
+
+
+def test_builtin_subagent_hook_names_derived_from_tool_events():
+    names = builtin_subagent_hook_names()
+    assert "enforce_layer" in names
+    assert "stop_completion" not in names
+    assert "retrieval_context" not in names
+    assert "validate_input" not in names
+
+
+def test_subagent_before_model_trim_does_not_encode_ltm(monkeypatch):
+    from langchain_core.messages import AIMessage, HumanMessage
+
+    encoded: list = []
+
+    def _fake_encode(*args, **kwargs):  # noqa: ARG001
+        encoded.append(args)
+        return 0
+
+    monkeypatch.setattr("runtime.hooks.middleware.encode_texts", _fake_encode)
+    monkeypatch.setattr(
+        "runtime.hooks.middleware.trim_history",
+        lambda _messages, _budget: [AIMessage(content="drop-me")],
+    )
+    parent = HookMiddleware(
+        default_registry(), execution_id="e1", mission_id="m1", session_id="s1"
+    )
+    sub = HookMiddleware.for_subagent(parent)
+    sub.before_model(
+        {"messages": [HumanMessage(content="hi"), AIMessage(content="tail")]},
+        None,
+    )
+    assert encoded == []

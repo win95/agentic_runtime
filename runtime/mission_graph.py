@@ -587,12 +587,15 @@ def deep_agent_node(state: MissionState) -> dict:
             else:
                 sandbox_note = f"Sandbox backend: {sandbox_backend.id}"
         export_marker_path = None
+        export_marker_failed = False
         if sandbox_backend is not None and state.get("execution_id"):
             from runtime.sandbox.export import touch_export_run_marker
 
             export_marker_path = touch_export_run_marker(
                 sandbox_backend, state["execution_id"]
             )
+            if export_marker_path is None:
+                export_marker_failed = True
         # The fixed prefix measured against the system-prompt budget —
         # set in each branch below, BEFORE the history block is
         # appended (history is charged to the history bucket, not here).
@@ -876,18 +879,13 @@ def deep_agent_node(state: MissionState) -> dict:
             exported, export_notes = export_output_files(
                 sandbox_backend,
                 run_marker_path=export_marker_path,
+                marker_create_failed=export_marker_failed,
             )
             result["files"] = exported
             notes.extend(export_notes)
-            export_warns = [
-                n for n in export_notes if n.startswith("Export:")
-            ]
-            if export_warns:
-                result["export_warnings"] = export_warns
-            if not exported and "export_warnings" not in result:
-                result["export_warnings"] = [
-                    "Export: output schema requires files but none were exported"
-                ]
+            warnings = build_export_result_warnings(exported, export_notes)
+            if warnings is not None:
+                result["export_warnings"] = warnings
         tool_failures = outcome.get("errors") or []
         graph_errors = _execution_diagnostic_errors(tool_failures)
         if tool_failures:
@@ -1080,6 +1078,18 @@ def _errors_explain_empty_evidence(errors: list[str]) -> bool:
         "ending turn",
     )
     return any(any(m in line for m in markers) for line in diag)
+
+
+def build_export_result_warnings(
+    exported: list, export_notes: list[str]
+) -> list[str] | None:
+    """``result.export_warnings`` payload from export notes + file count."""
+    warns = [n for n in export_notes if n.startswith("Export:")]
+    if warns:
+        return warns
+    if not exported:
+        return ["Export: output schema requires files but none were exported"]
+    return None
 
 
 def validate_results(state: MissionState) -> dict:

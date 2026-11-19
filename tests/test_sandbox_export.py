@@ -42,6 +42,18 @@ class _FakeBackend:
             if size is None:
                 return SimpleNamespace(output="", exit_code=1)
             return SimpleNamespace(output=f"{size}\n", exit_code=0)
+        if "readlink -f" in command or "realpath" in command:
+            before_redirect = command.split("2>/dev/null")[0].strip()
+            path = before_redirect.rsplit(maxsplit=1)[-1].strip("'\"")
+            if path.startswith("output/") or path == "output":
+                canon = "/output/" + path.split("/", 1)[-1] if "/" in path else "/output"
+            else:
+                canon = path if path.startswith("/") else f"/{path}"
+            if canon.endswith("/a.html") or canon.endswith("a.html"):
+                canon = "/output/a.html"
+            if canon.endswith("/new.md") or "new.md" in canon:
+                canon = "/output/new.md"
+            return SimpleNamespace(output=f"{canon}\n", exit_code=0)
         if command.startswith("touch "):
             return SimpleNamespace(output="", exit_code=0)
         return SimpleNamespace(output="", exit_code=1)
@@ -107,7 +119,7 @@ def test_export_marker_filters_stale_files():
     marker = "/tmp/.run_export_exec-1"
     backend = _FakeBackend(
         execute_output={
-            "find /output output": "/output/new.md\n",
+            "cd / && (find /output": "/output/new.md\n",
         },
         files={"/output/new.md": b"fresh"},
         sizes={"/output/new.md": 5},
@@ -115,7 +127,49 @@ def test_export_marker_filters_stale_files():
     files, notes = export_output_files(backend, run_marker_path=marker)
     assert len(files) == 1
     assert files[0]["name"] == "new.md"
-    assert any("find /output" in c for c in backend.execute_calls)
+    assert any("maxdepth 1" in c for c in backend.execute_calls)
+
+
+def test_export_find_dedupes_output_and_absolute_paths_cwd_root():
+    """``find /output`` + ``find output`` at cwd=/ must export once."""
+    marker = "/tmp/.run_export_exec-2"
+    backend = _FakeBackend(
+        execute_output={
+            "cd / && (find /output": "/output/a.html\noutput/a.html\n",
+        },
+        files={"/output/a.html": b"<p>x</p>"},
+        sizes={"/output/a.html": 10},
+    )
+    files, notes = export_output_files(backend, run_marker_path=marker)
+    assert len(files) == 1
+    assert files[0]["name"] == "a.html"
+    assert len(backend.download_calls) == 1
+
+
+def test_export_maxdepth_excludes_drafts_subdirectory():
+    marker = "/tmp/.run_export_exec-3"
+    backend = _FakeBackend(
+        execute_output={
+            "cd / && (find /output": "/output/report.md\n/output/drafts/draft.md\n",
+        },
+        files={
+            "/output/report.md": b"# ok",
+            "/output/drafts/draft.md": b"draft",
+        },
+        sizes={"/output/report.md": 4, "/output/drafts/draft.md": 5},
+    )
+    files, _notes = export_output_files(backend, run_marker_path=marker)
+    assert {f["name"] for f in files} == {"report.md"}
+
+
+def test_export_marker_create_failed_adds_warning():
+    backend = _FakeBackend(
+        entries={"/output": [{"path": "/output/a.md", "is_dir": False}]},
+        files={"/output/a.md": b"x"},
+        sizes={"/output/a.md": 1},
+    )
+    _files, notes = export_output_files(backend, marker_create_failed=True)
+    assert any("run marker could not be created" in n for n in notes)
 
 
 def test_touch_export_run_marker():

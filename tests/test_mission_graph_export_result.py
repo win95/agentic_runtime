@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import runtime.tools  # noqa: F401
-from runtime.mission_graph import _allowed_tool_names, validate_results
+from runtime.mission_graph import (
+    _allowed_tool_names,
+    build_export_result_warnings,
+    validate_results,
+)
 
 
 def test_allowed_tool_names_excludes_builtins_when_hotel_deny():
@@ -20,7 +24,6 @@ def test_allowed_tool_names_excludes_builtins_when_hotel_deny():
         },
     }
     allowed = _allowed_tool_names(mission, sandbox_enabled=False)
-    assert allowed is not None
     assert "ls" not in allowed
     assert "task" not in allowed
 
@@ -51,10 +54,17 @@ def test_validate_flags_disallowed_builtin_for_hotel():
     assert any(f.get("tool") == "ls" for f in flagged)
 
 
-def test_export_warnings_includes_partial_skip_notes():
-    export_notes = [
+def test_build_export_result_warnings_partial_and_empty():
+    notes = [
         "Export: skipped /output/huge.csv (900000 bytes > 262144 cap)",
-        "Export: no report files newer than this run's marker under output/",
+        "other note",
     ]
-    export_warns = [n for n in export_notes if n.startswith("Export:")]
-    assert len(export_warns) == 2
+    assert build_export_result_warnings([{"name": "a.csv"}], notes) == [
+        "Export: skipped /output/huge.csv (900000 bytes > 262144 cap)",
+    ]
+    assert build_export_result_warnings([], notes) == [
+        "Export: skipped /output/huge.csv (900000 bytes > 262144 cap)",
+    ]
+    empty = build_export_result_warnings([], [])
+    assert empty == ["Export: output schema requires files but none were exported"]
+    assert build_export_result_warnings([{"name": "ok"}], []) is None

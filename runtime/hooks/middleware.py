@@ -66,18 +66,42 @@ from runtime.long_term_memory import encode_texts, turn_text
 
 logger = logging.getLogger(__name__)
 
-# Hooks wired into subagents: tool enforcement only — no SessionStart/End,
-# retrieval injection, user-prompt validation, or stop-completion nudges.
-SUBAGENT_HOOK_NAMES = [
-    "enforce_layer",
-    "enforce_write_preconditions",
-    "block_dangerous_tool_call",
-    "guard_destructive_target",
-    "request_permission",
-    "deny_builtin_tools",
-    "injection_feedback",
-    "tool_error_feedback",
-]
+# Subagent hooks: tool-level events only — derived from BUILTIN_HOOKS so new
+# PreToolUse/PostToolUse handlers apply automatically.
+SUBAGENT_EXCLUDED_HOOK_EVENTS = frozenset(
+    {
+        HookEvent.SESSION_START,
+        HookEvent.SESSION_END,
+        HookEvent.USER_PROMPT_SUBMIT,
+        HookEvent.STOP,
+        HookEvent.SUBAGENT_START,
+        HookEvent.SUBAGENT_STOP,
+        HookEvent.NOTIFICATION,
+        HookEvent.PERMISSION_REQUEST,
+        HookEvent.PRE_COMPACT,
+    }
+)
+SUBAGENT_TOOL_HOOK_EVENTS = frozenset(
+    {
+        HookEvent.PRE_TOOL_USE,
+        HookEvent.POST_TOOL_USE,
+        HookEvent.POST_TOOL_USE_FAILURE,
+    }
+)
+
+
+def builtin_subagent_hook_names() -> list[str]:
+    """Built-in hook names safe for subagents (tool enforcement only)."""
+    from runtime.hooks.builtin import BUILTIN_HOOKS
+
+    names: list[str] = []
+    for name, pairs in BUILTIN_HOOKS.items():
+        events = {event for event, _handler in pairs}
+        if events & SUBAGENT_EXCLUDED_HOOK_EVENTS:
+            continue
+        if events & SUBAGENT_TOOL_HOOK_EVENTS:
+            names.append(name)
+    return names
 
 
 class SharedRunCounters:
@@ -159,7 +183,7 @@ class HookMiddleware(AgentMiddleware):
     @classmethod
     def for_subagent(cls, parent: HookMiddleware) -> HookMiddleware:
         """Tool-enforcement middleware for the general-purpose subagent."""
-        sub_registry = parent.registry.with_only(SUBAGENT_HOOK_NAMES)
+        sub_registry = parent.registry.with_only(builtin_subagent_hook_names())
         return cls(
             sub_registry,
             execution_id=parent.execution_id,
@@ -228,17 +252,15 @@ class HookMiddleware(AgentMiddleware):
             remove = trim_history(messages, budget)
             if not remove:
                 return None
-            # Encode-then-remove: the trimmed turns go into long-term
-            # memory BEFORE the RemoveMessage goes out, so no turn is
-            # ever lost in the gap. The encoder never raises; a
-            # storage failure just means this run's trimmed turns are
-            # not retrievable later.
-            self.encoded_turns += encode_texts(
-                self.session_id,
-                self.execution_id,
-                [turn_text(turn) for turn in group_turns(remove)],
-                source="trim",
-            )
+            # Encode-then-remove on the main agent only — subagent turns
+            # can contain untrusted web/tool text and must not enter LTM.
+            if not self.subagent_mode:
+                self.encoded_turns += encode_texts(
+                    self.session_id,
+                    self.execution_id,
+                    [turn_text(turn) for turn in group_turns(remove)],
+                    source="trim",
+                )
             remove_ids = [getattr(m, "id", "") or "" for m in remove]
             removed_tokens = sum(message_tokens(m) for m in remove)
             self.trimmed_messages += len(remove)
@@ -286,7 +308,8 @@ class HookMiddleware(AgentMiddleware):
             result = handler(request)
         except Exception as exc:  # noqa: BLE001 — tool errors are evidence
             self.shared_counters.increment_tool_calls()
-            self.tool_calls_made += 1
+            if not self.subagent_mode:
+                self.tool_calls_made += 1
             failure = self._base_context()
             failure.tool_name = tool_name
             failure.tool_input = tool_input
@@ -306,7 +329,8 @@ class HookMiddleware(AgentMiddleware):
             return ToolMessage(content=content, tool_call_id=tool_call_id, status="error")
 
         self.shared_counters.increment_tool_calls()
-        self.tool_calls_made += 1
+        if not self.subagent_mode:
+            self.tool_calls_made += 1
         result_content = result.content if isinstance(result, ToolMessage) else ""
         is_error = isinstance(result, ToolMessage) and result.status == "error"
         post_event = (

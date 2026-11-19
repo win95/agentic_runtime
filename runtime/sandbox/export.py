@@ -73,6 +73,49 @@ def _list_output_dir(backend, directory: str) -> tuple[list[dict], str | None]:
     return list(getattr(listing, "entries", None) or []), None
 
 
+def _canonical_sandbox_path(backend, path: str) -> str:
+    """Resolve to an absolute path (best-effort), assuming sandbox cwd is ``/``."""
+    normalized = path if path.startswith("/") else f"/{path}"
+    execute = getattr(backend, "execute", None)
+    if not execute:
+        return normalized
+    try:
+        quoted = shlex.quote(path)
+        resp = execute(
+            f"cd / && readlink -f {quoted} 2>/dev/null || realpath {quoted} 2>/dev/null"
+        )
+        lines = [
+            line.strip()
+            for line in (getattr(resp, "output", None) or "").splitlines()
+            if line.strip()
+        ]
+        if lines:
+            return lines[0]
+    except Exception:  # noqa: BLE001
+        pass
+    return normalized
+
+
+def _is_toplevel_output_file(canonical_path: str) -> bool:
+    """True when ``canonical_path`` is a file directly under ``/output/``."""
+    parts = canonical_path.strip("/").split("/")
+    return len(parts) == 2 and parts[0] == "output"
+
+
+def _dedupe_output_paths(backend, raw_paths: list[str]) -> list[str]:
+    """Normalize via realpath and keep one path per inode (``/output`` vs ``output``)."""
+    by_canonical: dict[str, str] = {}
+    for path in raw_paths:
+        canonical = _canonical_sandbox_path(backend, path)
+        if not _is_toplevel_output_file(canonical):
+            continue
+        if canonical not in by_canonical:
+            # Prefer the absolute ``/output/...`` form for download/stat.
+            prefer = canonical if canonical.startswith("/output/") else path
+            by_canonical[canonical] = prefer
+    return sorted(by_canonical.values())
+
+
 def _paths_from_ls(backend) -> tuple[list[str], list[str]]:
     """List output files via ``ls`` (no mtime) — mirrors BaseSandbox.ls entries."""
     notes: list[str] = []
@@ -91,10 +134,12 @@ def _paths_from_ls(backend) -> tuple[list[str], list[str]]:
             path = str(entry.get("path") or "")
             if not path:
                 continue
-            norm = path if path.startswith("/") else f"/{path}"
-            if norm in by_norm:
+            canonical = _canonical_sandbox_path(backend, path)
+            if not _is_toplevel_output_file(canonical):
                 continue
-            by_norm[norm] = path
+            if canonical in by_norm:
+                continue
+            by_norm[canonical] = canonical if canonical.startswith("/") else path
     if failed_dirs:
         if not succeeded_dirs:
             for directory, err in failed_dirs:
@@ -119,16 +164,18 @@ def _paths_newer_than_marker(backend, marker: str) -> tuple[list[str], list[str]
             "Export: cannot apply run marker — sandbox backend has no execute"
         ]
     cmd = (
-        f"find /output output -type f -newer {shlex.quote(marker)} "
-        f"2>/dev/null | sort -u"
+        f"cd / && (find /output -maxdepth 1 -type f -newer {shlex.quote(marker)} "
+        f"2>/dev/null; find output -maxdepth 1 -type f -newer {shlex.quote(marker)} "
+        f"2>/dev/null) | sort -u"
     )
     try:
         resp = execute(cmd)
         output = (getattr(resp, "output", None) or "").strip()
     except Exception as exc:  # noqa: BLE001
         return [], [f"Export: find newer-than-marker failed ({exc})"]
-    paths = [line.strip() for line in output.splitlines() if line.strip()]
-    if not paths:
+    raw = [line.strip() for line in output.splitlines() if line.strip()]
+    paths = _dedupe_output_paths(backend, raw)
+    if not raw and not paths:
         notes.append(
             "Export: no report files newer than this run's marker under output/"
         )
@@ -157,7 +204,7 @@ def export_output_files(
     *,
     directory: str | None = None,
     run_marker_path: str | None = None,
-    run_started_at: float | None = None,  # noqa: ARG001 — removed, compat only
+    marker_create_failed: bool = False,
 ):
     """Download the report files from sandbox ``output`` dirs.
 
@@ -167,9 +214,14 @@ def export_output_files(
     (in-memory fallback) yields a clear warning note (not silent success).
     """
     _ = directory
-    _ = run_started_at
+    notes: list[str] = []
+    if marker_create_failed:
+        notes.append(
+            "Export: run marker could not be created — listing output without "
+            "per-run file filter (stale session files may be included)"
+        )
     if backend is None:
-        return [], [
+        return [], notes + [
             "Export: sandbox backend unavailable — no files exported "
             "(in-memory fallback cannot export; enable SANDBOX_* or see notes)"
         ]
@@ -177,7 +229,7 @@ def export_output_files(
         paths, list_notes = _paths_newer_than_marker(backend, run_marker_path)
     else:
         paths, list_notes = _paths_from_ls(backend)
-    notes = list(list_notes)
+    notes.extend(list_notes)
     filtered_paths: list[str] = []
     skipped_ext: list[str] = []
     for path in paths:
@@ -197,10 +249,9 @@ def export_output_files(
     files: list[dict] = []
     total = 0
     for path in sorted(filtered_paths):
-        size = _file_size_bytes(backend, path)
-        alt = path if path.startswith("/") else f"/{path}"
-        if size is None and alt != path:
-            size = _file_size_bytes(backend, alt)
+        canonical = _canonical_sandbox_path(backend, path)
+        download_path = canonical if canonical.startswith("/") else path
+        size = _file_size_bytes(backend, download_path)
         if size is None:
             notes.append(f"Export: skipped {path} (could not determine file size)")
             continue
@@ -215,7 +266,7 @@ def export_output_files(
             )
             continue
         try:
-            responses = backend.download_files([path])
+            responses = backend.download_files([download_path])
         except Exception as exc:  # noqa: BLE001
             notes.append(f"Export: could not download {path} ({exc})")
             continue
@@ -243,7 +294,7 @@ def export_output_files(
         files.append(
             {
                 "name": os.path.basename(path),
-                "path": path,
+                "path": download_path,
                 "content_type": _CONTENT_TYPES[ext],
                 "content": content.decode("utf-8", errors="replace"),
             }
