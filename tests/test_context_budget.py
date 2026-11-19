@@ -58,6 +58,17 @@ def test_effective_history_reclaim_opt_in_via_harness():
     assert effective_history_tokens(mission) == HISTORY_TOKENS + RETRIEVAL_TOKENS
 
 
+def test_effective_history_uses_seed_harness_when_no_execution_override():
+    from seeds.load_missions import load_mission_file, BASE
+
+    data = load_mission_file(BASE / "missions" / "agent_analytis_mission.yaml")
+    mission = {
+        "mission_id": data["id"],
+        "execution": data["execution_config"],
+    }
+    assert effective_history_tokens(mission) == HISTORY_TOKENS + RETRIEVAL_TOKENS
+
+
 def test_effective_history_retrieval_mission_stays_default_even_with_reclaim():
     mission = {
         "mission_id": "fault_analysis",

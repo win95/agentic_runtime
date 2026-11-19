@@ -141,25 +141,39 @@ def builtin_tools_exclusion(
     return _ToolExclusionMiddleware(excluded=BUILTIN_TOOL_NAMES)
 
 
-def _subagents_inherit_main_middleware(middleware: list | None) -> list | None:
-    """Pass hook / exclusion middleware into the general-purpose subagent.
+def _subagents_inherit_main_middleware(
+    middleware: list | None,
+    skills: list[str] | None = None,
+) -> list | None:
+    """Explicit general-purpose subagent: skills + subagent hook enforcement.
 
-    deepagents 0.7.x does not forward custom user middleware to the
-    auto-added ``general-purpose`` subagent unless we supply an explicit
-    ``general-purpose`` subagent spec whose ``middleware`` list includes it.
+    deepagents 0.7.x does not forward user middleware or main ``skills`` to the
+    auto-added GP subagent unless we supply our own ``general-purpose`` spec.
     """
     if not middleware:
         return None
+    from deepagents.middleware._tool_exclusion import _ToolExclusionMiddleware
     from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
 
-    inherited: list = []
-    for mw in middleware:
-        cls_name = type(mw).__name__
-        if cls_name in ("HookMiddleware", "_ToolExclusionMiddleware"):
-            inherited.append(mw)
-    if not inherited:
+    from runtime.hooks.middleware import HookMiddleware
+
+    parent_hook = next(
+        (m for m in middleware if isinstance(m, HookMiddleware) and not m.subagent_mode),
+        None,
+    )
+    if parent_hook is None:
         return None
-    return [{**GENERAL_PURPOSE_SUBAGENT, "middleware": inherited}]
+    inherited: list = [HookMiddleware.for_subagent(parent_hook)]
+    exclusion = next(
+        (m for m in middleware if isinstance(m, _ToolExclusionMiddleware)),
+        None,
+    )
+    if exclusion is not None:
+        inherited.append(exclusion)
+    spec: dict = {**GENERAL_PURPOSE_SUBAGENT, "middleware": inherited}
+    if skills is not None:
+        spec["skills"] = skills
+    return [spec]
 
 
 def build_deep_agent(tools: list, system_prompt: str | None = None, skills: list | None = None,
@@ -200,7 +214,7 @@ def build_deep_agent(tools: list, system_prompt: str | None = None, skills: list
         if model_config is not None
         else get_chat_model()
     )
-    subagents = _subagents_inherit_main_middleware(middleware)
+    subagents = _subagents_inherit_main_middleware(middleware, skills)
     return create_deep_agent(
         model=model,
         tools=tools,

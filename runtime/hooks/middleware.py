@@ -44,6 +44,7 @@ encoder, whose failure is logged while the trim still goes ahead.
 from __future__ import annotations
 
 import logging
+import threading
 
 from langchain.agents.middleware import AgentMiddleware, hook_config
 from langchain_core.messages import (
@@ -64,6 +65,36 @@ from runtime.hooks.registry import HookRegistry
 from runtime.long_term_memory import encode_texts, turn_text
 
 logger = logging.getLogger(__name__)
+
+# Hooks wired into subagents: tool enforcement only — no SessionStart/End,
+# retrieval injection, user-prompt validation, or stop-completion nudges.
+SUBAGENT_HOOK_NAMES = [
+    "enforce_layer",
+    "enforce_write_preconditions",
+    "block_dangerous_tool_call",
+    "guard_destructive_target",
+    "request_permission",
+    "deny_builtin_tools",
+    "injection_feedback",
+    "tool_error_feedback",
+]
+
+
+class SharedRunCounters:
+    """Thread-safe counters shared by main agent + subagent middleware."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.tool_calls_made = 0
+
+    def increment_tool_calls(self) -> int:
+        with self._lock:
+            self.tool_calls_made += 1
+            return self.tool_calls_made
+
+    def snapshot_tool_calls(self) -> int:
+        with self._lock:
+            return self.tool_calls_made
 
 
 class HookMiddleware(AgentMiddleware):
@@ -86,6 +117,9 @@ class HookMiddleware(AgentMiddleware):
         capabilities: list | None = None,
         reserved_history_tokens: int = 0,
         history_budget_tokens: int | None = None,
+        shared_counters: SharedRunCounters | None = None,
+        events_sink: list | None = None,
+        subagent_mode: bool = False,
     ):
         self.registry = registry
         self.execution_id = execution_id
@@ -112,12 +146,39 @@ class HookMiddleware(AgentMiddleware):
             if history_budget_tokens
             else HISTORY_TOKENS
         )
+        self.shared_counters = shared_counters or SharedRunCounters()
+        self.events_sink = events_sink
+        self.subagent_mode = subagent_mode
         self.tool_calls_made = 0
         self.continues = 0
         self.trimmed_messages = 0
         self.trimmed_tokens = 0
         self.encoded_turns = 0
         self.events: list[dict] = []
+
+    @classmethod
+    def for_subagent(cls, parent: HookMiddleware) -> HookMiddleware:
+        """Tool-enforcement middleware for the general-purpose subagent."""
+        sub_registry = parent.registry.with_only(SUBAGENT_HOOK_NAMES)
+        return cls(
+            sub_registry,
+            execution_id=parent.execution_id,
+            mission_id=parent.mission_id,
+            tenant=parent.tenant,
+            agent_id=parent.agent_id,
+            mission=parent.mission,
+            input_data=parent.input_data,
+            evidence_count=0,
+            max_continues=0,
+            session_id=parent.session_id,
+            allowed_tools=list(parent.allowed_tools),
+            capabilities=list(parent.capabilities),
+            reserved_history_tokens=0,
+            history_budget_tokens=HISTORY_TOKENS,
+            shared_counters=parent.shared_counters,
+            events_sink=parent.events,
+            subagent_mode=True,
+        )
 
     # -- helpers ------------------------------------------------------
     def _base_context(self) -> HookContext:
@@ -134,17 +195,19 @@ class HookMiddleware(AgentMiddleware):
         )
 
     def _record(self, event: HookEvent, decisions, **extra) -> None:
-        self.events.append(
-            {
-                "event": event.value,
-                "decisions": [d.action for d in decisions],
-                "messages": [d.message for d in decisions if d.message],
-                **extra,
-            }
-        )
+        record = {
+            "event": event.value,
+            "decisions": [d.action for d in decisions],
+            "messages": [d.message for d in decisions if d.message],
+            **extra,
+        }
+        target = self.events_sink if self.events_sink is not None else self.events
+        target.append(record)
 
     # -- SessionStart --------------------------------------------------
     def before_agent(self, state, runtime):  # noqa: ARG002 - runtime unused
+        if self.subagent_mode:
+            return None
         context = self._base_context()
         decisions = self.registry.dispatch(HookEvent.SESSION_START, context)
         self._record(HookEvent.SESSION_START, decisions)
@@ -222,6 +285,7 @@ class HookMiddleware(AgentMiddleware):
         try:
             result = handler(request)
         except Exception as exc:  # noqa: BLE001 — tool errors are evidence
+            self.shared_counters.increment_tool_calls()
             self.tool_calls_made += 1
             failure = self._base_context()
             failure.tool_name = tool_name
@@ -241,6 +305,7 @@ class HookMiddleware(AgentMiddleware):
                 content += f"\n\n{feedback}"
             return ToolMessage(content=content, tool_call_id=tool_call_id, status="error")
 
+        self.shared_counters.increment_tool_calls()
         self.tool_calls_made += 1
         result_content = result.content if isinstance(result, ToolMessage) else ""
         is_error = isinstance(result, ToolMessage) and result.status == "error"
@@ -270,6 +335,8 @@ class HookMiddleware(AgentMiddleware):
     # -- Stop (Ralph loop) ---------------------------------------------
     @hook_config(can_jump_to=["model"])
     def after_model(self, state, runtime):  # noqa: ARG002 - runtime unused
+        if self.subagent_mode:
+            return None
         messages = (state or {}).get("messages") or []
         last = messages[-1] if messages else None
         # Only the stop case reaches this hook: while the agent still
@@ -278,7 +345,7 @@ class HookMiddleware(AgentMiddleware):
             return None
         context = self._base_context()
         context.messages = list(messages)
-        context.data["tool_calls_made"] = self.tool_calls_made
+        context.data["tool_calls_made"] = self.shared_counters.snapshot_tool_calls()
         context.data["evidence_count"] = self.evidence_count
         context.data["continues"] = self.continues
         context.data["max_continues"] = self.max_continues
@@ -301,6 +368,8 @@ class HookMiddleware(AgentMiddleware):
 
     # -- SessionEnd (agent run) -----------------------------------------
     def after_agent(self, state, runtime):  # noqa: ARG002 - unused
+        if self.subagent_mode:
+            return None
         context = self._base_context()
         context.reason = "agent_finished"
         decisions = self.registry.dispatch(HookEvent.SESSION_END, context)

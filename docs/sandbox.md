@@ -55,9 +55,11 @@ of every run, inline in the execution result:
 - The agent writes ALL its report files into the sandbox `output/`
   dir (prefer `/output/bao-cao.html`; `output/...` is also scanned) —
   the skill tells it to; files anywhere else are not exported.
-- Only files created or modified during the current run are exported
-  (mtime ≥ run start when available); stale files from prior turns in
-  the same session are skipped with a note.
+- Only files newer than an in-sandbox run marker are exported
+  (``touch /tmp/.run_export_<execution_id>`` at run start, then
+  ``find … -newer``); stale files from prior turns in the same session
+  are skipped with a note. Real ``ls`` listings carry no mtime — the
+  marker is the source of truth.
 - `runtime/sandbox/export.py::export_output_files` lists `/output` and
   `output` (`backend.ls`), checks size via `stat` before download, then
   fetches (`backend.download_files`)

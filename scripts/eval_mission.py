@@ -102,14 +102,24 @@ class _FakeAgent:
         }
 
 
-def install_mock_llm() -> None:
-    """Patch the deep-agent factory so the graph runs without any LLM."""
+def install_mock_llm():
+    """Patch the deep-agent factory so the graph runs without any LLM.
+
+    Returns a ``restore`` callable for tests — call it to undo the patch.
+    """
     import runtime.deep_agent as deep_agent_module
+
+    original = deep_agent_module.build_deep_agent
 
     def _fake_build_deep_agent(*args, **kwargs):  # noqa: ARG001
         return _FakeAgent()
 
     deep_agent_module.build_deep_agent = _fake_build_deep_agent
+
+    def restore() -> None:
+        deep_agent_module.build_deep_agent = original
+
+    return restore
 
 
 def load_fault_analysis_mission() -> dict:

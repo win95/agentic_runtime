@@ -34,6 +34,8 @@ from runtime.sandbox.opensandbox_backend import OpenSandboxBackend
 
 logger = logging.getLogger(__name__)
 
+_SANDBOX_DISABLED_LOGGED = False
+
 
 def _now() -> datetime:
     return datetime.now(timezone.utc).replace(tzinfo=None)
@@ -66,11 +68,18 @@ def resolve_session_sandbox(
     the run proceeds without a sandbox.
     """
     cfg = settings if settings is not None else _default_settings
+    global _SANDBOX_DISABLED_LOGGED
     if not cfg.sandbox_enabled:
-        logger.warning(
-            "Sandbox disabled (SANDBOX_ENABLED=false); session %s uses in-memory backend",
-            session_id,
-        )
+        if not _SANDBOX_DISABLED_LOGGED:
+            logger.warning(
+                "Sandbox disabled (SANDBOX_ENABLED=false); sessions fall back "
+                "to the in-memory file backend"
+            )
+            _SANDBOX_DISABLED_LOGGED = True
+        else:
+            logger.debug(
+                "Sandbox disabled; session %s uses in-memory backend", session_id
+            )
         return None
     if not cfg.sandbox_api_key:
         logger.warning(

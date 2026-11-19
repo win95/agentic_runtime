@@ -124,11 +124,12 @@ def effective_history_tokens(mission: dict | None) -> int:
     ``execution.retrieval`` keep the default — their retrieval block consumes
     that slice at run time.
     """
+    from runtime.harness.registry import effective_harness
+
+    mission_id = (mission or {}).get("mission_id")
     execution = (mission or {}).get("execution") or {}
-    harness_raw = execution.get("harness") or {}
-    reclaim = bool((harness_raw.get("context_budget") or {}).get(
-        "reclaim_retrieval_for_history"
-    ))
+    harness = effective_harness(mission_id, execution)
+    reclaim = harness.context_budget.reclaim_retrieval_for_history
     if reclaim and not execution.get("retrieval"):
         return HISTORY_TOKENS + RETRIEVAL_TOKENS
     return HISTORY_TOKENS

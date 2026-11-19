@@ -246,9 +246,6 @@ def deep_agent_node(state: MissionState) -> dict:
     """
     mission = state.get("mission") or {}
     input_data = state.get("input") or {}
-    from runtime.sandbox.export import run_start_timestamp
-
-    export_run_started_at = run_start_timestamp()
     # "input" + "execution_config" feed Layer 4 execution scoping in the
     # registry: tools taking asset_id are wrapped to refuse any asset
     # other than this execution's, unless the mission opts out with
@@ -589,6 +586,13 @@ def deep_agent_node(state: MissionState) -> dict:
                 sandbox_note = "Sandbox unavailable — in-memory file backend"
             else:
                 sandbox_note = f"Sandbox backend: {sandbox_backend.id}"
+        export_marker_path = None
+        if sandbox_backend is not None and state.get("execution_id"):
+            from runtime.sandbox.export import touch_export_run_marker
+
+            export_marker_path = touch_export_run_marker(
+                sandbox_backend, state["execution_id"]
+            )
         # The fixed prefix measured against the system-prompt budget —
         # set in each branch below, BEFORE the history block is
         # appended (history is charged to the history bucket, not here).
@@ -871,12 +875,17 @@ def deep_agent_node(state: MissionState) -> dict:
 
             exported, export_notes = export_output_files(
                 sandbox_backend,
-                run_started_at=export_run_started_at,
+                run_marker_path=export_marker_path,
             )
             result["files"] = exported
             notes.extend(export_notes)
-            if not exported:
-                result["export_warnings"] = list(export_notes) or [
+            export_warns = [
+                n for n in export_notes if n.startswith("Export:")
+            ]
+            if export_warns:
+                result["export_warnings"] = export_warns
+            if not exported and "export_warnings" not in result:
+                result["export_warnings"] = [
                     "Export: output schema requires files but none were exported"
                 ]
         tool_failures = outcome.get("errors") or []
@@ -1033,7 +1042,7 @@ def _allowed_tool_names(mission: dict, *, sandbox_enabled: bool = False) -> set[
         mission.get("execution") or {},
         sandbox_enabled=sandbox_enabled,
     )
-    return allowed or None
+    return allowed
 
 
 def _execution_diagnostic_errors(errors: list[str] | None) -> list[str]:
