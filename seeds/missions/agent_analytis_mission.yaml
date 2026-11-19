@@ -1,0 +1,57 @@
+# Mission agent_analytis_mission — phân tích dữ liệu + nghiên cứu web,
+# xuất báo cáo HTML (bảng, biểu đồ) + file dữ liệu.
+# A Mission is CONFIG, not a LangGraph.
+mission_id: agent_analytis_mission
+version: 1
+name: Agent Analytis Mission
+objective: >
+  Phân tích dữ liệu và nghiên cứu trên web theo yêu cầu của người dùng,
+  rồi xuất kết quả thành file: báo cáo HTML tự chứa (bảng + biểu đồ),
+  dữ liệu CSV và tóm tắt Markdown. Mọi khẳng định phải có nguồn: URL
+  cho thông tin web, tên file cho dữ liệu người dùng đưa. Không bịa số liệu.
+
+input_schema:
+  type: object
+  properties:
+    message:
+      type: string
+  required:
+    - message
+
+execution:
+  mode: autonomous
+  agent_id: agent_analytis
+  skills:
+    - agent-analytis
+    - session-memory
+  # Sandbox backend (docs/sandbox.md): file tools + `execute` chạy trong
+  # một OpenSandbox sandbox của session — agent mới chạy được code Python
+  # (pandas...) để tính toán và vẽ biểu đồ thật. Cần SANDBOX_ENABLED=true
+  # + server đang chạy; nếu không, run fallback về backend in-memory
+  # (chỉ viết file, không execute được).
+  sandbox: true
+
+capabilities:
+  - agent_analytis
+
+# Harness: giữ mặc định — security.user_runnable: false (chỉ admin /
+# API key chạy được mission này; muốn mở cho JWT user thì đặt
+# security.user_runnable: true), builtin_tools.deny: false (agent cần
+# read_file / write_file / execute + task), flow_subgraph.enabled: false
+# (không có skill map, deep agent tự do).
+harness: {}
+
+# Export trực tiếp (trả thẳng trong result, tran 2026-11-19): sau mỗi
+# run, runtime tải các file agent đã ghi vào thư mục `output/` trong
+# sandbox rồi nhét nội dung vào key `files` dưới đây — user lấy qua
+# GET /executions/{id}/result. Chỉ file text (.html/.csv/.md/.txt/
+# .json), mỗi file ≤ 256KB, tổng ≤ 1MB; xem runtime/sandbox/export.py.
+output_schema:
+  type: object
+  properties:
+    answer:
+      type: string
+    actions_taken:
+      type: array
+    files:
+      type: array

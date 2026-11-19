@@ -29,7 +29,6 @@ from infra.mlflow_setup import setup_mlflow_tracing
 from runtime.capabilities.fault_analysis import build_fault_analysis_graph
 from runtime.observability_resilience import (
     filter_observability_errors,
-    invoke_with_observability_fallback,
     is_observability_transport_error,
 )
 from runtime.security import detect_injection_signals
@@ -852,6 +851,18 @@ def deep_agent_node(state: MissionState) -> dict:
             result["root_causes"] = _root_causes_from_evidence(all_evidence)
         if "recommendations" in required_keys and not result.get("recommendations"):
             result["recommendations"] = _recommendations_from_summary(summary)
+        if "files" in required_keys:
+            # Direct return (tran 2026-11-19): the agent's report files
+            # are downloaded from its session sandbox and inlined into
+            # the result, so the user gets them through the result API.
+            # Only missions declaring `files` pay for this; a missing
+            # sandbox (fallback backend) exports nothing — the
+            # "Sandbox unavailable" note above already says why.
+            from runtime.sandbox.export import export_output_files
+
+            exported, export_notes = export_output_files(sandbox_backend)
+            result["files"] = exported
+            notes.extend(export_notes)
         tool_failures = outcome.get("errors") or []
         graph_errors = _execution_diagnostic_errors(tool_failures)
         if tool_failures:

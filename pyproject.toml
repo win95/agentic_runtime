@@ -38,6 +38,10 @@ dependencies = [
     "opensandbox>=1.2,<2",
     "langchain-mcp-adapters>=0.1,<1",
     "langsmith>=0.2,<1",
+    # tavily-python: Tavily web search/extract for the agent-analytis
+    # agent (runtime/tools/tavily_tools.py). Free tier works; the key
+    # comes from TAVILY_API_KEY in .env (see .env.example).
+    "tavily-python>=0.8,<1",
     "qdrant-client>=1.11,<2",
     "neo4j>=5.26,<6",
     "minio>=7.2,<8",

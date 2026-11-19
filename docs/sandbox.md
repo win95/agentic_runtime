@@ -17,7 +17,7 @@ exactly as before:
    plus `SANDBOX_API_KEY` set (the server refuses to start without
    one, so an empty key means "no server to talk to").
 2. The mission opts in: `execution.sandbox: true` in its YAML
-   (today only `fault_analysis` does).
+   (today `fault_analysis` and `agent_analytis_mission` do).
 3. The execution has a `session_id`.
 
 `admin_bot` / `system_admin` never opts in, and session-less runs
@@ -43,6 +43,36 @@ The sandbox image MUST contain python3: deepagents' own file helpers
 (`read`, `grep`, `glob`) run a small Python script inside the
 sandbox. Default image is `python:3.12-slim`
 (`SANDBOX_IMAGE`).
+
+## Export — direct return in the execution result
+
+(tran 2026-11-19: "trả thẳng trong result".) A sandbox is ephemeral:
+the reap destroys it without downloading files first, so a report
+that only exists in the sandbox is lost. Missions that declare
+`files` in their output schema get their files exported at the end
+of every run, inline in the execution result:
+
+- The agent writes ALL its report files into the sandbox `output/`
+  dir (relative path, e.g. `output/bao-cao.html`) — the skill tells
+  it to; files anywhere else are not exported.
+- `runtime/sandbox/export.py::export_output_files` lists `output/`
+  (`backend.ls`), downloads the files (`backend.download_files`)
+  and inlines them into `result["files"]` as
+  `{name, path, content_type, content}` with content decoded as
+  UTF-8 text. The user gets them through the existing
+  `GET /executions/{id}/result` API (`output.files[]`); the guest
+  projection passes `files` through (it is not a stripped key).
+- Only text report formats: `.html`, `.csv`, `.md`, `.txt`, `.json`.
+  Per-file cap 256 KiB, total cap 1 MiB — a report bigger than that
+  does not belong inlined in a JSON result row. Skipped files are
+  named in the execution notes, never silently dropped.
+- The export never breaks a run: any failure yields `files: []`
+  plus a note. A run that fell back to the in-memory backend
+  exports nothing (`files: []` + the "Sandbox unavailable" note) —
+  the StateBackend's files are not reachable from the node.
+- Today only `agent_analytis_mission` declares `files`. Any mission
+  can opt in by declaring it in its output schema + telling its
+  agent to write into `output/`.
 
 ## Lifecycle
 
