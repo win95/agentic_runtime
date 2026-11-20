@@ -505,8 +505,9 @@ def deep_agent_node(state: MissionState) -> dict:
             estimate_tokens,
         )
 
-        from runtime.harness.registry import harness_requires_output_files
+        from runtime.harness.registry import effective_harness, harness_requires_output_files
 
+        _run_harness = effective_harness(state.get("mission_id"), execution_cfg)
         hook_middleware = HookMiddleware(
             hook_registry,
             execution_id=state.get("execution_id") or "",
@@ -525,7 +526,12 @@ def deep_agent_node(state: MissionState) -> dict:
             output_files_required=harness_requires_output_files(
                 state.get("mission_id"), execution_cfg
             ),
+            sequential_tool_names=frozenset(_run_harness.tool_calls.sequential),
+            tool_budget_tools=frozenset(_run_harness.tool_budget.tools),
+            tool_budget_max_result_tokens=_run_harness.tool_budget.max_result_tokens,
+            tool_budget_max_calls=dict(_run_harness.tool_budget.max_calls),
         )
+        _disable_parallel_tool_calls = bool(_run_harness.tool_calls.sequential)
         # Part 1 (b): the per-run middleware list. For missions that
         # must not see any built-in tool (hotel only), append the
         # exclusion middleware — it hides the 9 deepagents built-ins
@@ -745,14 +751,17 @@ def deep_agent_node(state: MissionState) -> dict:
                 prompt_for_budget = system_prompt_text
                 if history_block:
                     system_prompt_text = system_prompt_text + "\n\n" + history_block
-                agent = build_deep_agent(
-                    tools,
-                    system_prompt=system_prompt_text,
-                    skills=skill_sources,
-                    model_config=version_cfg,
-                    middleware=middleware,
-                    backend=sandbox_backend,
-                )
+                _agent_kw: dict = {
+                    "tools": tools,
+                    "system_prompt": system_prompt_text,
+                    "skills": skill_sources,
+                    "model_config": version_cfg,
+                    "middleware": middleware,
+                    "backend": sandbox_backend,
+                }
+                if _disable_parallel_tool_calls:
+                    _agent_kw["disable_parallel_tool_calls"] = True
+                agent = build_deep_agent(**_agent_kw)
             else:
                 system_prompt_text = base_prompt_text
                 if plan_block:
@@ -760,13 +769,16 @@ def deep_agent_node(state: MissionState) -> dict:
                 prompt_for_budget = system_prompt_text
                 if history_block:
                     system_prompt_text = system_prompt_text + "\n\n" + history_block
-                agent = build_deep_agent(
-                    tools,
-                    system_prompt=system_prompt_text,
-                    skills=skill_sources,
-                    middleware=middleware,
-                    backend=sandbox_backend,
-                )
+                _agent_kw = {
+                    "tools": tools,
+                    "system_prompt": system_prompt_text,
+                    "skills": skill_sources,
+                    "middleware": middleware,
+                    "backend": sandbox_backend,
+                }
+                if _disable_parallel_tool_calls:
+                    _agent_kw["disable_parallel_tool_calls"] = True
+                agent = build_deep_agent(**_agent_kw)
             # Fixed prefix (see the shared computation above):
             # prompt_for_budget was set by whichever branch ran.
             prefix_overruns = check_prefix_budgets(prompt_for_budget, tools_text, skills_text)

@@ -79,6 +79,36 @@ class ContextBudgetHarness(BaseModel):
     reclaim_retrieval_for_history: StrictBool = False
 
 
+class ToolCallsHarness(BaseModel):
+    """Per-mission tool invocation policy."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Tools in this list must not run in parallel within one model message.
+    sequential: list[str] = Field(default_factory=list)
+
+
+class ToolBudgetHarness(BaseModel):
+    """Shared execution budget for web tool results (opt-in)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tools: list[str] = Field(default_factory=list)
+    max_result_tokens: int = 0
+    max_calls: dict[str, int] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_budget(self) -> ToolBudgetHarness:
+        if self.max_result_tokens < 0:
+            raise ValueError("tool_budget.max_result_tokens must be >= 0")
+        for name, cap in self.max_calls.items():
+            if not (name or "").strip():
+                raise ValueError("tool_budget.max_calls keys must be non-empty")
+            if cap < 0:
+                raise ValueError(f"tool_budget.max_calls[{name!r}] must be >= 0")
+        return self
+
+
 class OutputFilesHarness(BaseModel):
     """Sandbox report export expectations (opt-in per mission)."""
 
@@ -101,6 +131,8 @@ class MissionHarness(BaseModel):
     guest_output: GuestOutputHarness = Field(default_factory=GuestOutputHarness)
     context_budget: ContextBudgetHarness = Field(default_factory=ContextBudgetHarness)
     output_files: OutputFilesHarness = Field(default_factory=OutputFilesHarness)
+    tool_calls: ToolCallsHarness = Field(default_factory=ToolCallsHarness)
+    tool_budget: ToolBudgetHarness = Field(default_factory=ToolBudgetHarness)
 
 
 class AgentHarness(BaseModel):

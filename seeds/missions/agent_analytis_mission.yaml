@@ -46,6 +46,18 @@ harness:
   output_files:
     # Stop hook nudges the agent to write /output reports before finishing.
     required: true
+  tool_calls:
+    sequential:
+      - tavily_search
+      - tavily_extract
+  tool_budget:
+    tools:
+      - tavily_search
+      - tavily_extract
+    max_result_tokens: 6000
+    max_calls:
+      tavily_search: 4
+      tavily_extract: 3
 
 # Export trực tiếp (trả thẳng trong result, tran 2026-11-19): sau mỗi
 # run, runtime tải các file agent đã ghi vào thư mục `output/` trong

@@ -110,6 +110,8 @@ class SharedRunCounters:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self.tool_calls_made = 0
+        self.tool_budget_tokens_used = 0
+        self.tool_budget_calls: dict[str, int] = {}
 
     def increment_tool_calls(self) -> int:
         with self._lock:
@@ -147,6 +149,10 @@ class HookMiddleware(AgentMiddleware):
         sandbox_backend=None,
         export_marker_path: str | None = None,
         output_files_required: bool = False,
+        sequential_tool_names: frozenset[str] | None = None,
+        tool_budget_tools: frozenset[str] | None = None,
+        tool_budget_max_result_tokens: int = 0,
+        tool_budget_max_calls: dict[str, int] | None = None,
     ):
         self.registry = registry
         self.execution_id = execution_id
@@ -185,6 +191,12 @@ class HookMiddleware(AgentMiddleware):
         self.sandbox_backend = sandbox_backend
         self.export_marker_path = export_marker_path
         self.output_files_required = output_files_required
+        self.sequential_tool_names = frozenset(sequential_tool_names or ())
+        self.tool_budget_tools = frozenset(tool_budget_tools or ())
+        self.tool_budget_max_result_tokens = max(
+            0, int(tool_budget_max_result_tokens or 0)
+        )
+        self.tool_budget_max_calls = dict(tool_budget_max_calls or {})
 
     @classmethod
     def for_subagent(cls, parent: HookMiddleware) -> HookMiddleware:
@@ -208,6 +220,13 @@ class HookMiddleware(AgentMiddleware):
             shared_counters=parent.shared_counters,
             events_sink=parent.events,
             subagent_mode=True,
+            sandbox_backend=parent.sandbox_backend,
+            export_marker_path=parent.export_marker_path,
+            output_files_required=parent.output_files_required,
+            sequential_tool_names=parent.sequential_tool_names,
+            tool_budget_tools=parent.tool_budget_tools,
+            tool_budget_max_result_tokens=parent.tool_budget_max_result_tokens,
+            tool_budget_max_calls=parent.tool_budget_max_calls,
         )
 
     # -- helpers ------------------------------------------------------
@@ -291,10 +310,48 @@ class HookMiddleware(AgentMiddleware):
 
     # -- Pre/PostToolUse + PostToolUseFailure --------------------------
     def wrap_tool_call(self, request, handler):
+        from runtime.tool_call_policy import (
+            BUDGET_EXHAUSTED_TEMPLATE,
+            apply_tool_result_budget,
+            budget_block_reason,
+            sequential_defer_message,
+            tool_budget_enabled,
+        )
+
         tool_call = request.tool_call or {}
         tool_name = str(tool_call.get("name") or "")
         tool_input = dict(tool_call.get("args") or {})
         tool_call_id = str(tool_call.get("id") or "")
+
+        deferred = sequential_defer_message(
+            request,
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            sequential_tools=self.sequential_tool_names,
+        )
+        if deferred is not None:
+            return deferred
+
+        if tool_budget_enabled(
+            budget_tools=self.tool_budget_tools,
+            max_result_tokens=self.tool_budget_max_result_tokens,
+            max_calls=self.tool_budget_max_calls,
+        ):
+            reason = budget_block_reason(
+                self.shared_counters,
+                tool_name=tool_name,
+                budget_tools=self.tool_budget_tools,
+                max_result_tokens=self.tool_budget_max_result_tokens,
+                max_calls=self.tool_budget_max_calls,
+            )
+            if reason:
+                return ToolMessage(
+                    content=BUDGET_EXHAUSTED_TEMPLATE.format(
+                        tool_name=tool_name, reason=reason
+                    ),
+                    tool_call_id=tool_call_id,
+                    status="error",
+                )
 
         pre = self._base_context()
         pre.tool_name = tool_name
@@ -352,6 +409,15 @@ class HookMiddleware(AgentMiddleware):
         feedback = "\n\n".join(
             d.message for d in post_decisions if d.action == "feedback" and d.message
         )
+        if isinstance(result, ToolMessage):
+            result = apply_tool_result_budget(
+                result,
+                shared_counters=self.shared_counters,
+                tool_name=tool_name,
+                budget_tools=self.tool_budget_tools,
+                max_result_tokens=self.tool_budget_max_result_tokens,
+                max_calls=self.tool_budget_max_calls,
+            )
         if feedback and isinstance(result, ToolMessage) and isinstance(
             result.content, str
         ):

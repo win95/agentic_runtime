@@ -176,8 +176,16 @@ def _subagents_inherit_main_middleware(
     return [spec]
 
 
-def build_deep_agent(tools: list, system_prompt: str | None = None, skills: list | None = None,
-                     model_config=None, middleware=None, backend=None):
+def build_deep_agent(
+    tools: list,
+    system_prompt: str | None = None,
+    skills: list | None = None,
+    model_config=None,
+    middleware=None,
+    backend=None,
+    *,
+    disable_parallel_tool_calls: bool = False,
+):
     """Create a Deep Agent (compiled LangGraph) over the given tools.
 
     The system prompt defaults to DEFAULT_SYSTEM_PROMPT (the code
@@ -214,6 +222,10 @@ def build_deep_agent(tools: list, system_prompt: str | None = None, skills: list
         if model_config is not None
         else get_chat_model()
     )
+    if disable_parallel_tool_calls:
+        from runtime.tool_call_policy import maybe_disable_parallel_tool_calls
+
+        model = maybe_disable_parallel_tool_calls(model)
     subagents = _subagents_inherit_main_middleware(middleware, skills)
     return create_deep_agent(
         model=model,

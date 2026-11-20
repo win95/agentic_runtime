@@ -33,6 +33,10 @@ Docker images copy `seeds/` and `skills/` at build time — rebuild the image
 | `guest_output.capability` | Registry capability for those synthetic tools |
 | `context_budget.reclaim_retrieval_for_history` | Opt-in: move unused retrieval slice into history trim budget |
 | `output_files.required` | Opt-in: `stop_completion` nudges the agent to write top-level report files under `/output` in the live sandbox before stopping (uses the same export marker + find logic as file export) |
+| `tool_calls.sequential` | Tool names that must not run in parallel within one model turn; later parallel calls get a deferral `ToolMessage` |
+| `tool_budget.tools` | Tool names subject to the shared execution result budget |
+| `tool_budget.max_result_tokens` | Max estimated tokens of tool results charged per execution (main + subagents) |
+| `tool_budget.max_calls` | Per-tool call caps for the execution (e.g. `tavily_search: 4`) |
 
 Agent YAML: `harness.system_prompt_fallback`:
 
