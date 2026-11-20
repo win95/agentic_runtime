@@ -140,6 +140,11 @@ def run_execution(self, execution_id: str) -> dict:
         evidence = final_state.get("evidence") or []
         errors = final_state.get("errors") or []
 
+        # Persist the run's notes into the saved result so they are readable
+        # via GET /executions/{id}/result (output["notes"]). The worker used
+        # to drop them — they only survived inside the Markdown report.
+        output = {**output, "notes": final_state.get("notes") or []}
+
         # Hooks: SessionEnd for the whole execution (the agent run's own
         # SessionEnd already fired inside HookMiddleware.after_agent when
         # the Deep Agent ran; this one covers capability-only runs too).

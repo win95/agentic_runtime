@@ -111,9 +111,14 @@ of every run, inline in the execution result:
    the host, set `SANDBOX_USE_SERVER_PROXY=true`.
 6. Restart the worker (and beat, for the reap task).
 
-Verify without an LLM: `GET /executions` notes — a sandbox run
-shows `Sandbox backend: <id>`; with the server down the same run
-still succeeds with the `Sandbox unavailable` note.
+Verify without an LLM: `GET /executions/{id}/result` →
+`output["notes"]` — a sandbox run shows `Sandbox backend: <id>`;
+with the server down the same run still succeeds with the
+`Sandbox unavailable` note. The same notes are also in the run's
+Markdown report (`output.report_markdown`, or the MinIO file at
+`output.report_location`), section "Notes". There is no `notes`
+column on `executions` — check `session_sandboxes` for the session
+to confirm a sandbox was ever created.
 
 ## Code map
 
@@ -137,16 +142,20 @@ still succeeds with the `Sandbox unavailable` note.
 
 ## Limits (known, not yet built)
 
-- No artifact export: the reap destroys the sandbox without
-  downloading files first. A future step can export a session's
-  files (`download_files()`) on reap or on demand.
+- Artifact export: the sandbox `output/` text files (.html/.csv/.md/
+  .txt/.json, ≤256KB each, ≤1MB total) are exported into
+  `result["files"]` at run end (since 47f0856e). Files outside
+  `output/`, or a run that fell back to the in-memory backend, still
+  export nothing — and the reap destroys the sandbox without
+  downloading files first.
 - No per-sandbox egress policy yet: the sandbox starts with the
   server default (no egress configured by us). Credential Vault is
   not used — the sandbox gets no credentials at all.
 - Default Docker deployment is plain-container isolation
   (gVisor/Kata/Firecracker are opt-in server config, not default).
-- Not verified live: no real sandbox run has happened yet (no server
-  here, no Docker daemon in this environment). The wiring is covered
+- Not verified live: a live run happened 2026-11-19 but fell back to
+  the in-memory backend (sandbox not set up yet); the first live
+  sandbox execution is still pending. The wiring is covered
   by `tests/test_sandbox_backend.py`,
   `tests/test_sandbox_service.py`, `tests/test_sandbox_wiring.py`
   (fake SDK handle + sqlite).
