@@ -15,6 +15,22 @@ from runtime.hooks.middleware import builtin_subagent_hook_names
 from runtime.hooks.registry import HookRegistry
 
 
+def test_subagent_excludes_output_files_stop_nudge_config():
+    parent = HookMiddleware(
+        default_registry(),
+        execution_id="e1",
+        mission_id="agent_analytis_mission",
+        output_files_required=True,
+        sandbox_backend=object(),
+        export_marker_path="/tmp/.run_x",
+    )
+    sub = HookMiddleware.for_subagent(parent)
+    assert sub.output_files_required is False
+    assert sub.sandbox_backend is None
+    assert sub.export_marker_path is None
+    assert sub._output_files_stop_status() == "skipped"
+
+
 def test_subagents_spec_includes_subagent_scoped_hook_middleware():
     mw = HookMiddleware(default_registry(), execution_id="e1", mission_id="m1")
     specs = _subagents_inherit_main_middleware([mw], skills=["/skills/"])

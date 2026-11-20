@@ -122,6 +122,24 @@ class SharedRunCounters:
         with self._lock:
             return self.tool_calls_made
 
+    def reserve_budget_call(self, tool_name: str, cap: int | None) -> bool:
+        """Atomically reserve one call slot before the tool runs."""
+        if cap is None:
+            return True
+        with self._lock:
+            used = self.tool_budget_calls.get(tool_name, 0)
+            if used >= cap:
+                return False
+            self.tool_budget_calls[tool_name] = used + 1
+            return True
+
+    def release_budget_call(self, tool_name: str) -> None:
+        """Rollback a reserved call when the tool never completed charging."""
+        with self._lock:
+            used = self.tool_budget_calls.get(tool_name, 0)
+            if used > 0:
+                self.tool_budget_calls[tool_name] = used - 1
+
 
 class HookMiddleware(AgentMiddleware):
     """Per-run hook middleware for one Deep Agent invocation."""
@@ -220,9 +238,6 @@ class HookMiddleware(AgentMiddleware):
             shared_counters=parent.shared_counters,
             events_sink=parent.events,
             subagent_mode=True,
-            sandbox_backend=parent.sandbox_backend,
-            export_marker_path=parent.export_marker_path,
-            output_files_required=parent.output_files_required,
             sequential_tool_names=parent.sequential_tool_names,
             tool_budget_tools=parent.tool_budget_tools,
             tool_budget_max_result_tokens=parent.tool_budget_max_result_tokens,
@@ -313,7 +328,7 @@ class HookMiddleware(AgentMiddleware):
         from runtime.tool_call_policy import (
             BUDGET_EXHAUSTED_TEMPLATE,
             apply_tool_result_budget,
-            budget_block_reason,
+            budget_token_block_reason,
             sequential_defer_message,
             tool_budget_enabled,
         )
@@ -332,18 +347,17 @@ class HookMiddleware(AgentMiddleware):
         if deferred is not None:
             return deferred
 
-        if tool_budget_enabled(
+        cap_reserved = False
+        if tool_name in self.tool_budget_tools and tool_budget_enabled(
             budget_tools=self.tool_budget_tools,
             max_result_tokens=self.tool_budget_max_result_tokens,
             max_calls=self.tool_budget_max_calls,
         ):
-            reason = budget_block_reason(
-                self.shared_counters,
-                tool_name=tool_name,
-                budget_tools=self.tool_budget_tools,
-                max_result_tokens=self.tool_budget_max_result_tokens,
-                max_calls=self.tool_budget_max_calls,
-            )
+            with self.shared_counters._lock:
+                reason = budget_token_block_reason(
+                    self.shared_counters,
+                    max_result_tokens=self.tool_budget_max_result_tokens,
+                )
             if reason:
                 return ToolMessage(
                     content=BUDGET_EXHAUSTED_TEMPLATE.format(
@@ -352,6 +366,17 @@ class HookMiddleware(AgentMiddleware):
                     tool_call_id=tool_call_id,
                     status="error",
                 )
+            cap = self.tool_budget_max_calls.get(tool_name)
+            if not self.shared_counters.reserve_budget_call(tool_name, cap):
+                return ToolMessage(
+                    content=BUDGET_EXHAUSTED_TEMPLATE.format(
+                        tool_name=tool_name,
+                        reason=f"call cap {cap} reached for {tool_name}",
+                    ),
+                    tool_call_id=tool_call_id,
+                    status="error",
+                )
+            cap_reserved = cap is not None
 
         pre = self._base_context()
         pre.tool_name = tool_name
@@ -370,6 +395,8 @@ class HookMiddleware(AgentMiddleware):
         try:
             result = handler(request)
         except Exception as exc:  # noqa: BLE001 — tool errors are evidence
+            if cap_reserved:
+                self.shared_counters.release_budget_call(tool_name)
             self.shared_counters.increment_tool_calls()
             if not self.subagent_mode:
                 self.tool_calls_made += 1

@@ -531,7 +531,6 @@ def deep_agent_node(state: MissionState) -> dict:
             tool_budget_max_result_tokens=_run_harness.tool_budget.max_result_tokens,
             tool_budget_max_calls=dict(_run_harness.tool_budget.max_calls),
         )
-        _disable_parallel_tool_calls = bool(_run_harness.tool_calls.sequential)
         # Part 1 (b): the per-run middleware list. For missions that
         # must not see any built-in tool (hotel only), append the
         # exclusion middleware — it hides the 9 deepagents built-ins
@@ -759,8 +758,6 @@ def deep_agent_node(state: MissionState) -> dict:
                     "middleware": middleware,
                     "backend": sandbox_backend,
                 }
-                if _disable_parallel_tool_calls:
-                    _agent_kw["disable_parallel_tool_calls"] = True
                 agent = build_deep_agent(**_agent_kw)
             else:
                 system_prompt_text = base_prompt_text
@@ -776,8 +773,6 @@ def deep_agent_node(state: MissionState) -> dict:
                     "middleware": middleware,
                     "backend": sandbox_backend,
                 }
-                if _disable_parallel_tool_calls:
-                    _agent_kw["disable_parallel_tool_calls"] = True
                 agent = build_deep_agent(**_agent_kw)
             # Fixed prefix (see the shared computation above):
             # prompt_for_budget was set by whichever branch ran.

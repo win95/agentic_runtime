@@ -6,6 +6,7 @@ from langchain.agents.middleware import ToolCallRequest
 from langchain_core.messages import AIMessage, ToolMessage
 
 from runtime.context_budget import estimate_tokens
+from runtime.deep_agent import build_deep_agent
 from runtime.hooks import builtin
 from runtime.hooks.events import HookEvent
 from runtime.hooks.middleware import HookMiddleware, SharedRunCounters
@@ -65,6 +66,27 @@ def test_truncate_text_to_token_budget():
     out = truncate_text_to_token_budget(text, 100)
     assert TRUNCATION_MARKER in out
     assert estimate_tokens(out) <= 100
+
+
+def test_truncate_preserves_prefix_and_single_marker():
+    prefix = "KEEP_ME_" + ("word " * 4000)
+    suffix = "DROP_ME_" + ("tail " * 4000)
+    text = prefix + suffix
+    assert estimate_tokens(text) > 500
+    out = truncate_text_to_token_budget(text, 500)
+    assert out.startswith("KEEP_ME_")
+    assert "DROP_ME_" not in out
+    assert out.count(TRUNCATION_MARKER) == 1
+    assert estimate_tokens(out) <= 500
+
+
+def test_truncate_huge_budget_no_marker_storm():
+    text = "a" * (17000 * 4)
+    out = truncate_text_to_token_budget(text, 500)
+    assert out.endswith(TRUNCATION_MARKER)
+    assert out.count(TRUNCATION_MARKER) == 1
+    assert out.startswith("a")
+    assert estimate_tokens(out) <= 500
 
 
 def test_wrap_tool_call_budget_truncation():
@@ -177,6 +199,72 @@ def test_harness_tool_budget_rejects_negative_token_cap():
 
     with pytest.raises(ValueError):
         parse_mission_harness({"tool_budget": {"tools": ["t"], "max_result_tokens": -1}})
+
+
+def test_call_cap_reserve_is_atomic_under_threads():
+    import threading
+
+    registry = HookRegistry()
+    shared = SharedRunCounters()
+    mw = HookMiddleware(
+        registry,
+        execution_id="e1",
+        mission_id="m",
+        tool_budget_tools=frozenset({"tavily_search"}),
+        tool_budget_max_result_tokens=0,
+        tool_budget_max_calls={"tavily_search": 2},
+        shared_counters=shared,
+    )
+    lock = threading.Lock()
+    results: list[str] = []
+
+    def handler(request):
+        with lock:
+            results.append(str((request.tool_call or {}).get("id")))
+        return ToolMessage(
+            content="ok",
+            tool_call_id=str((request.tool_call or {}).get("id")),
+        )
+
+    def run_one(cid: str) -> None:
+        ai = AIMessage(
+            content="",
+            tool_calls=[{"name": "tavily_search", "args": {}, "id": cid}],
+        )
+        mw.wrap_tool_call(_req("tavily_search", cid, ai), handler)
+
+    threads = [threading.Thread(target=run_one, args=(cid,)) for cid in ("t1", "t2", "t3")]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert len(results) == 2
+    assert shared.tool_budget_calls["tavily_search"] == 2
+
+
+def test_build_deep_agent_uses_real_create_deep_agent_with_sequential():
+    from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+
+    class _BindableFakeModel(GenericFakeChatModel):
+        def bind_tools(self, tools, **kwargs):  # noqa: ARG002
+            return self
+
+    mw = HookMiddleware(
+        HookRegistry(),
+        execution_id="e1",
+        mission_id="agent_analytis_mission",
+        sequential_tool_names=frozenset({"tavily_search", "tavily_extract"}),
+    )
+    model = _BindableFakeModel(messages=iter([AIMessage(content="ok")]))
+    from unittest.mock import patch
+
+    with patch("runtime.deep_agent.build_chat_model", return_value=model):
+        agent = build_deep_agent(
+            [],
+            system_prompt="t",
+            middleware=[mw],
+        )
+    assert agent is not None
 
 
 def test_apply_tool_result_budget_charges_once():

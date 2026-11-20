@@ -183,8 +183,6 @@ def build_deep_agent(
     model_config=None,
     middleware=None,
     backend=None,
-    *,
-    disable_parallel_tool_calls: bool = False,
 ):
     """Create a Deep Agent (compiled LangGraph) over the given tools.
 
@@ -222,10 +220,6 @@ def build_deep_agent(
         if model_config is not None
         else get_chat_model()
     )
-    if disable_parallel_tool_calls:
-        from runtime.tool_call_policy import maybe_disable_parallel_tool_calls
-
-        model = maybe_disable_parallel_tool_calls(model)
     subagents = _subagents_inherit_main_middleware(middleware, skills)
     return create_deep_agent(
         model=model,

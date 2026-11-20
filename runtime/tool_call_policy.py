@@ -29,24 +29,23 @@ def truncate_text_to_token_budget(text: str, max_tokens: int) -> str:
     """Truncate ``text`` to at most ``max_tokens`` (estimate_tokens)."""
     if max_tokens <= 0:
         return ""
-    if estimate_tokens(text) <= max_tokens:
+    marker_tokens = estimate_tokens(TRUNCATION_MARKER)
+    if marker_tokens >= max_tokens:
+        return TRUNCATION_MARKER[: max(0, max_tokens * 4)]
+    content_budget = max_tokens - marker_tokens
+    if estimate_tokens(text) <= content_budget:
         return text
     low, high = 0, len(text)
     best = ""
     while low <= high:
         mid = (low + high) // 2
         chunk = text[:mid]
-        if estimate_tokens(chunk) <= max_tokens:
+        if estimate_tokens(chunk) <= content_budget:
             best = chunk
             low = mid + 1
         else:
             high = mid - 1
-    marker_tokens = estimate_tokens(TRUNCATION_MARKER)
-    if marker_tokens >= max_tokens:
-        return TRUNCATION_MARKER[: max(0, max_tokens * 4)]
-    room = max_tokens - marker_tokens
-    base = truncate_text_to_token_budget(text, room)
-    return base + TRUNCATION_MARKER
+    return best + TRUNCATION_MARKER
 
 
 def tool_message_content_as_text(content: Any) -> str:
@@ -125,26 +124,15 @@ def tool_budget_enabled(
     return max_result_tokens > 0 or bool(max_calls)
 
 
-def budget_block_reason(
+def budget_token_block_reason(
     shared_counters,
     *,
-    tool_name: str,
-    budget_tools: frozenset[str],
     max_result_tokens: int,
-    max_calls: dict[str, int],
 ) -> str | None:
-    """Return a human reason when the tool must not run, else None."""
-    if tool_name not in budget_tools or not tool_budget_enabled(
-        budget_tools=budget_tools,
-        max_result_tokens=max_result_tokens,
-        max_calls=max_calls,
-    ):
+    """Token-budget block reason; caller must hold ``shared_counters._lock``."""
+    if max_result_tokens <= 0:
         return None
-    cap = max_calls.get(tool_name)
-    used_calls = shared_counters.tool_budget_calls.get(tool_name, 0)
-    if cap is not None and used_calls >= cap:
-        return f"call cap {cap} reached for {tool_name}"
-    if max_result_tokens > 0 and shared_counters.tool_budget_tokens_used >= max_result_tokens:
+    if shared_counters.tool_budget_tokens_used >= max_result_tokens:
         return f"total result token budget {max_result_tokens} exhausted"
     return None
 
@@ -167,10 +155,13 @@ def apply_tool_result_budget(
         return message
     text = tool_message_content_as_text(message.content)
     original = text
+    call_cap = max_calls.get(tool_name)
     with shared_counters._lock:
         if max_result_tokens > 0:
             remaining = max_result_tokens - shared_counters.tool_budget_tokens_used
             if remaining <= 0:
+                if call_cap is not None:
+                    shared_counters.release_budget_call(tool_name)
                 return ToolMessage(
                     content=BUDGET_EXHAUSTED_TEMPLATE.format(
                         tool_name=tool_name, reason="no tokens remaining"
@@ -180,9 +171,10 @@ def apply_tool_result_budget(
                 )
             if estimate_tokens(text) > remaining:
                 text = truncate_text_to_token_budget(text, remaining)
-        shared_counters.tool_budget_calls[tool_name] = (
-            shared_counters.tool_budget_calls.get(tool_name, 0) + 1
-        )
+        if call_cap is None:
+            shared_counters.tool_budget_calls[tool_name] = (
+                shared_counters.tool_budget_calls.get(tool_name, 0) + 1
+            )
         if max_result_tokens > 0:
             shared_counters.tool_budget_tokens_used += estimate_tokens(text)
     if text != original:
@@ -193,13 +185,3 @@ def apply_tool_result_budget(
         )
     return message
 
-
-def maybe_disable_parallel_tool_calls(model):
-    """Best-effort ``parallel_tool_calls=False`` for ChatOpenAI-compatible models."""
-    try:
-        return model.bind(parallel_tool_calls=False)
-    except Exception:  # noqa: BLE001
-        try:
-            return model.bind_tools([], parallel_tool_calls=False)
-        except Exception:  # noqa: BLE001
-            return model
