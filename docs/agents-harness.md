@@ -32,6 +32,7 @@ Docker images copy `seeds/` and `skills/` at build time — rebuild the image
 | `guest_output.register_reply_tools` | Register `reply_to_guest` / booking confirmation tools (seed-time only) |
 | `guest_output.capability` | Registry capability for those synthetic tools |
 | `context_budget.reclaim_retrieval_for_history` | Opt-in: move unused retrieval slice into history trim budget |
+| `output_files.required` | Opt-in: `stop_completion` nudges the agent to write top-level report files under `/output` in the live sandbox before stopping (uses the same export marker + find logic as file export) |
 
 Agent YAML: `harness.system_prompt_fallback`:
 

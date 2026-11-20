@@ -259,6 +259,14 @@ def user_runnable_mission_ids() -> frozenset[str]:
     )
 
 
+def harness_requires_output_files(
+    mission_id: str | None,
+    execution_config: dict[str, Any] | None = None,
+) -> bool:
+    """True when harness opts into stop-time nudge for missing /output reports."""
+    return effective_harness(mission_id, execution_config).output_files.required
+
+
 def mission_denies_builtin_tools(
     mission_id: str | None,
     execution_config: dict[str, Any] | None = None,

@@ -79,6 +79,16 @@ class ContextBudgetHarness(BaseModel):
     reclaim_retrieval_for_history: StrictBool = False
 
 
+class OutputFilesHarness(BaseModel):
+    """Sandbox report export expectations (opt-in per mission)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # When true, ``stop_completion`` nudges the agent to write top-level
+    # report files under ``/output`` before finishing (sandbox + marker only).
+    required: StrictBool = False
+
+
 class MissionHarness(BaseModel):
     """Effective harness for one mission (merged with defaults)."""
 
@@ -90,6 +100,7 @@ class MissionHarness(BaseModel):
     flow_subgraph: FlowSubgraphHarness = Field(default_factory=FlowSubgraphHarness)
     guest_output: GuestOutputHarness = Field(default_factory=GuestOutputHarness)
     context_budget: ContextBudgetHarness = Field(default_factory=ContextBudgetHarness)
+    output_files: OutputFilesHarness = Field(default_factory=OutputFilesHarness)
 
 
 class AgentHarness(BaseModel):

@@ -43,6 +43,9 @@ harness:
   context_budget:
     # No pre-retrieval asset block — reclaim the retrieval slice for history.
     reclaim_retrieval_for_history: true
+  output_files:
+    # Stop hook nudges the agent to write /output reports before finishing.
+    required: true
 
 # Export trực tiếp (trả thẳng trong result, tran 2026-11-19): sau mỗi
 # run, runtime tải các file agent đã ghi vào thư mục `output/` trong

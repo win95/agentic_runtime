@@ -144,6 +144,9 @@ class HookMiddleware(AgentMiddleware):
         shared_counters: SharedRunCounters | None = None,
         events_sink: list | None = None,
         subagent_mode: bool = False,
+        sandbox_backend=None,
+        export_marker_path: str | None = None,
+        output_files_required: bool = False,
     ):
         self.registry = registry
         self.execution_id = execution_id
@@ -179,6 +182,9 @@ class HookMiddleware(AgentMiddleware):
         self.trimmed_tokens = 0
         self.encoded_turns = 0
         self.events: list[dict] = []
+        self.sandbox_backend = sandbox_backend
+        self.export_marker_path = export_marker_path
+        self.output_files_required = output_files_required
 
     @classmethod
     def for_subagent(cls, parent: HookMiddleware) -> HookMiddleware:
@@ -356,6 +362,30 @@ class HookMiddleware(AgentMiddleware):
             )
         return result
 
+    def _output_files_stop_status(self) -> str:
+        """present | missing | skipped | unknown (check failed, fail-open)."""
+        if not self.output_files_required:
+            return "skipped"
+        if self.sandbox_backend is None or not self.export_marker_path:
+            return "skipped"
+        from runtime.sandbox.export import has_exportable_files_since_marker
+
+        try:
+            present, err = has_exportable_files_since_marker(
+                self.sandbox_backend, self.export_marker_path
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "stop_completion output-files check failed (fail-open): %s", exc
+            )
+            return "unknown"
+        if present is None:
+            logger.warning(
+                "stop_completion output-files check failed (fail-open): %s", err
+            )
+            return "unknown"
+        return "present" if present else "missing"
+
     # -- Stop (Ralph loop) ---------------------------------------------
     @hook_config(can_jump_to=["model"])
     def after_model(self, state, runtime):  # noqa: ARG002 - runtime unused
@@ -373,6 +403,8 @@ class HookMiddleware(AgentMiddleware):
         context.data["evidence_count"] = self.evidence_count
         context.data["continues"] = self.continues
         context.data["max_continues"] = self.max_continues
+        context.data["output_files_required"] = bool(self.output_files_required)
+        context.data["output_files_status"] = self._output_files_stop_status()
         decisions = self.registry.dispatch(HookEvent.STOP, context)
         self._record(HookEvent.STOP, decisions)
         for decision in decisions:

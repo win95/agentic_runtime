@@ -13,3 +13,5 @@ guest_output:
   capability: null
 context_budget:
   reclaim_retrieval_for_history: false
+output_files:
+  required: false

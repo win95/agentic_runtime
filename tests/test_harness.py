@@ -62,6 +62,11 @@ def test_harness_rejects_unknown_builtin_keys():
         parse_mission_harness({"builtin_tools": {"deni": True}})
 
 
+def test_harness_output_files_rejects_extra_fields():
+    with pytest.raises(ValueError):
+        parse_mission_harness({"output_files": {"required": True, "bogus": True}})
+
+
 def test_harness_context_budget_rejects_extra_fields():
     with pytest.raises(ValueError):
         parse_mission_harness(

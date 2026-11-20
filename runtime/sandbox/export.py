@@ -156,6 +156,29 @@ def _paths_from_ls(backend) -> tuple[list[str], list[str]]:
     return paths, notes
 
 
+def has_exportable_files_since_marker(
+    backend, marker: str
+) -> tuple[bool | None, str | None]:
+    """Whether any allowed report file exists newer than ``marker``.
+
+    Returns ``(True|False, None)`` on success; ``(None, reason)`` when the
+    check cannot run (caller should fail-open and skip the stop nudge).
+    """
+    try:
+        paths, notes = _paths_newer_than_marker(backend, marker)
+        for note in notes:
+            lower = note.lower()
+            if "failed" in lower or "cannot apply run marker" in lower:
+                return None, note
+        for path in paths:
+            ext = os.path.splitext(path)[1].lower()
+            if ext in _CONTENT_TYPES:
+                return True, None
+        return False, None
+    except Exception as exc:  # noqa: BLE001 — stop hook must fail-open
+        return None, str(exc)
+
+
 def _paths_newer_than_marker(backend, marker: str) -> tuple[list[str], list[str]]:
     notes: list[str] = []
     execute = getattr(backend, "execute", None)

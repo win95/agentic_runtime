@@ -37,8 +37,12 @@ Ten handlers ship with the runtime (name -> [(event, handler)]):
   reminds the agent to report the failure instead of inventing data.
 - ``stop_completion`` (Stop) — Ralph-loop guard: when the agent wants
   to stop without having called any tool yet, force one more model
-  turn with a nudge to gather evidence first. Capped per run
-  (``stop_max_continues``, default 3) so a stuck agent still ends.
+  turn with a nudge to gather evidence first. When harness
+  ``output_files.required`` is true and a sandbox export marker is
+  active, also nudges the agent to write report files under
+  ``/output`` before finishing (even if tools were already called).
+  Capped per run (``stop_max_continues``, default 3) so a stuck agent
+  still ends.
 - ``validate_input`` (UserPromptSubmit) — runs the Layer 1 input
   validation inside the graph. The API already enforces it, but
   schedule-dispatched and admin-dispatched executions bypass the API
@@ -400,26 +404,36 @@ def tool_error_feedback(context: HookContext) -> HookDecision | None:
     )
 
 
+_OUTPUT_FILES_NUDGE = (
+    "Hook 'stop_completion': this mission requires report files under "
+    "/output/ (text formats such as .html, .csv, .md) created during this "
+    "run. Use write_file and/or execute to write them before finishing."
+)
+
+
 def stop_completion(context: HookContext) -> HookDecision | None:
-    """Stop: force another turn when the agent stops with no tool calls.
+    """Stop: nudge when output files are missing or no tools were called yet.
 
     The middleware counts executed tool calls (``tool_calls_made``) and
     continues already forced (``continues``); the cap comes from the
-    mission's ``execution.stop_max_continues`` (default 3). An agent
-    that already gathered evidence is left alone — the hook only guards
-    against empty conclusions, it does not grade the answer.
+    mission's ``execution.stop_max_continues`` (default 3).
     """
-    tool_calls_made = int(context.data.get("tool_calls_made", 0))
     continues = int(context.data.get("continues", 0))
     max_continues = int(context.data.get("max_continues", DEFAULT_STOP_MAX_CONTINUES))
-    if tool_calls_made > 0:
-        return None
     if continues >= max_continues:
         logger.info(
-            "hook stop_completion: agent stopped with no tool calls after "
-            "%d forced continues; letting it stop",
+            "hook stop_completion: stop continues exhausted (%d/%d); letting stop",
             continues,
+            max_continues,
         )
+        return None
+
+    files_status = context.data.get("output_files_status")
+    if context.data.get("output_files_required") and files_status == "missing":
+        return HookDecision.continue_turn(_OUTPUT_FILES_NUDGE)
+
+    tool_calls_made = int(context.data.get("tool_calls_made", 0))
+    if tool_calls_made > 0:
         return None
     return HookDecision.continue_turn(
         "Hook 'stop_completion': you have not called any tool yet, so "

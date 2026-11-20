@@ -505,6 +505,8 @@ def deep_agent_node(state: MissionState) -> dict:
             estimate_tokens,
         )
 
+        from runtime.harness.registry import harness_requires_output_files
+
         hook_middleware = HookMiddleware(
             hook_registry,
             execution_id=state.get("execution_id") or "",
@@ -520,6 +522,9 @@ def deep_agent_node(state: MissionState) -> dict:
             capabilities=list(context.get("capabilities") or []),
             reserved_history_tokens=estimate_tokens(history_block),
             history_budget_tokens=effective_history_tokens(mission),
+            output_files_required=harness_requires_output_files(
+                state.get("mission_id"), execution_cfg
+            ),
         )
         # Part 1 (b): the per-run middleware list. For missions that
         # must not see any built-in tool (hotel only), append the
@@ -596,6 +601,13 @@ def deep_agent_node(state: MissionState) -> dict:
             )
             if export_marker_path is None:
                 export_marker_failed = True
+        hook_middleware.sandbox_backend = sandbox_backend
+        hook_middleware.export_marker_path = (
+            export_marker_path if not export_marker_failed else None
+        )
+        if use_flow:
+            flow_hook_middleware.sandbox_backend = hook_middleware.sandbox_backend
+            flow_hook_middleware.export_marker_path = hook_middleware.export_marker_path
         # The fixed prefix measured against the system-prompt budget —
         # set in each branch below, BEFORE the history block is
         # appended (history is charged to the history bucket, not here).
