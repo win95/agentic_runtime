@@ -53,6 +53,8 @@ class _FakeBackend:
                 canon = "/output/a.html"
             if canon.endswith("/new.md") or "new.md" in canon:
                 canon = "/output/new.md"
+            if "report.html" in path or "report.html" in canon:
+                canon = "/output/report.html"
             return SimpleNamespace(output=f"{canon}\n", exit_code=0)
         if command.startswith("touch "):
             return SimpleNamespace(output="", exit_code=0)
@@ -128,6 +130,22 @@ def test_export_marker_filters_stale_files():
     assert len(files) == 1
     assert files[0]["name"] == "new.md"
     assert any("maxdepth 1" in c for c in backend.execute_calls)
+
+
+def test_export_find_dedupes_report_html_paths():
+    marker = "/tmp/.run_export_exec-2b"
+    backend = _FakeBackend(
+        execute_output={
+            "cd / && (find /output": "/output/report.html\noutput/report.html\n",
+        },
+        files={"/output/report.html": b"<html/>"},
+        sizes={"/output/report.html": 8},
+    )
+    files, _notes = export_output_files(backend, run_marker_path=marker)
+    assert len(files) == 1
+    assert files[0]["name"] == "report.html"
+    assert files[0]["path"].endswith("report.html")
+    assert len(backend.download_calls) == 1
 
 
 def test_export_find_dedupes_output_and_absolute_paths_cwd_root():

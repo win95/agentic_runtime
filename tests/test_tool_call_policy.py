@@ -267,6 +267,40 @@ def test_build_deep_agent_uses_real_create_deep_agent_with_sequential():
     assert agent is not None
 
 
+def test_apply_budget_no_deadlock_when_tokens_exhausted_with_reserved_cap():
+    import threading
+
+    shared = SharedRunCounters()
+    shared.tool_budget_calls["tavily_search"] = 1
+    shared.tool_budget_tokens_used = 100
+    done = threading.Event()
+    errors: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            out = apply_tool_result_budget(
+                ToolMessage(content="late result", tool_call_id="x"),
+                shared_counters=shared,
+                tool_name="tavily_search",
+                budget_tools=frozenset({"tavily_search"}),
+                max_result_tokens=100,
+                max_calls={"tavily_search": 1},
+            )
+            assert isinstance(out, ToolMessage)
+            assert "not executed" in str(out.content).lower()
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+        finally:
+            done.set()
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    assert done.wait(timeout=2.0), "apply_tool_result_budget deadlocked"
+    thread.join(timeout=1.0)
+    assert not errors
+    assert shared.tool_budget_calls["tavily_search"] == 0
+
+
 def test_apply_tool_result_budget_charges_once():
     shared = SharedRunCounters()
     msg = ToolMessage(content="hello world", tool_call_id="x")

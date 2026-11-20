@@ -359,6 +359,7 @@ class HookMiddleware(AgentMiddleware):
                     max_result_tokens=self.tool_budget_max_result_tokens,
                 )
             if reason:
+                logger.info("Tool budget blocked %s before run: %s", tool_name, reason)
                 return ToolMessage(
                     content=BUDGET_EXHAUSTED_TEMPLATE.format(
                         tool_name=tool_name, reason=reason
@@ -368,6 +369,11 @@ class HookMiddleware(AgentMiddleware):
                 )
             cap = self.tool_budget_max_calls.get(tool_name)
             if not self.shared_counters.reserve_budget_call(tool_name, cap):
+                logger.info(
+                    "Tool budget blocked %s before run: call cap %s reached",
+                    tool_name,
+                    cap,
+                )
                 return ToolMessage(
                     content=BUDGET_EXHAUSTED_TEMPLATE.format(
                         tool_name=tool_name,

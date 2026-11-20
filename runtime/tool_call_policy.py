@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from langchain_core.messages import AIMessage, ToolMessage
 
@@ -104,6 +107,12 @@ def sequential_defer_message(
     if tool_call_id == first_id:
         return None
     tool_list = ", ".join(sorted(sequential_tools))
+    logger.info(
+        "Tool sequential deferral: %s (tool_call_id=%s); allowed one of %s per turn",
+        tool_name,
+        tool_call_id,
+        tool_list,
+    )
     return ToolMessage(
         content=SEQUENTIAL_DEFER_TEMPLATE.format(
             tool_name=tool_name, tool_list=tool_list
@@ -156,32 +165,65 @@ def apply_tool_result_budget(
     text = tool_message_content_as_text(message.content)
     original = text
     call_cap = max_calls.get(tool_name)
+    before_tokens = estimate_tokens(text)
+    exhausted_msg: ToolMessage | None = None
+    remaining_after = 0
+    charged = 0
     with shared_counters._lock:
         if max_result_tokens > 0:
             remaining = max_result_tokens - shared_counters.tool_budget_tokens_used
             if remaining <= 0:
                 if call_cap is not None:
-                    shared_counters.release_budget_call(tool_name)
-                return ToolMessage(
+                    used = shared_counters.tool_budget_calls.get(tool_name, 0)
+                    if used > 0:
+                        shared_counters.tool_budget_calls[tool_name] = used - 1
+                logger.info(
+                    "Tool budget blocked %s on result charge: no tokens remaining "
+                    "(budget=%d, used=%d)",
+                    tool_name,
+                    max_result_tokens,
+                    shared_counters.tool_budget_tokens_used,
+                )
+                exhausted_msg = ToolMessage(
                     content=BUDGET_EXHAUSTED_TEMPLATE.format(
                         tool_name=tool_name, reason="no tokens remaining"
                     ),
                     tool_call_id=message.tool_call_id,
                     status="error",
                 )
-            if estimate_tokens(text) > remaining:
+            elif estimate_tokens(text) > remaining:
                 text = truncate_text_to_token_budget(text, remaining)
+                logger.info(
+                    "Tool budget truncated %s: ~%d -> ~%d tokens (%d remaining before charge)",
+                    tool_name,
+                    before_tokens,
+                    estimate_tokens(text),
+                    remaining,
+                )
+        if exhausted_msg is not None:
+            return exhausted_msg
         if call_cap is None:
             shared_counters.tool_budget_calls[tool_name] = (
                 shared_counters.tool_budget_calls.get(tool_name, 0) + 1
             )
+        charged = estimate_tokens(text)
         if max_result_tokens > 0:
-            shared_counters.tool_budget_tokens_used += estimate_tokens(text)
+            shared_counters.tool_budget_tokens_used += charged
+            remaining_after = max(
+                0, max_result_tokens - shared_counters.tool_budget_tokens_used
+            )
     if text != original:
         return ToolMessage(
             content=text,
             tool_call_id=message.tool_call_id,
             status=message.status,
+        )
+    if max_result_tokens > 0:
+        logger.info(
+            "Tool budget charged %s: ~%d tokens (~%d remaining)",
+            tool_name,
+            charged,
+            remaining_after,
         )
     return message
 
