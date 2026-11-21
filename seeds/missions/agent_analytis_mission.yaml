@@ -23,6 +23,7 @@ execution:
   agent_id: agent_analytis
   skills:
     - agent-analytis
+    - charting
     - session-memory
   # Sandbox backend (docs/sandbox.md): file tools + `execute` chạy trong
   # một OpenSandbox sandbox của session — agent mới chạy được code Python

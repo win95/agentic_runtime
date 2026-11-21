@@ -36,7 +36,9 @@ Self-test checks (one canned research question): the run SUCCEEDED,
 the answer is non-empty, and ``files`` contains ``.html`` + ``.csv`` +
 ``.md``. The files check also proves the sandbox backend ran: the
 in-memory fallback exports nothing (``files: []``), so non-empty files
-mean the agent really wrote and ran code in a sandbox.
+mean the agent really wrote and ran code in a sandbox. The HTML
+report must also embed a Chart.js chart (``<canvas`` + ``new Chart(``)
+— see ``_html_has_chart`` — or the check fails.
 """
 
 from __future__ import annotations
@@ -171,6 +173,11 @@ def _run_once(api_url: str, message: str, session_id: str,
     return execution, result, saved
 
 
+def _html_has_chart(html: str) -> bool:
+    """True when an HTML report embeds a Chart.js chart (canvas + call)."""
+    return "<canvas" in html and "new Chart(" in html
+
+
 def _self_test(api_url: str, out_dir: Path, interval: float, timeout: float) -> int:
     """One canned research question + PASS/FAIL checks. Returns the exit code."""
     session_id = f"sess-analytis-test-{uuid.uuid4().hex[:8]}"
@@ -190,6 +197,14 @@ def _self_test(api_url: str, out_dir: Path, interval: float, timeout: float) -> 
         for ext in SELF_TEST_EXTENSIONS:
             checks.append((f"files có {ext}", any(n.endswith(ext) for n in names)))
         checks.append(("files không rỗng (sandbox đã chạy)", bool(files)))
+        html_contents = [
+            str(f.get("content") or "")
+            for f in files
+            if isinstance(f, dict) and str(f.get("name") or "").endswith(".html")
+        ]
+        checks.append(
+            ("báo cáo HTML có biểu đồ Chart.js", any(_html_has_chart(h) for h in html_contents))
+        )
     except SystemExit as exc:
         checks.append((f"run hoàn thành (exit {exc.code})", False))
     failed = [name for name, ok in checks if not ok]
