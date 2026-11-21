@@ -17,7 +17,8 @@ import pytest
 
 import infra.mlflow_setup as mlflow_setup
 from app.config import settings
-from runtime.deep_agent import ADMIN_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT
+from runtime.agents.admin import AdminAgent
+from runtime.deep_agent import DEFAULT_SYSTEM_PROMPT
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -77,7 +78,7 @@ def test_register_prompts_sqlite_roundtrip(tmp_path):
         fault = genai.load_prompt("prompts:/fault_investigator@production")
         assert fault.template == DEFAULT_SYSTEM_PROMPT
         admin = genai.load_prompt("prompts:/admin_bot@production")
-        assert admin.template == ADMIN_SYSTEM_PROMPT
+        assert admin.template == AdminAgent.FALLBACK_SYSTEM_PROMPT
     finally:
         mlflow.set_tracking_uri("http://localhost:5000")
 

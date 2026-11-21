@@ -15,7 +15,8 @@ from app.core.db import SessionLocal
 from app.services import agent_version_service as avs
 from app.services import mission_service
 from runtime import deep_agent as deep_agent_module
-from runtime.deep_agent import ADMIN_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT
+from runtime.agents.admin import AdminAgent
+from runtime.deep_agent import DEFAULT_SYSTEM_PROMPT
 from runtime.mission_graph import deep_agent_node, run_mission
 from seeds import load_missions
 
@@ -461,7 +462,7 @@ def test_no_version_admin_branch_uses_code_constant(monkeypatch):
         )
     )
     assert out.get("agent_version") is None
-    assert seen["system_prompt"] == ADMIN_SYSTEM_PROMPT
+    assert seen["system_prompt"] == AdminAgent.FALLBACK_SYSTEM_PROMPT
 
 
 def test_build_deep_agent_defaults_to_code_constant(monkeypatch):
