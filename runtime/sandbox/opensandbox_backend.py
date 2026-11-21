@@ -19,27 +19,38 @@ from deepagents.backends.protocol import (
 from deepagents.backends.sandbox import BaseSandbox, normalize_read_bounds
 
 from runtime.sandbox.command_output import combine_stdout_stderr, split_command_streams
+from runtime.sandbox.paths import (
+    OUTPUT_REAL as OUTPUT_LIST_DIR,
+    WORKDIR,
+    normalize_output_export_path,
+    resolve_files_api_path,
+)
 
 logger = logging.getLogger(__name__)
 
-WORKDIR = "/workspace"
-OUTPUT_LIST_DIR = "/output"
 MTIME_SKEW_TOLERANCE = timedelta(seconds=5)
 
+# Idempotent layout: real /output; /workspace/output → symlink.
+# If an older sandbox has a real /workspace/output directory, move files into /output first.
+BOOTSTRAP_WORKSPACE_SHELL = (
+    "mkdir -p /workspace /output && "
+    "if [ -L /workspace/output ]; then :; "
+    'elif [ -d /workspace/output ]; then '
+    "shopt -s dotglob nullglob; "
+    'files=(/workspace/output/*); '
+    'if [ ${#files[@]} -gt 0 ]; then mv "${files[@]}" /output/; fi; '
+    "rmdir /workspace/output 2>/dev/null || rm -rf /workspace/output; "
+    "ln -sfn /output /workspace/output; "
+    'elif [ -e /workspace/output ]; then rm -f /workspace/output; ln -sfn /output /workspace/output; '
+    "else ln -sfn /output /workspace/output; fi"
+)
 
-def normalize_output_export_path(path: str) -> str | None:
-    """Map exportable paths to canonical ``/output/<file>`` (real dir, not symlinks)."""
-    norm = path if path.startswith("/") else f"/{path}"
-    parts = norm.strip("/").split("/")
-    if len(parts) == 2 and parts[0] == "output":
-        return norm
-    if len(parts) == 3 and parts[0] == "workspace" and parts[1] == "output":
-        return f"/output/{parts[2]}"
-    return None
 
-
-def _is_toplevel_output_path(path: str) -> bool:
-    return normalize_output_export_path(path) is not None
+def entry_modified_at_utc(mod: datetime) -> datetime:
+    """Container ``modified_at``: naive values treated as UTC; aware → UTC."""
+    if mod.tzinfo is None:
+        return mod.replace(tzinfo=timezone.utc)
+    return mod.astimezone(timezone.utc)
 
 RecreateFn = Callable[[], tuple[Any, str] | None]
 
@@ -239,9 +250,10 @@ class OpenSandboxBackend(BaseSandbox):
             return LsResult(error="Sandbox unavailable")
         from opensandbox.models.filesystem import DirectoryListEntry
 
+        api_path = resolve_files_api_path(path)
         try:
             entries = self._sandbox.files.list_directory(
-                DirectoryListEntry(path=path, depth=1)
+                DirectoryListEntry(path=api_path, depth=1)
             )
         except Exception as exc:  # noqa: BLE001
             if not self._recreate_attempted and is_sandbox_not_found(exc):
@@ -272,9 +284,10 @@ class OpenSandboxBackend(BaseSandbox):
                 file_data=FileData(content="", encoding="utf-8"),
             )
         sdk_offset = offset + 1
+        api_path = resolve_files_api_path(file_path)
         try:
             content = self._sandbox.files.read_file(
-                file_path,
+                api_path,
                 offset=sdk_offset,
                 limit=limit,
             )
@@ -308,10 +321,7 @@ class OpenSandboxBackend(BaseSandbox):
             return GlobResult(matches=None, error="Sandbox unavailable")
         from opensandbox.models.filesystem import SearchEntry
 
-        if path:
-            search_path = path if path.startswith("/") else f"/{path}"
-        else:
-            search_path = WORKDIR
+        search_path = resolve_files_api_path(path) if path else WORKDIR
         try:
             matches = self._sandbox.files.search(
                 SearchEntry(path=search_path, pattern=pattern)
@@ -328,9 +338,12 @@ class OpenSandboxBackend(BaseSandbox):
     ) -> tuple[list[dict], list[str]]:
         """Top-level output files with ``modified_at`` after run start (mtime filter)."""
         notes: list[str] = []
-        cutoff = datetime.fromtimestamp(
-            float(run_started_at) + float(clock_skew), tz=timezone.utc
-        ).replace(tzinfo=None) - MTIME_SKEW_TOLERANCE
+        cutoff = (
+            datetime.fromtimestamp(
+                float(run_started_at) + float(clock_skew), tz=timezone.utc
+            )
+            - MTIME_SKEW_TOLERANCE
+        )
         by_path: dict[str, dict] = {}
         try:
             from opensandbox.models.filesystem import DirectoryListEntry
@@ -350,9 +363,9 @@ class OpenSandboxBackend(BaseSandbox):
             if norm is None:
                 continue
             mod = entry.modified_at
-            if isinstance(mod, datetime) and mod.tzinfo is not None:
-                mod = mod.replace(tzinfo=None)
-            if mod < cutoff:
+            if not isinstance(mod, datetime):
+                continue
+            if entry_modified_at_utc(mod) < cutoff:
                 continue
             if norm not in by_path:
                 by_path[norm] = {
@@ -397,9 +410,10 @@ class OpenSandboxBackend(BaseSandbox):
                 FileUploadResponse(path=p, error="sandbox unavailable")
                 for p, _ in files
             ]
+        pairs = [(resolve_files_api_path(p), data) for p, data in files]
         try:
             self._sandbox.files.write_files(
-                [WriteEntry(path=path, data=content) for path, content in files]
+                [WriteEntry(path=path, data=content) for path, content in pairs]
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning("Sandbox upload failed: %s", exc)
@@ -417,8 +431,9 @@ class OpenSandboxBackend(BaseSandbox):
             ]
         responses: list[FileDownloadResponse] = []
         for path in paths:
+            api_path = resolve_files_api_path(path)
             try:
-                content = self._sandbox.files.read_bytes(path)
+                content = self._sandbox.files.read_bytes(api_path)
             except Exception as exc:  # noqa: BLE001
                 responses.append(
                     FileDownloadResponse(path=path, error=str(exc)[:200])
@@ -426,6 +441,40 @@ class OpenSandboxBackend(BaseSandbox):
             else:
                 responses.append(FileDownloadResponse(path=path, content=content))
         return responses
+
+    def write(self, file_path: str, content: str):
+        from deepagents.backends.protocol import WriteResult
+
+        resolved = resolve_files_api_path(file_path)
+        preflight_error = self._write_preflight(resolved)
+        if preflight_error is not None:
+            return preflight_error
+        responses = self.upload_files([(file_path, content.encode("utf-8"))])
+        if not responses:
+            raise AssertionError("upload_files returned no responses")
+        response = responses[0]
+        if response.error:
+            return WriteResult(
+                error=f"Failed to write file '{file_path}': {response.error}"
+            )
+        return WriteResult(path=file_path)
+
+    def edit(
+        self,
+        file_path: str,
+        old_string: str,
+        new_string: str,
+        replace_all: bool = False,
+    ):
+        return super().edit(
+            resolve_files_api_path(file_path),
+            old_string,
+            new_string,
+            replace_all=replace_all,
+        )
+
+    def delete(self, file_path: str):
+        return super().delete(resolve_files_api_path(file_path))
 
 
 def bootstrap_sandbox_workspace(backend: OpenSandboxBackend) -> None:
@@ -439,7 +488,7 @@ def bootstrap_sandbox_workspace(backend: OpenSandboxBackend) -> None:
     except Exception as exc:  # noqa: BLE001
         logger.info("Sandbox create_directories fallback to shell: %s", exc)
     resp = backend._run_command(
-        "mkdir -p /workspace /output && ln -sfn /output /workspace/output",
+        BOOTSTRAP_WORKSPACE_SHELL,
         timeout_seconds=30,
         allow_recreate=False,
         working_directory="/",

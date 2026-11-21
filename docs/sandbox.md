@@ -59,6 +59,8 @@ of every run, inline in the execution result:
 - Only files whose container ``modified_at`` is after this run's start
   time are exported (run start is recorded in Python; container clock
   skew is corrected once per run via ``date +%s`` with a 5s tolerance).
+  ``modified_at`` from the Files API is compared in UTC (naive timestamps
+  are treated as UTC).
   Stale files from earlier turns in the same session are skipped.
 - `runtime/sandbox/export.py::export_output_files` lists `/output` via
   the OpenSandbox Files API (`list_directory`, depth 1), uses

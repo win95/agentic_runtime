@@ -9,23 +9,29 @@ import pytest
 
 from runtime.sandbox.command_output import join_stream_chunks, split_command_streams
 from runtime.sandbox.opensandbox_backend import (
+    BOOTSTRAP_WORKSPACE_SHELL,
     OpenSandboxBackend,
     bootstrap_sandbox_workspace,
     format_command_output,
-    normalize_output_export_path,
 )
+from runtime.sandbox.paths import normalize_output_export_path
 
 
 def test_join_stream_joins_sdk_line_chunks_with_newlines():
-    assert join_stream_chunks(["1", "2", "3"]) == "1\n2\n3\n"
-    assert join_stream_chunks(["line1", "", "part"]) == "line1\n\npart\n"
+    assert join_stream_chunks(["1", "2", "3"]) == "1\n2\n3"
+    assert join_stream_chunks(["line1", "", "part"]) == "line1\n\npart"
+
+
+def test_join_stream_single_chunk_no_trailing_newline():
+    assert join_stream_chunks(["x"]) == "x"
+    assert join_stream_chunks([]) == ""
 
 
 def test_join_stream_seq_lines_realistic_length():
     chunks = [str(i) for i in range(1, 6)]
     joined = join_stream_chunks(chunks)
-    assert joined == "1\n2\n3\n4\n5\n"
-    assert len(joined) == len("1\n2\n3\n4\n5\n")
+    assert joined == "1\n2\n3\n4\n5"
+    assert len(joined) == 9
 
 
 def test_split_stderr_appended_on_success():
@@ -36,9 +42,9 @@ def test_split_stderr_appended_on_success():
         error=None,
     )
     out, err = split_command_streams(execution)
-    assert out == "ok\n"
-    assert err == "warn\n"
-    assert format_command_output(execution) == "ok\nwarn\n"
+    assert out == "ok"
+    assert err == "warn"
+    assert format_command_output(execution) == "ok\nwarn"
 
 
 def test_split_stderr_on_failure():
@@ -48,7 +54,7 @@ def test_split_stderr_on_failure():
         result=[],
         error=None,
     )
-    assert format_command_output(execution) == "ok\nwarn\n"
+    assert format_command_output(execution) == "ok\nwarn"
 
 
 def test_format_command_output_success_multiline_stdout():
@@ -58,7 +64,7 @@ def test_format_command_output_success_multiline_stdout():
         exit_code=0,
         error=None,
     )
-    assert format_command_output(execution) == "hi\nreport.html\n"
+    assert format_command_output(execution) == "hi\nreport.html"
 
 
 class _FakeCommands:
@@ -83,28 +89,40 @@ class _FakeFiles:
         self.entries = entries or []
         self.reject_symlink = reject_symlink
         self.created: list = []
+        self.list_paths: list[str] = []
+        self.read_paths: list[str] = []
+        self.write_paths: list[str] = []
+        self.search_paths: list[str] = []
 
     def create_directories(self, entries):
         self.created.extend(entries)
 
-    def list_directory(self, entry):  # noqa: ARG002
-        if self.reject_symlink and "output" in getattr(entry, "path", ""):
-            if "/workspace" in getattr(entry, "path", ""):
-                raise RuntimeError(
-                    "path is a symbolic link, refusing to traverse: /workspace/output"
-                )
+    def list_directory(self, entry):
+        path = getattr(entry, "path", "")
+        self.list_paths.append(path)
+        if self.reject_symlink and path == "/workspace/output":
+            raise RuntimeError(
+                "path is a symbolic link, refusing to traverse: /workspace/output"
+            )
         return self.entries
 
     def read_file(self, path, *, offset=1, limit=2000):  # noqa: ARG002
+        self.read_paths.append(path)
         if offset > 2:
             return ""
         return "line1\nline2\n"
 
-    def search(self, entry):  # noqa: ARG002
+    def search(self, entry):
+        self.search_paths.append(entry.path)
         return [SimpleNamespace(path="/workspace/foo.py")]
 
-    def read_bytes(self, path):  # noqa: ARG002
+    def read_bytes(self, path):
+        self.read_paths.append(path)
         return b"data"
+
+    def write_files(self, entries):
+        for ent in entries:
+            self.write_paths.append(ent.path)
 
 
 def _backend(commands, files=None, **kwargs) -> OpenSandboxBackend:
@@ -194,6 +212,52 @@ def test_sandbox_not_found_recreate_once_then_unavailable():
     assert "unavailable" in second.output.lower()
 
 
+def test_bootstrap_shell_moves_legacy_workspace_output_dir():
+    assert "mv " in BOOTSTRAP_WORKSPACE_SHELL
+    assert "[ -d /workspace/output ]" in BOOTSTRAP_WORKSPACE_SHELL
+
+
+def test_ls_workspace_output_hits_real_output_dir():
+    files = _FakeFiles(reject_symlink=True, entries=[])
+    backend = _backend(_FakeCommands([]), files=files)
+    backend.ls("/workspace/output")
+    assert files.list_paths == ["/output"]
+
+
+def test_write_relative_output_resolves_to_real_path():
+    files = _FakeFiles()
+    backend = _backend(_FakeCommands([_ok_exec()]), files=files)
+    backend.upload_files([("output/a.html", b"<html/>")])
+    assert files.write_paths == ["/output/a.html"]
+
+
+def test_read_workspace_output_file_resolves():
+    files = _FakeFiles()
+    backend = _backend(_FakeCommands([]), files=files)
+    backend.read("/workspace/output/a.html")
+    assert files.read_paths == ["/output/a.html"]
+
+
+def test_export_mtime_compares_utc_not_strip_tz():
+    from datetime import timedelta as td
+
+    # Run starts 2025-06-01 10:00 UTC
+    run_start = datetime(2025, 6, 1, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+    # File at 2025-06-01 17:05 +07:00 == 10:05 UTC (after run start)
+    mod = datetime(2025, 6, 1, 17, 5, 0, tzinfo=timezone(td(hours=7)))
+    entries = [
+        SimpleNamespace(
+            path="/output/report.html",
+            entry_type="file",
+            size=8,
+            modified_at=mod,
+        ),
+    ]
+    backend = _backend(_FakeCommands([]), files=_FakeFiles(entries=entries))
+    items, _ = backend.list_output_files_for_export(run_start, clock_skew=0.0)
+    assert [i["path"] for i in items] == ["/output/report.html"]
+
+
 def test_ls_uses_list_directory_real_output_dir():
     entry = SimpleNamespace(
         path="/output/a.html",
@@ -210,10 +274,6 @@ def test_ls_uses_list_directory_real_output_dir():
 
 def test_export_listing_rejects_symlink_workspace_path():
     assert normalize_output_export_path("/workspace/output/x.html") == "/output/x.html"
-    files = _FakeFiles(reject_symlink=True)
-    backend = _backend(_FakeCommands([]), files=files)
-    with pytest.raises(RuntimeError, match="symbolic link"):
-        files.list_directory(SimpleNamespace(path="/workspace/output"))
 
 
 def test_export_listing_filters_by_mtime():
