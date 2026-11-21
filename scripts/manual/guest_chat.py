@@ -1,13 +1,16 @@
 """Guest chat CLI — talk to the hotel receptionist over the public guest API.
 
-A real chat interface for ``POST /guest/chat``: send a message, poll
-``GET /executions/{id}/result`` until the answer is ready, print it.
-Stdlib + the sibling ``_api`` helper only (no extra dependency).
+A real chat interface for ``POST /guest/chat``: send a message, wait for
+the answer, print it. Stdlib + the sibling ``_api`` helper only (no
+extra dependency).
 
 Flow per message: ``POST /guest/chat`` -> 202 ``{execution_id, session_id}``
--> poll ``GET /executions/{id}/result`` every ``--interval`` seconds
-(404 = "Result not ready yet") until 200 -> print ``output["answer"]``
-(the result router already projects the guest-safe reply).
+-> wait for the answer: with ``--stream``, ``GET /executions/{id}/stream``
+(SSE lifecycle events — RUNNING, INTERRUPTED, terminal) then one
+``GET /executions/{id}/result``; otherwise poll ``GET
+/executions/{id}/result`` every ``--interval`` seconds (404 = "Result
+not ready yet") until 200 -> print ``output["answer"]`` (the result
+router already projects the guest-safe reply).
 
 Auth is JWT-only. Resolve the token in this order:
 ``--token`` > ``GUEST_JWT`` env > ``--login`` (prompts email + password,
@@ -31,6 +34,7 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import json
 import os
 import sys
 import time
@@ -156,6 +160,85 @@ def _report_execution_status(api_url: str, token: str, execution_id: str) -> Non
         )
 
 
+def _parse_sse_event(line: str) -> dict | None:
+    """One SSE ``data:`` line -> the event dict, else None (comment,
+    empty, ``event:`` line, or malformed JSON)."""
+    if not line.startswith("data:"):
+        return None
+    try:
+        payload = json.loads(line[5:].strip())
+    except (json.JSONDecodeError, ValueError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _fetch_result_once(api_url: str, token: str, execution_id: str) -> dict | None:
+    """One GET /executions/{id}/result: the payload on 200, None on 404
+    (not ready yet). Auth/connection problems die like the poll does."""
+    try:
+        status, payload = call(
+            "GET", f"/executions/{execution_id}/result",
+            headers=_auth_headers(token), base_url=api_url, log=False,
+        )
+    except Exception as exc:  # noqa: BLE001 — connection errors surface here
+        raise _die(f"mất kết nối khi lấy kết quả ({exc}).")
+    if status == 200 and payload:
+        return payload
+    if status in (401, 403):
+        raise _die(f"token không hợp lệ / hết hạn (HTTP {status}) — login lại.")
+    return None
+
+
+def _print_interrupt(result: dict) -> None:
+    """A run paused on interrupt_on: say what waits for approval."""
+    interrupt = (result.get("output") or {}).get("interrupt") or {}
+    requests = interrupt.get("requests") or []
+    print("lễ tân> (đang chờ duyệt trước khi làm tiếp)")
+    for request in requests:
+        print(f"  - {request.get('tool')}: {request.get('args')}")
+
+
+def _stream_result(api_url: str, token: str, execution_id: str,
+                   timeout: float) -> str | None:
+    """Stream GET /executions/{id}/stream until a terminal status.
+
+    Returns the terminal status (SUCCEEDED / FAILED / CANCELLED /
+    INTERRUPTED), or None when the stream is unavailable or breaks —
+    the caller falls back to polling. Status transitions print to
+    stderr as they arrive.
+    """
+    import urllib.error
+    import urllib.request
+
+    url = f"{api_url.rstrip('/')}/executions/{execution_id}/stream"
+    request = urllib.request.Request(url, headers=_auth_headers(token))
+    try:
+        response = urllib.request.urlopen(request, timeout=timeout)
+    except Exception as exc:  # noqa: BLE001 — stream down, poll instead
+        print(f"(stream không khả dụng ({exc}) — chuyển sang poll)", file=sys.stderr)
+        return None
+    started = time.monotonic()
+    try:
+        for raw in response:
+            line = raw.decode("utf-8", "replace").strip()
+            event = _parse_sse_event(line)
+            if event is None:
+                continue
+            status = event.get("status")
+            if status:
+                print(f"... {status.lower()}", file=sys.stderr)
+            if status in ("SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"):
+                return status
+            if time.monotonic() - started >= timeout:
+                return None
+    except Exception as exc:  # noqa: BLE001 — stream broke, poll instead
+        print(f"(stream đứt giữa chừng ({exc}) — chuyển sang poll)", file=sys.stderr)
+        return None
+    finally:
+        response.close()
+    return None
+
+
 def _print_answer(result: dict) -> None:
     output = result.get("output") or {}
     answer = str(output.get("answer") or "").strip()
@@ -166,13 +249,25 @@ def _print_answer(result: dict) -> None:
 
 
 def _chat_once(api_url: str, token: str, message: str, session_id: str | None,
-               interval: float, timeout: float) -> str | None:
+               interval: float, timeout: float, stream: bool = False) -> str | None:
     if len(message) > MAX_MESSAGE_CHARS:
         raise _die(f"tin nhắn dài {len(message)} ký tự, tối đa {MAX_MESSAGE_CHARS}.")
     sent = _send_message(api_url, token, message, session_id)
     execution_id = str(sent["execution_id"])
     session_id = str(sent.get("session_id") or session_id or "")
     print(f"... đang chờ (execution {execution_id})", file=sys.stderr)
+    if stream:
+        terminal = _stream_result(api_url, token, execution_id, timeout)
+        if terminal is not None:
+            result = _fetch_result_once(api_url, token, execution_id)
+            if result is not None:
+                if terminal == "INTERRUPTED":
+                    _print_interrupt(result)
+                else:
+                    _print_answer(result)
+                return session_id or None
+            # Stream ended but the result row is not there yet — fall
+            # through to polling instead of dying on a race.
     result = _poll_result(api_url, token, execution_id, interval, timeout)
     _print_answer(result)
     return session_id or None
@@ -196,6 +291,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="giây giữa 2 lần poll (mặc định %(default)s)")
     parser.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT,
                         help="chờ tối đa bao nhiêu giây (mặc định %(default)s)")
+    parser.add_argument("--stream", action="store_true",
+                        help="chờ qua SSE GET /executions/{id}/stream thay vì poll")
     parser.add_argument("--verbose", action="store_true", help="bật log HTTP của _api")
     args = parser.parse_args(argv)
     if not args.verbose:
@@ -210,7 +307,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.message is not None:
             _chat_once(args.api_url, token, args.message, session_id,
-                       args.interval, args.timeout)
+                       args.interval, args.timeout, stream=args.stream)
             return 0
         print("Chat với lễ tân (gõ /quit để thoát).")
         while True:
@@ -228,7 +325,8 @@ def main(argv: list[str] | None = None) -> int:
                 break
             try:
                 session_id = _chat_once(args.api_url, token, message, session_id,
-                                        args.interval, args.timeout)
+                                        args.interval, args.timeout,
+                                        stream=args.stream)
             except SystemExit as exc:
                 print(f"(lỗi: exit {exc.code})", file=sys.stderr)
                 if exc.code == 2:

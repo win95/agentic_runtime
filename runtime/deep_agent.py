@@ -183,6 +183,9 @@ def build_deep_agent(
     model_config=None,
     middleware=None,
     backend=None,
+    interrupt_on=None,
+    checkpointer=None,
+    response_format=None,
 ):
     """Create a Deep Agent (compiled LangGraph) over the given tools.
 
@@ -212,6 +215,20 @@ def build_deep_agent(
     ``runtime/sandbox/`` (docs/sandbox.md). ``None`` (the default)
     keeps deepagents' default in-memory ``StateBackend``: files live
     only in the agent's state and there is no shell.
+
+    ``interrupt_on`` is the MDA human-in-the-loop mapping (see
+    ``runtime/interrupt.py``): a tool name to ``True`` or an
+    ``InterruptOnConfig`` dict. It only takes effect with
+    ``checkpointer`` — the saver the agent's pause/resume state
+    lives in (thread id supplied by the caller at invoke time).
+
+    ``response_format`` is the MDA structured-output declaration
+    (see ``runtime/agent_context.py``): a JSON-schema dict the final
+    answer must match, or None (default — free text). The context
+    shape (MDA ``context_schema``) is ``AgentContext`` in the same
+    module, enforced by ``deep_agent_node`` where the context is
+    built — the invoke carries no context object today, so there is
+    nothing for the graph to type-check at run time.
     """
     from deepagents import create_deep_agent
 
@@ -229,6 +246,9 @@ def build_deep_agent(
         middleware=middleware,
         subagents=subagents,
         backend=backend,
+        interrupt_on=interrupt_on,
+        checkpointer=checkpointer,
+        response_format=response_format,
     )
 
 
@@ -367,7 +387,10 @@ def outcome_from_messages(messages: list, skill_maps: list[SkillMap] | None = No
 def run_deep_agent(agent, mission: dict, input_data: dict, callbacks=None, files=None,
                    skill_maps: list[SkillMap] | None = None,
                    trace_metadata: dict | None = None,
-                   trace_tags: list[str] | None = None) -> dict:
+                   trace_tags: list[str] | None = None,
+                   resume_decision: str | None = None,
+                   resume_request_count: int = 0,
+                   checkpointer_thread_id: str | None = None) -> dict:
     """Invoke the deep agent for one mission input.
 
     Returns {"summary": str, "evidence": [...], "actions_taken": [...],
@@ -386,6 +409,15 @@ def run_deep_agent(agent, mission: dict, input_data: dict, callbacks=None, files
     ``trace_metadata`` / ``trace_tags`` (built by ``runtime.tracing``)
     go into the invoke config as LangSmith run metadata/tags, so the
     agent's trace tree carries the execution/session identity.
+
+    ``resume_decision`` resumes a run paused on ``interrupt_on``
+    (docs/interrupt.md): instead of the mission prompt, the agent is
+    invoked with ``Command(resume=HITLResponse(...))`` carrying one
+    decision per pending call (``resume_request_count`` of them), on
+    the same ``checkpointer_thread_id`` the pause used. The outcome
+    then carries ``"interrupted": True`` plus ``"interrupt_requests"``
+    when the agent pauses again instead of finishing — the caller
+    (``deep_agent_node``) turns that into a mission-graph pause.
     """
     objective = mission.get("objective", "")
     # Layer 2: the execution input is untrusted data, never instructions.
@@ -411,10 +443,45 @@ def run_deep_agent(agent, mission: dict, input_data: dict, callbacks=None, files
         config["metadata"] = trace_metadata
     if trace_tags:
         config["tags"] = trace_tags
+    if checkpointer_thread_id:
+        config["configurable"] = {"thread_id": checkpointer_thread_id}
+    if resume_decision is not None:
+        from runtime.interrupt import build_resume_command
+
+        invoke_input = build_resume_command(resume_decision, resume_request_count)
+    else:
+        invoke_input = input_payload
     result = invoke_with_observability_fallback(
         agent.invoke,
-        input_payload,
+        invoke_input,
         config=config if config else None,
     )
     messages = result.get("messages") or []
-    return outcome_from_messages(messages, skill_maps=skill_maps)
+    outcome = outcome_from_messages(messages, skill_maps=skill_maps)
+    # Structured final output (docs/agent-definition.md): when the
+    # agent was built with response_format, its result carries
+    # structured_response. It is already schema-shaped, so it rides in
+    # the outcome for deep_agent_node to merge into the result, and a
+    # summary/answer field in it beats the prose summary.
+    structured = result.get("structured_response")
+    if structured is not None:
+        if hasattr(structured, "model_dump"):
+            structured = structured.model_dump()
+        if isinstance(structured, dict):
+            outcome["structured_response"] = structured
+            for key in ("summary", "answer"):
+                value = structured.get(key)
+                if isinstance(value, str) and value.strip():
+                    outcome["summary"] = value
+                    break
+    # Human-in-the-loop pause: the agent stopped before a gated tool
+    # call. The pending calls ride in the outcome so the caller can
+    # pause the mission graph on them (docs/interrupt.md).
+    interrupt_value = result.get("__interrupt__")
+    if interrupt_value:
+        from runtime.interrupt import extract_interrupt_requests
+
+        requests = extract_interrupt_requests(interrupt_value)
+        outcome["interrupted"] = True
+        outcome["interrupt_requests"] = requests
+    return outcome

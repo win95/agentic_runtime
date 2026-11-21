@@ -24,6 +24,7 @@ from langgraph.graph import END, START, StateGraph
 
 from infra import repositories
 from ontology.canonical.schema import DEFAULT_RELATION_TYPE
+from runtime.agents.registry import register_capability
 from runtime.retrieval_weights import DEFAULT_DOC_LIMIT
 from runtime.state import MissionState
 
@@ -247,6 +248,21 @@ def evidence_aggregation_node(state: MissionState) -> dict:
     return {"result": result}
 
 
+# The fault capability names all route to this one subgraph (see the
+# NOTE in capability_node about capability names doing double duty):
+# the fault tools get_sensor_data (sensor_data) and
+# query_asset_relationships (asset_relations) need their capability
+# declared on the mission or the agent never receives them.
+@register_capability(
+    "fault_analysis",
+    aliases=(
+        "fault_history",
+        "maintenance_analysis",
+        "knowledge_retrieval",
+        "sensor_data",
+        "asset_relations",
+    ),
+)
 def build_fault_analysis_graph():
     """Compile the fault_analysis capability subgraph."""
     graph = StateGraph(MissionState)

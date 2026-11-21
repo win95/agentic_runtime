@@ -18,6 +18,7 @@ from app import models
 from app.core.db import SessionLocal
 from app.services import mission_service
 from app.worker.celery_app import celery_app
+from runtime.events import publish_execution_event
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +29,7 @@ logger = logging.getLogger(__name__)
     max_retries=3,
     default_retry_delay=60,
 )
-def run_execution(self, execution_id: str) -> dict:
+def run_execution(self, execution_id: str, resume_decision: str | None = None) -> dict:
     db = SessionLocal()
     try:
         execution = db.get(models.Execution, execution_id)
@@ -78,6 +79,9 @@ def run_execution(self, execution_id: str) -> dict:
             logger.error("Execution %s could not be claimed", execution_id)
             return {"execution_id": execution_id, "status": execution.status}
         execution = claimed
+        # SSE lifecycle event (A.2): the run is now RUNNING. Publishing
+        # never raises, so a missing Redis cannot break the claim.
+        publish_execution_event(execution.id, "status", status="RUNNING")
 
         mission = db.get(models.Mission, execution.mission_id)
         if mission is None:
@@ -127,6 +131,7 @@ def run_execution(self, execution_id: str) -> dict:
             session_history=session_history,
             session_id=execution.session_id,
             user_id=execution.user_id,
+            resume_decision=resume_decision,
         )
 
         # A cancellation that arrived mid-run wins over the graph result.
@@ -144,6 +149,14 @@ def run_execution(self, execution_id: str) -> dict:
         # via GET /executions/{id}/result (output["notes"]). The worker used
         # to drop them — they only survived inside the Markdown report.
         output = {**output, "notes": final_state.get("notes") or []}
+        # Human-in-the-loop pause (docs/interrupt.md): the pending gated
+        # calls ride in the result so the resume endpoint — and the user
+        # reading GET /executions/{id}/result — can see what waits. The
+        # run is not finished, so finished_at stays unset until a resume
+        # completes it.
+        if status == "INTERRUPTED":
+            output = {**output, "interrupt": final_state.get("interrupt") or {}}
+            output = {**output, "errors": errors}
 
         # Hooks: SessionEnd for the whole execution (the agent run's own
         # SessionEnd already fired inside HookMiddleware.after_agent when
@@ -202,9 +215,17 @@ def run_execution(self, execution_id: str) -> dict:
         # agent configured", see docs/agent-versioning.md.
         execution.agent_version = final_state.get("agent_version")
         execution.agent_version_drift = bool(final_state.get("agent_version_drift"))
-        execution.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        if status != "INTERRUPTED":
+            execution.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
         db.commit()
         logger.info("Execution %s finished with status %s", execution_id, status)
+        # SSE lifecycle event (A.2): terminal status, or INTERRUPTED with
+        # the pending gated calls so a listening client learns at once
+        # that a human decision waits (docs/interrupt.md).
+        _event_extra: dict = {}
+        if status == "INTERRUPTED":
+            _event_extra["interrupt"] = output.get("interrupt") or {}
+        publish_execution_event(execution.id, "status", status=status, **_event_extra)
         # Slack notification (scope: failures + admin actions only).
         # Best-effort, after persistence, never blocks the return.
         try:
@@ -258,6 +279,7 @@ def run_execution(self, execution_id: str) -> dict:
                 execution.error = str(exc)[:2000]
                 execution.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
                 db.commit()
+                publish_execution_event(execution.id, "status", status="FAILED")
                 # Slack notification (FAILED always notifies when a
                 # webhook is configured). Best-effort, after persistence.
                 try:

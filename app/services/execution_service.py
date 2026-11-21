@@ -46,6 +46,16 @@ def dispatch_execution(execution_id: str) -> None:
     run_execution.delay(execution_id)
 
 
+def dispatch_resume(execution_id: str, decision: str) -> None:
+    """Enqueue a resume of an INTERRUPTED execution with a human decision
+    (docs/interrupt.md). Same lazy-import pattern as dispatch_execution:
+    tests monkeypatch this function to assert the dispatch without a broker.
+    """
+    from app.worker.tasks import run_execution
+
+    run_execution.delay(execution_id, resume_decision=decision)
+
+
 def create_execution(
     db: Session,
     mission_id: str,
@@ -168,8 +178,6 @@ def execution_is_stale(execution: models.Execution) -> bool:
 
 def reap_stale_running_executions(db: Session, *, limit: int = 50) -> dict:
     """Mark long-stuck RUNNING rows FAILED so operators can inspect and re-dispatch."""
-    from app.config import settings
-
     cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(
         seconds=execution_stale_threshold_seconds()
     )
@@ -226,6 +234,11 @@ def cancel_execution(db: Session, execution_id: str) -> models.Execution | None:
         execution.finished_at = datetime.now(timezone.utc).replace(tzinfo=None)
         db.commit()
         db.refresh(execution)
+        # SSE lifecycle event (A.2): a listening client learns at once
+        # that the run was cancelled. Publishing never raises.
+        from runtime.events import publish_execution_event
+
+        publish_execution_event(execution.id, "status", status="CANCELLED")
     return execution
 
 

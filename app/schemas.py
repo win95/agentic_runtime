@@ -109,6 +109,12 @@ class ExecutionCreate(BaseModel):
     )
 
 
+class ExecutionResumeRequest(BaseModel):
+    """Human decision resuming an INTERRUPTED execution (docs/interrupt.md)."""
+
+    decision: str = Field(pattern=r"^(approve|reject)$")
+
+
 class ExecutionRead(BaseModel):
     execution_id: str
     mission_id: str
@@ -209,6 +215,39 @@ class ExecutionResultRead(BaseModel):
     output: dict[str, Any] = Field(default_factory=dict)
     evidence: list[Any] = Field(default_factory=list)
     created_at: datetime | None = None
+
+
+# --- Threads / Runs (MDA Agent Server shape, docs/agent-definition.md) ---
+class ThreadRead(BaseModel):
+    """One thread = one session (thread_id is the session_id)."""
+
+    thread_id: str
+    agent_id: str | None = None
+    mission_id: str | None = None
+    execution_count: int = 0
+    first_created_at: datetime | None = None
+    last_created_at: datetime | None = None
+    # The thread's runs, oldest first (conversation order).
+    runs: list["RunRead"] = Field(default_factory=list)
+
+
+class RunRead(BaseModel):
+    """One run = one execution (run_id is the execution_id)."""
+
+    run_id: str
+    thread_id: str | None = None
+    mission_id: str
+    agent_id: str | None = None
+    status: str
+    error: str | None = None
+    created_at: datetime | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class ThreadRunCreate(BaseModel):
+    mission_id: str
+    input: dict[str, Any] = Field(default_factory=dict)
 
 
 # --- Schedule ---

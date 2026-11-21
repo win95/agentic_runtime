@@ -45,7 +45,11 @@ class MissionState(TypedDict, total=False):
     plan: Annotated[list, add]
     evidence: Annotated[list, add]
     result: dict | None
-    # QUEUED | RUNNING | SUCCEEDED | FAILED | CANCELLED
+    # QUEUED | RUNNING | SUCCEEDED | FAILED | CANCELLED | INTERRUPTED
     status: str
+    # Human-in-the-loop pause (docs/interrupt.md): the pending gated
+    # calls {"requests": [{"tool", "args"}], "allowed_decisions": [...]},
+    # set when a run pauses on interrupt_on, or None.
+    interrupt: dict | None
     errors: Annotated[list, add]
     notes: Annotated[list, add]

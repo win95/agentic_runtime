@@ -22,11 +22,17 @@ import logging
 import re
 import threading
 
+from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, StateGraph
 
+import runtime.capabilities.fault_analysis  # noqa: F401 — self-registers the fault_analysis capability on import
 from app.config import settings
 from infra.mlflow_setup import setup_mlflow_tracing
-from runtime.capabilities.fault_analysis import build_fault_analysis_graph
+from runtime.agents.registry import (
+    canonical_capability_name,
+    resolve_agent,
+    resolve_capability,
+)
 from runtime.observability_resilience import (
     filter_observability_errors,
     is_observability_transport_error,
@@ -51,6 +57,10 @@ setup_mlflow_tracing()
 # investigate the outage itself.
 MIN_EVIDENCE_FOR_HYBRID = 3
 
+# Human-in-the-loop (docs/interrupt.md): a run that keeps hitting
+# gated tools pauses again instead of failing — but not forever.
+MAX_INTERRUPTS_PER_RUN = 10
+
 _SUBSTANTIVE_EVIDENCE_KINDS = frozenset({"fault", "maintenance", "document", "relation"})
 
 
@@ -58,13 +68,6 @@ def _substantive_evidence_count(evidence: list | None) -> int:
     return sum(
         1 for item in (evidence or []) if (item or {}).get("kind") in _SUBSTANTIVE_EVIDENCE_KINDS
     )
-
-
-CAPABILITY_BUILDERS = {
-    "fault_analysis": build_fault_analysis_graph,
-    # Capability names map to subgraph builders. Add new capabilities here
-    # (e.g. "maintenance_analysis", "knowledge_retrieval") as they are built.
-}
 
 
 # --- Nodes ---
@@ -100,37 +103,32 @@ def capability_node(state: MissionState) -> dict:
     """
     mission = state.get("mission") or {}
     capabilities = mission.get("capabilities") or []
-    # Map business capability names to subgraph builders.
-    # NOTE (F1 fix, 2026-11-11): capability names do double duty — they
-    # route the capability node AND gate tools in registry.check(). The
-    # fault tools get_sensor_data (sensor_data) and
-    # query_asset_relationships (asset_relations) need their capability
-    # declared on the mission or the agent never receives them, even
-    # though the agent lists all six tools in allowed_tools. Both map
-    # to the same fault_analysis subgraph (deduped by `ran` below), so
-    # declaring them costs no extra subgraph run.
-    capability_to_graph = {
-        "fault_history": "fault_analysis",
-        "maintenance_analysis": "fault_analysis",
-        "knowledge_retrieval": "fault_analysis",
-        "sensor_data": "fault_analysis",
-        "asset_relations": "fault_analysis",
-        "fault_analysis": "fault_analysis",
-    }
+    # Capability names do double duty — they route the capability node
+    # AND gate tools in registry.check(). The fault tools
+    # get_sensor_data (sensor_data) and query_asset_relationships
+    # (asset_relations) need their capability declared on the mission
+    # or the agent never receives them, even though the agent lists
+    # all six tools in allowed_tools. Aliases map to the same
+    # fault_analysis subgraph (deduped by `ran` below), so declaring
+    # them costs no extra subgraph run. Builders live in the
+    # capability registry (runtime/agents/registry.py) — a new
+    # capability registers itself instead of editing this file.
     new_evidence: list = []
     errors: list[str] = []
     result_update: dict = {}
     ran: set[str] = set()
     for capability in capabilities:
-        graph_name = capability_to_graph.get(capability)
-        if graph_name is None or graph_name not in CAPABILITY_BUILDERS:
+        graph_name = canonical_capability_name(capability)
+        if graph_name is None:
             errors.append(f"Capability not implemented: {capability}")
             continue
         if graph_name in ran:
             continue
         ran.add(graph_name)
         try:
-            subgraph = CAPABILITY_BUILDERS[graph_name]()
+            builder = resolve_capability(capability)
+            assert builder is not None  # canonical name implies a builder
+            subgraph = builder()
             before = len(state.get("evidence") or [])
             out = subgraph.invoke(dict(state))
             after_evidence = out.get("evidence") or []
@@ -252,7 +250,7 @@ def deep_agent_node(state: MissionState) -> dict:
     # execution_config.allow_cross_asset.
     context = {
         "mission_id": state.get("mission_id"),
-        "execution_id": state.get("execution_id"),
+        "execution_id": state.get("execution_id") or "",
         "tenant": "default",
         "capabilities": mission.get("capabilities") or [],
         "input": input_data,
@@ -260,6 +258,15 @@ def deep_agent_node(state: MissionState) -> dict:
         "session_id": state.get("session_id") or "",
         "user_id": state.get("user_id"),
     }
+    # MDA context_schema (docs/agent-definition.md): the context every
+    # run carries has one declared shape (AgentContext). Validate it
+    # where it is built — a malformed context fails fast instead of
+    # reaching the agent half-built.
+    from runtime.agent_context import validate_agent_context
+
+    _context_problems = validate_agent_context(context)
+    if _context_problems:
+        return {"errors": _context_problems}
     try:
         from runtime.deep_agent import (
             build_deep_agent,
@@ -405,6 +412,46 @@ def deep_agent_node(state: MissionState) -> dict:
         use_flow = use_flow_subgraph(
             state.get("mission_id"), mapped_skills, execution_cfg
         )
+        # Human-in-the-loop interrupts (docs/interrupt.md): the mission
+        # may gate tools in execution.interrupt_on. Flow mode cannot
+        # pause/resume yet — fail fast with a clear error instead of
+        # silently running the gated tool.
+        interrupt_cfg = None
+        try:
+            from runtime.interrupt import parse_interrupt_on
+
+            interrupt_cfg = parse_interrupt_on(execution_cfg.get("interrupt_on"))
+        except ValueError as exc:
+            return {"errors": [f"Invalid execution.interrupt_on: {exc}"]}
+        if interrupt_cfg is not None and use_flow:
+            return {
+                "errors": [
+                    "execution.interrupt_on is not supported with "
+                    "flow_subgraph.enabled yet (flow resume plumbing is "
+                    "a follow-up); remove interrupt_on or disable the flow"
+                ]
+            }
+        # MDA response_format (docs/agent-definition.md): opt-in
+        # structured final output. Flow mode cannot use it yet — the
+        # flow agents are built by the flow compiler, not this node.
+        response_format = None
+        try:
+            from runtime.agent_context import resolve_response_format
+
+            response_format = resolve_response_format(
+                execution_cfg.get("response_format"),
+                mission.get("output_schema"),
+            )
+        except ValueError as exc:
+            return {"errors": [f"Invalid execution.response_format: {exc}"]}
+        if response_format is not None and use_flow:
+            return {
+                "errors": [
+                    "execution.response_format is not supported with "
+                    "flow_subgraph.enabled yet; remove response_format or "
+                    "disable the flow"
+                ]
+            }
         plan_block = (
             "\n\n".join(render_plan(s.map) for s in mapped_skills)
             if mapped_skills
@@ -742,37 +789,26 @@ def deep_agent_node(state: MissionState) -> dict:
                 callbacks=[handler],
             )
         else:
-            if agent_version is not None:
-                system_prompt_text = base_prompt_text
-                if plan_block:
-                    system_prompt_text = system_prompt_text + "\n\n" + plan_block
-                prompt_for_budget = system_prompt_text
-                if history_block:
-                    system_prompt_text = system_prompt_text + "\n\n" + history_block
-                _agent_kw: dict = {
-                    "tools": tools,
-                    "system_prompt": system_prompt_text,
-                    "skills": skill_sources,
-                    "model_config": version_cfg,
-                    "middleware": middleware,
-                    "backend": sandbox_backend,
-                }
-                agent = build_deep_agent(**_agent_kw)
-            else:
-                system_prompt_text = base_prompt_text
-                if plan_block:
-                    system_prompt_text = system_prompt_text + "\n\n" + plan_block
-                prompt_for_budget = system_prompt_text
-                if history_block:
-                    system_prompt_text = system_prompt_text + "\n\n" + history_block
-                _agent_kw = {
-                    "tools": tools,
-                    "system_prompt": system_prompt_text,
-                    "skills": skill_sources,
-                    "middleware": middleware,
-                    "backend": sandbox_backend,
-                }
-                agent = build_deep_agent(**_agent_kw)
+            # Phase 0 (BaseAgent): the agent object owns its definition
+            # and the single compile point. Behaviour is unchanged —
+            # definition() just carries the values this node already
+            # computed. The two branches used to differ only in
+            # model_config (pinned version, else the env default).
+            system_prompt_text = base_prompt_text
+            if plan_block:
+                system_prompt_text = system_prompt_text + "\n\n" + plan_block
+            prompt_for_budget = system_prompt_text
+            if history_block:
+                system_prompt_text = system_prompt_text + "\n\n" + history_block
+            agent_obj = resolve_agent(agent_id, mission, agent_version)
+            definition = agent_obj.definition(
+                tools=tools,
+                instructions=system_prompt_text,
+                skills=skill_sources,
+                model_config=version_cfg if agent_version is not None else None,
+                middleware=middleware,
+                backend=sandbox_backend,
+            )
             # Fixed prefix (see the shared computation above):
             # prompt_for_budget was set by whichever branch ran.
             prefix_overruns = check_prefix_budgets(prompt_for_budget, tools_text, skills_text)
@@ -788,21 +824,108 @@ def deep_agent_node(state: MissionState) -> dict:
             # the run proceeds, just without a plan trace / trace metadata.
             # Any other TypeError is a real bug and is re-raised. Each retry
             # strips at least one kwarg, so the loop always terminates.
-            while True:
-                try:
-                    outcome = run_deep_agent(agent, mission, input_data, **run_kwargs)
-                    break
-                except TypeError as exc:
-                    msg = str(exc)
-                    if "unexpected keyword argument 'skill_maps'" in msg:
-                        run_kwargs.pop("skill_maps", None)
-                    elif "unexpected keyword argument 'trace_metadata'" in msg:
-                        run_kwargs.pop("trace_metadata", None)
-                        run_kwargs.pop("trace_tags", None)
-                    elif "unexpected keyword argument 'trace_tags'" in msg:
-                        run_kwargs.pop("trace_tags", None)
-                    else:
-                        raise
+            # Resume kwargs are never stripped: dropping a resume decision
+            # would re-run the agent instead of resuming it.
+            def _invoke_agent(_agent, _kwargs):
+                while True:
+                    try:
+                        return run_deep_agent(_agent, mission, input_data, **_kwargs)
+                    except TypeError as exc:
+                        msg = str(exc)
+                        if "unexpected keyword argument 'skill_maps'" in msg:
+                            _kwargs.pop("skill_maps", None)
+                        elif "unexpected keyword argument 'trace_metadata'" in msg:
+                            _kwargs.pop("trace_metadata", None)
+                            _kwargs.pop("trace_tags", None)
+                        elif "unexpected keyword argument 'trace_tags'" in msg:
+                            _kwargs.pop("trace_tags", None)
+                        else:
+                            raise
+
+            # New build kwargs are only added when configured, so older
+            # build_deep_agent doubles (fixed signatures) keep working
+            # on the common path — see BaseAgent.compile, which enforces
+            # this for every kwarg.
+            if response_format is not None:
+                definition.response_format = response_format
+            if interrupt_cfg is None:
+                agent = agent_obj.compile(definition, build_fn=build_deep_agent)
+                outcome = _invoke_agent(agent, run_kwargs)
+            else:
+                # Human-in-the-loop (docs/interrupt.md): the agent is
+                # built with a checkpointer and a stable thread id; a
+                # gated tool call pauses the deep agent, this node turns
+                # the pause into a mission-graph interrupt, and the
+                # resume re-builds the agent and continues it with the
+                # human's decision. The checkpointer context only spans
+                # each build+invoke pair — the checkpoints live in the
+                # saver, so closing it across the pause is safe. A run
+                # that keeps hitting gated calls pauses again, up to
+                # MAX_INTERRUPTS_PER_RUN times. The new kwargs are only
+                # added when interrupt_on is configured, so older
+                # build_deep_agent doubles (fixed signatures) keep
+                # working on the common path.
+                definition.interrupt_on = interrupt_cfg
+                from langgraph.types import interrupt as graph_interrupt
+
+                from runtime.interrupt import (
+                    ALLOWED_DECISIONS,
+                    agent_thread_id,
+                    interrupt_checkpointer,
+                    interrupt_payload,
+                )
+
+                thread_id = agent_thread_id(state.get("execution_id") or "")
+                run_kwargs["checkpointer_thread_id"] = thread_id
+                with interrupt_checkpointer() as agent_cp:
+                    if agent_cp is None:
+                        return {
+                            "errors": [
+                                "execution.interrupt_on requires a "
+                                "checkpointer: set CHECKPOINT_ENABLED=true "
+                                "and install the postgres-checkpoint extra "
+                                "(or run in dev)"
+                            ]
+                        }
+                    definition.checkpointer = agent_cp
+                    agent = agent_obj.compile(definition, build_fn=build_deep_agent)
+                    outcome = _invoke_agent(agent, run_kwargs)
+                pauses = 0
+                while outcome.get("interrupted"):
+                    pauses += 1
+                    if pauses > MAX_INTERRUPTS_PER_RUN:
+                        return {
+                            "errors": [
+                                "Too many human-in-the-loop pauses "
+                                f"({MAX_INTERRUPTS_PER_RUN}); refusing to "
+                                "pause again"
+                            ]
+                        }
+                    payload = interrupt_payload(outcome.get("interrupt_requests") or [])
+                    decision = graph_interrupt(payload)
+                    if decision not in ALLOWED_DECISIONS:
+                        return {
+                            "errors": [
+                                f"Invalid resume decision {decision!r}; "
+                                f"expected one of {list(ALLOWED_DECISIONS)}"
+                            ]
+                        }
+                    with interrupt_checkpointer() as agent_cp:
+                        if agent_cp is None:
+                            return {
+                                "errors": [
+                                    "execution.interrupt_on requires a "
+                                    "checkpointer: set CHECKPOINT_ENABLED=true "
+                                    "and install the postgres-checkpoint extra "
+                                    "(or run in dev)"
+                                ]
+                            }
+                        definition.checkpointer = agent_cp
+                        agent = agent_obj.compile(definition, build_fn=build_deep_agent)
+                        resume_kwargs = dict(run_kwargs)
+                        resume_kwargs["resume_decision"] = decision
+                        resume_kwargs["resume_request_count"] = len(payload["requests"])
+                        outcome = _invoke_agent(agent, resume_kwargs)
         notes = [f"Deep agent: {outcome.get('summary', '')}"] if outcome.get("summary") else []
         if version_note and version_note not in (state.get("notes") or []):
             notes.append(version_note)
@@ -904,6 +1027,15 @@ def deep_agent_node(state: MissionState) -> dict:
             warnings = build_export_result_warnings(exported, export_notes)
             if warnings is not None:
                 result["export_warnings"] = warnings
+        # Structured final output (docs/agent-definition.md): keys the
+        # agent returned under the declared response_format are already
+        # schema-shaped, so they win over the prose-derived mappings
+        # above.
+        structured = outcome.get("structured_response")
+        if isinstance(structured, dict):
+            for key in required_keys:
+                if key in structured:
+                    result[key] = structured[key]
         tool_failures = outcome.get("errors") or []
         graph_errors = _execution_diagnostic_errors(tool_failures)
         if tool_failures:
@@ -942,6 +1074,11 @@ def deep_agent_node(state: MissionState) -> dict:
             "agent_version_drift": agent_version_drift,
             "hook_events": hook_events,
         }
+    except GraphInterrupt:
+        # Human-in-the-loop pause (docs/interrupt.md): the graph must
+        # see this, not the error path — re-raise so LangGraph can
+        # checkpoint the pause and return __interrupt__ to run_mission.
+        raise
     except Exception as exc:  # noqa: BLE001 — model/package problems are state
         if is_observability_transport_error(exc):
             logger.warning("Deep agent observability failed (ignored): %s", exc)
@@ -1134,6 +1271,10 @@ def validate_results(state: MissionState) -> dict:
     errors = list(state.get("errors") or [])
     from runtime.subgraph.flow import append_unique_errors
 
+    if state.get("status") == "INTERRUPTED":
+        # A run paused on interrupt_on (docs/interrupt.md): nothing to
+        # validate yet — the agent stopped before a gated tool call.
+        return {"result": dict(state.get("result") or {}), "status": "INTERRUPTED"}
     deduped_errors: list[str] = []
     append_unique_errors(deduped_errors, errors)
     errors = deduped_errors
@@ -1351,6 +1492,26 @@ def get_checkpointer():
         yield None
 
 
+@contextlib.contextmanager
+def _mission_checkpointer(for_interrupt: bool):
+    """Checkpointer for one run_mission call.
+
+    Plain runs keep the existing behaviour (Postgres when enabled,
+    else stateless). A run whose mission declares ``interrupt_on``
+    goes through ``interrupt_checkpointer`` instead, which falls back
+    to the process-local memory saver in dev/test — the mission-graph
+    ``interrupt()`` needs a checkpointer even when Postgres is off.
+    """
+    if for_interrupt:
+        from runtime.interrupt import interrupt_checkpointer
+
+        with interrupt_checkpointer() as checkpointer:
+            yield checkpointer
+    else:
+        with get_checkpointer() as checkpointer:
+            yield checkpointer
+
+
 def run_mission(
     mission: dict,
     input_data: dict,
@@ -1358,6 +1519,7 @@ def run_mission(
     session_history: dict | None = None,
     session_id: str | None = None,
     user_id: str | None = None,
+    resume_decision: str | None = None,
 ) -> dict:
     """Run one execution through the Mission Graph and return final state.
 
@@ -1372,8 +1534,32 @@ def run_mission(
     ``user_id`` is the authenticated user (JWT "sub", or None for
     service-key / schedule / admin dispatch). It rides in the state so
     deep_agent_node can tell the agent who is talking to it.
+
+    ``resume_decision`` resumes a run paused on ``interrupt_on``
+    (docs/interrupt.md): "approve" or "reject". The mission graph is
+    resumed with ``Command(resume=decision)`` on the same thread, so
+    the node continues after its ``interrupt()`` call and resumes the
+    deep agent with the decision. Requires a checkpoint to resume
+    from; anything else raises instead of starting a fresh run.
     """
 
+    # Human-in-the-loop (docs/interrupt.md): a mission that gates
+    # tools needs a checkpointer for the pause/resume to work at all.
+    # Fail fast here, before any tool runs, rather than discovering
+    # it mid-run inside deep_agent_node.
+    from runtime.interrupt import (
+        ALLOWED_DECISIONS,
+        INTERRUPTED,
+        extract_interrupt_requests,
+        interrupt_payload,
+        parse_interrupt_on,
+    )
+
+    interrupt_cfg = parse_interrupt_on((mission.get("execution") or {}).get("interrupt_on"))
+    if resume_decision is not None and resume_decision not in ALLOWED_DECISIONS:
+        raise ValueError(
+            f"resume_decision must be one of {list(ALLOWED_DECISIONS)}"
+        )
     # Tracing for direct callers (worker, eval, langgraph dev): the API
     # lifespan already calls this for its own process. No-op without a key.
     from infra.langsmith_setup import setup_langsmith
@@ -1433,7 +1619,13 @@ def run_mission(
     with mlflow_execution_run(
         execution_id, mission.get("mission_id", ""), agent_id or None, session_id
     ):
-        with get_checkpointer() as checkpointer:
+        with _mission_checkpointer(interrupt_cfg is not None) as checkpointer:
+            if interrupt_cfg is not None and checkpointer is None:
+                raise RuntimeError(
+                    "execution.interrupt_on requires a checkpointer: set "
+                    "CHECKPOINT_ENABLED=true and install the "
+                    "postgres-checkpoint extra (or run in dev)"
+                )
             graph = (
                 build_mission_graph(checkpointer=checkpointer) if checkpointer else mission_graph
             )
@@ -1452,6 +1644,33 @@ def run_mission(
                     resume = snapshot is not None and snapshot.checkpoint is not None
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Could not read checkpoint for %s: %s", execution_id, exc)
-            graph_input = None if resume else initial_state
-            final_state = graph.invoke(graph_input, config=config)
+            if resume_decision is not None:
+                if checkpointer is None:
+                    raise RuntimeError(
+                        f"Cannot resume execution {execution_id}: no checkpointer"
+                    )
+                if not resume:
+                    raise RuntimeError(
+                        f"Cannot resume execution {execution_id}: no checkpoint found"
+                    )
+                from langgraph.types import Command
+
+                final_state = graph.invoke(
+                    Command(resume=resume_decision), config=config
+                )
+            else:
+                graph_input = None if resume else initial_state
+                final_state = graph.invoke(graph_input, config=config)
+            # A pause on interrupt_on surfaces as __interrupt__ in the
+            # returned state (updates made before interrupt() are NOT
+            # preserved — verified empirically). Translate it into the
+            # INTERRUPTED status + the pending calls, so the worker can
+            # persist them and the resume endpoint knows what waits.
+            if "__interrupt__" in final_state:
+                requests = extract_interrupt_requests(final_state["__interrupt__"])
+                final_state = {
+                    **final_state,
+                    "status": INTERRUPTED,
+                    "interrupt": interrupt_payload(requests),
+                }
     return dict(final_state)
