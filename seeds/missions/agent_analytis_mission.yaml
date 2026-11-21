@@ -50,6 +50,13 @@ harness:
     sequential:
       - tavily_search
       - tavily_extract
+      # write_file / edit_file (2026-11-21, exec_f0c3d946d727): the 3B
+      # model batched parallel write_file calls to the same report path
+      # and deepagents rejected all but the first ("parallel file
+      # mutations to the same path are not allowed", 13 failures) — so
+      # file mutations run one at a time, like the tavily calls.
+      - write_file
+      - edit_file
   tool_budget:
     tools:
       - tavily_search

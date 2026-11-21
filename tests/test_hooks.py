@@ -135,6 +135,55 @@ def test_deny_builtin_tools_via_registry():
 
 
 # --- Built-ins ---------------------------------------------------------
+def test_limit_large_report_write_analytis_only():
+    """exec_f0c3d946d727 (2026-11-21): pasting a whole HTML report
+    through one write_file truncates it — the hook denies oversized
+    report writes for missions that must produce /output files."""
+    big = "x" * 9_000
+    decision = builtin.limit_large_report_write(
+        _ctx(
+            mission_id="agent_analytis_mission",
+            tool_name="write_file",
+            tool_input={"file_path": "/output/report.html", "content": big},
+        )
+    )
+    assert decision is not None and decision.action == "deny"
+    assert "limit_large_report_write" in decision.message
+    assert "execute" in decision.message
+    # Small writes pass.
+    assert builtin.limit_large_report_write(
+        _ctx(
+            mission_id="agent_analytis_mission",
+            tool_name="write_file",
+            tool_input={"file_path": "/output/report.html", "content": "small"},
+        )
+    ) is None
+    # Scripts are not report files.
+    assert builtin.limit_large_report_write(
+        _ctx(
+            mission_id="agent_analytis_mission",
+            tool_name="write_file",
+            tool_input={"file_path": "/output/gen.py", "content": big},
+        )
+    ) is None
+    # Other tools pass.
+    assert builtin.limit_large_report_write(
+        _ctx(
+            mission_id="agent_analytis_mission",
+            tool_name="execute",
+            tool_input={"command": "ls"},
+        )
+    ) is None
+    # Missions without required output files are untouched.
+    assert builtin.limit_large_report_write(
+        _ctx(
+            mission_id="fault_analysis",
+            tool_name="write_file",
+            tool_input={"file_path": "/output/report.html", "content": big},
+        )
+    ) is None
+
+
 def test_block_dangerous_tool_call():
     dangerous = _ctx(
         tool_name="Bash",

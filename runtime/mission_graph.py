@@ -504,7 +504,6 @@ def deep_agent_node(state: MissionState) -> dict:
             effective_history_tokens,
             estimate_tokens,
         )
-
         from runtime.harness.registry import effective_harness, harness_requires_output_files
 
         _run_harness = effective_harness(state.get("mission_id"), execution_cfg)

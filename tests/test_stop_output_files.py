@@ -197,8 +197,9 @@ def test_middleware_after_model_fail_open_on_check_error():
 
 
 def test_agent_analytis_harness_output_files_required():
-    from runtime.harness.loader import load_mission_harness_from_file
     from pathlib import Path
+
+    from runtime.harness.loader import load_mission_harness_from_file
 
     path = Path(__file__).resolve().parents[1] / "seeds/missions/agent_analytis_mission.yaml"
     import yaml

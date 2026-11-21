@@ -7,11 +7,11 @@ from langchain_core.messages import AIMessage, ToolMessage
 
 from runtime.context_budget import estimate_tokens
 from runtime.deep_agent import build_deep_agent
+from runtime.harness.loader import parse_mission_harness
 from runtime.hooks import builtin
 from runtime.hooks.events import HookEvent
 from runtime.hooks.middleware import HookMiddleware, SharedRunCounters
 from runtime.hooks.registry import HookRegistry
-from runtime.harness.loader import parse_mission_harness
 from runtime.tool_call_policy import (
     TRUNCATION_MARKER,
     apply_tool_result_budget,
@@ -38,7 +38,12 @@ def test_sequential_defers_second_parallel_tavily_call():
         ],
     )
     seq = frozenset({"tavily_search", "tavily_extract"})
-    assert sequential_defer_message(_req("tavily_search", "c1", ai), tool_name="tavily_search", tool_call_id="c1", sequential_tools=seq) is None
+    assert sequential_defer_message(
+        _req("tavily_search", "c1", ai),
+        tool_name="tavily_search",
+        tool_call_id="c1",
+        sequential_tools=seq,
+    ) is None
     defer = sequential_defer_message(
         _req("tavily_extract", "c2", ai),
         tool_name="tavily_extract",
@@ -48,6 +53,46 @@ def test_sequential_defers_second_parallel_tavily_call():
     assert isinstance(defer, ToolMessage)
     assert "one at a time" in str(defer.content)
     assert defer.tool_call_id == "c2"
+
+
+def test_sequential_defers_second_parallel_write_file_same_path():
+    """exec_f0c3d946d727 (2026-11-21): parallel write_file calls to one
+    report path are rejected by deepagents — the policy defers all but
+    the first so the model retries them one at a time."""
+    ai = AIMessage(
+        content="",
+        tool_calls=[
+            {"name": "write_file", "args": {"file_path": "output/a.html"}, "id": "w1"},
+            {"name": "write_file", "args": {"file_path": "output/a.html"}, "id": "w2"},
+        ],
+    )
+    seq = frozenset({"tavily_search", "tavily_extract", "write_file", "edit_file"})
+    assert sequential_defer_message(
+        _req("write_file", "w1", ai),
+        tool_name="write_file",
+        tool_call_id="w1",
+        sequential_tools=seq,
+    ) is None
+    defer = sequential_defer_message(
+        _req("write_file", "w2", ai),
+        tool_name="write_file",
+        tool_call_id="w2",
+        sequential_tools=seq,
+    )
+    assert isinstance(defer, ToolMessage)
+    assert "one at a time" in str(defer.content)
+    assert defer.tool_call_id == "w2"
+
+
+def test_analytis_mission_sequential_includes_file_mutations():
+    """The analytis mission opts write_file/edit_file into the
+    sequential set (seeds YAML, not code)."""
+    from seeds.load_missions import BASE, load_mission_file
+
+    data = load_mission_file(BASE / "missions" / "agent_analytis_mission.yaml")
+    sequential = data["execution_config"]["harness"]["tool_calls"]["sequential"]
+    assert "write_file" in sequential and "edit_file" in sequential
+    assert "tavily_search" in sequential and "tavily_extract" in sequential
 
 
 def test_sequential_disabled_by_default_hotel():
@@ -187,7 +232,7 @@ def test_middleware_parallel_only_first_sequential_runs():
             tool_call_id=str((request.tool_call or {}).get("id")),
         )
 
-    r1 = mw.wrap_tool_call(_req("tavily_search", "1", ai), handler)
+    mw.wrap_tool_call(_req("tavily_search", "1", ai), handler)
     r2 = mw.wrap_tool_call(_req("tavily_extract", "2", ai), handler)
     assert ran == ["tavily_search"]
     assert isinstance(r2, ToolMessage)

@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import os
 from unittest.mock import MagicMock, patch
-
-import pytest
 
 import runtime.tools  # noqa: F401 — registers tools
 from runtime.tools.tavily_tools import tavily_extract, tavily_search

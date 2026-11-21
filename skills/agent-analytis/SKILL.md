@@ -44,7 +44,13 @@ quả dưới dạng **file, bảng, biểu đồ HTML** — không chỉ text.
    hoặc quá lớn sẽ KHÔNG tới được người đọc. Báo cáo HTML KHÔNG dán
    toàn bộ qua `write_file` — viết script Python nhỏ sinh HTML từ
    template + dữ liệu CSV rồi chạy trong sandbox; nội dung lớn chỉ
-   sống trong sandbox, không vào context. Ghi rõ đường dẫn từng
+   sống trong sandbox, không vào context. Quy trình đúng: ghi dữ liệu
+   ra CSV trước → viết script đọc CSV sinh HTML → chạy bằng `execute`
+   → đọc lại file để chắc nó đầy đủ. Mỗi `write_file` một file, một
+   lần một cái: gọi nhiều `write_file` cùng 1 path trong 1 lần trả
+   lời sẽ bị từ chối ("parallel file mutations to the same path are
+   not allowed"), và dán toàn bộ HTML qua `write_file` sẽ bị cắt giữa
+   chừng, file ra thiếu nội dung. Ghi rõ đường dẫn từng
    file trong câu trả lời cuối.
 5. **Trả lời tóm tắt.** Kết luận chính + 2–3 con số quan trọng nhất +
    đường dẫn file + nguồn. Nguồn web nào cũng kèm URL.
@@ -81,5 +87,9 @@ quả dưới dạng **file, bảng, biểu đồ HTML** — không chỉ text.
   file và câu trả lời của run này.
 - Không tự `tavily_extract` toàn văn — giao cho subagent, main agent
   chỉ đọc draft.
+- Không gọi nhiều `write_file`/`edit_file` cùng 1 path trong 1 lần
+  trả lời — lần sau bị từ chối ("parallel file mutations to the same
+  path are not allowed"), chỉ lần đầu được ghi.
 - Không dán toàn bộ HTML qua `write_file` — sinh HTML bằng script
-  trong sandbox.
+  trong sandbox (dán file lớn sẽ bị cắt giữa chừng, file ra thiếu
+  nội dung).

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from app.config import Settings
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
 from langchain_core.messages import AIMessage, ToolMessage
 
-from runtime.deep_agent import _subagents_inherit_main_middleware, build_deep_agent
+from app.config import Settings
+from runtime.deep_agent import _subagents_inherit_main_middleware
 from runtime.hooks import HookMiddleware, default_registry
 from runtime.hooks.events import HookDecision, HookEvent
 from runtime.hooks.middleware import builtin_subagent_hook_names

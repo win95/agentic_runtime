@@ -5,11 +5,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
 from langchain_core.messages import AIMessage, ToolMessage
 
 from runtime.context_budget import estimate_tokens
+
+logger = logging.getLogger(__name__)
 
 SEQUENTIAL_DEFER_TEMPLATE = (
     "Tool '{tool_name}' was not executed: this mission requires calling "
