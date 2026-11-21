@@ -23,14 +23,23 @@ from runtime.sandbox.command_output import combine_stdout_stderr, split_command_
 logger = logging.getLogger(__name__)
 
 WORKDIR = "/workspace"
-OUTPUT_DIRS = ("/output", f"{WORKDIR}/output")
+OUTPUT_LIST_DIR = "/output"
 MTIME_SKEW_TOLERANCE = timedelta(seconds=5)
 
 
-def _is_toplevel_output_path(path: str) -> bool:
+def normalize_output_export_path(path: str) -> str | None:
+    """Map exportable paths to canonical ``/output/<file>`` (real dir, not symlinks)."""
     norm = path if path.startswith("/") else f"/{path}"
     parts = norm.strip("/").split("/")
-    return len(parts) == 2 and parts[0] == "output"
+    if len(parts) == 2 and parts[0] == "output":
+        return norm
+    if len(parts) == 3 and parts[0] == "workspace" and parts[1] == "output":
+        return f"/output/{parts[2]}"
+    return None
+
+
+def _is_toplevel_output_path(path: str) -> bool:
+    return normalize_output_export_path(path) is not None
 
 RecreateFn = Callable[[], tuple[Any, str] | None]
 
@@ -59,11 +68,15 @@ class OpenSandboxBackend(BaseSandbox):
         sandbox_id: str,
         *,
         command_timeout_seconds: int = 90,
+        command_timeout_max_seconds: int = 600,
         recreate_callback: RecreateFn | None = None,
     ):
         self._sandbox = sandbox
         self._sandbox_id = sandbox_id
         self._default_timeout = max(1, int(command_timeout_seconds or 90))
+        self._max_timeout = max(
+            self._default_timeout, int(command_timeout_max_seconds or 600)
+        )
         self._recreate_callback = recreate_callback
         self._unavailable = False
         self._recreate_attempted = False
@@ -90,8 +103,19 @@ class OpenSandboxBackend(BaseSandbox):
             return 0.0
 
     def _effective_timeout(self, timeout: int | None) -> int:
-        requested = self._default_timeout if timeout is None else int(timeout)
-        return max(1, min(requested, self._default_timeout))
+        if timeout is None:
+            requested = self._default_timeout
+        else:
+            requested = int(timeout)
+        return max(1, min(requested, self._max_timeout))
+
+    def _mark_unavailable_after_failure(self, exc: BaseException) -> bool:
+        """Whether this exception should permanently mark the backend unavailable."""
+        if is_sandbox_not_found(exc):
+            return self._recreate_attempted or self._recreate_callback is None
+        if is_transport_failure(exc):
+            return self._recreate_attempted
+        return False
 
     def _run_command(
         self,
@@ -99,6 +123,7 @@ class OpenSandboxBackend(BaseSandbox):
         *,
         timeout_seconds: int | None = None,
         allow_recreate: bool = True,
+        working_directory: str | None = None,
     ) -> ExecuteResponse:
         if self._unavailable:
             return ExecuteResponse(
@@ -111,7 +136,7 @@ class OpenSandboxBackend(BaseSandbox):
         effective = self._effective_timeout(timeout_seconds)
         opts = RunCommandOpts(
             timeout=timedelta(seconds=effective),
-            working_directory=WORKDIR,
+            working_directory=working_directory or WORKDIR,
         )
         try:
             execution = self._sandbox.commands.run(command, opts=opts)
@@ -122,8 +147,11 @@ class OpenSandboxBackend(BaseSandbox):
                         command,
                         timeout_seconds=timeout_seconds,
                         allow_recreate=False,
+                        working_directory=working_directory,
                     )
-            if is_sandbox_not_found(exc):
+            if self._unavailable or (
+                is_sandbox_not_found(exc) and self._recreate_attempted
+            ):
                 self._unavailable = True
                 return ExecuteResponse(
                     output=(
@@ -133,9 +161,18 @@ class OpenSandboxBackend(BaseSandbox):
                     exit_code=127,
                     truncated=False,
                 )
-            if allow_recreate and not self._recreate_attempted and is_transport_failure(exc):
+            if self._mark_unavailable_after_failure(exc):
+                self._unavailable = True
+                return ExecuteResponse(
+                    output=(
+                        "Sandbox unavailable — session sandbox was removed "
+                        "or could not be recreated"
+                    ),
+                    exit_code=127,
+                    truncated=False,
+                )
+            if is_transport_failure(exc):
                 logger.warning("Sandbox transport error on execute: %s", exc)
-            self._unavailable = True
             return ExecuteResponse(
                 output=f"Sandbox command failed: {exc}",
                 exit_code=127,
@@ -191,6 +228,7 @@ class OpenSandboxBackend(BaseSandbox):
         self._sandbox_id = sandbox_id
         self._unavailable = False
         logger.info("Sandbox expired, recreated as %s", sandbox_id)
+        bootstrap_sandbox_workspace(self)
         return True
 
     def execute(self, command: str, *, timeout: int | None = None) -> ExecuteResponse:
@@ -245,6 +283,10 @@ class OpenSandboxBackend(BaseSandbox):
                 if self._try_recreate():
                     return self.read(file_path, offset=offset, limit=limit)
             return ReadResult(error=f"File '{file_path}': {exc}")
+        if not content:
+            return ReadResult(
+                file_data=FileData(content="", encoding="utf-8"),
+            )
         lines = content.split("\n")
         if content.endswith("\n") and lines:
             lines = lines[:-1]
@@ -264,10 +306,12 @@ class OpenSandboxBackend(BaseSandbox):
     def glob(self, pattern: str, path: str | None = None) -> GlobResult:
         if self._unavailable:
             return GlobResult(matches=None, error="Sandbox unavailable")
-        from deepagents.backends.sandbox import _glob_search_root
         from opensandbox.models.filesystem import SearchEntry
 
-        search_path = _glob_search_root(path) or WORKDIR
+        if path:
+            search_path = path if path.startswith("/") else f"/{path}"
+        else:
+            search_path = WORKDIR
         try:
             matches = self._sandbox.files.search(
                 SearchEntry(path=search_path, pattern=pattern)
@@ -288,35 +332,34 @@ class OpenSandboxBackend(BaseSandbox):
             float(run_started_at) + float(clock_skew), tz=timezone.utc
         ).replace(tzinfo=None) - MTIME_SKEW_TOLERANCE
         by_path: dict[str, dict] = {}
-        for directory in OUTPUT_DIRS:
-            try:
-                from opensandbox.models.filesystem import DirectoryListEntry
+        try:
+            from opensandbox.models.filesystem import DirectoryListEntry
 
-                entries = self._sandbox.files.list_directory(
-                    DirectoryListEntry(path=directory, depth=1)
-                )
-            except Exception as exc:  # noqa: BLE001
-                notes.append(f"Export: could not list '{directory}' ({exc})")
+            entries = self._sandbox.files.list_directory(
+                DirectoryListEntry(path=OUTPUT_LIST_DIR, depth=1)
+            )
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"Export: could not list '{OUTPUT_LIST_DIR}' ({exc})")
+            entries = []
+        for entry in entries:
+            entry_type = (getattr(entry, "entry_type", None) or "").lower()
+            if entry_type in {"dir", "directory", "d"}:
                 continue
-            for entry in entries:
-                entry_type = (getattr(entry, "entry_type", None) or "").lower()
-                if entry_type in {"dir", "directory", "d"}:
-                    continue
-                path = entry.path
-                if not _is_toplevel_output_path(path):
-                    continue
-                mod = entry.modified_at
-                if isinstance(mod, datetime) and mod.tzinfo is not None:
-                    mod = mod.replace(tzinfo=None)
-                if mod < cutoff:
-                    continue
-                norm = path if path.startswith("/") else f"/{path}"
-                if norm not in by_path:
-                    by_path[norm] = {
-                        "path": norm,
-                        "size": int(entry.size),
-                        "modified_at": mod,
-                    }
+            path = entry.path
+            norm = normalize_output_export_path(path)
+            if norm is None:
+                continue
+            mod = entry.modified_at
+            if isinstance(mod, datetime) and mod.tzinfo is not None:
+                mod = mod.replace(tzinfo=None)
+            if mod < cutoff:
+                continue
+            if norm not in by_path:
+                by_path[norm] = {
+                    "path": norm,
+                    "size": int(entry.size),
+                    "modified_at": mod,
+                }
         items = sorted(by_path.values(), key=lambda x: x["path"])
         if not items and not notes:
             notes.append(
@@ -386,11 +429,23 @@ class OpenSandboxBackend(BaseSandbox):
 
 
 def bootstrap_sandbox_workspace(backend: OpenSandboxBackend) -> None:
-    """Ensure workspace layout and ``/output`` symlink for deepagents paths."""
-    backend.execute(
-        "mkdir -p /workspace/output && ln -sfn /workspace/output /output",
-        timeout=30,
+    """Ensure ``/output`` is a real dir; ``/workspace/output`` links there for relative paths."""
+    from opensandbox.models.filesystem import WriteEntry
+
+    try:
+        backend._sandbox.files.create_directories(
+            [WriteEntry(path=WORKDIR), WriteEntry(path=OUTPUT_LIST_DIR)]
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.info("Sandbox create_directories fallback to shell: %s", exc)
+    resp = backend._run_command(
+        "mkdir -p /workspace /output && ln -sfn /output /workspace/output",
+        timeout_seconds=30,
+        allow_recreate=False,
+        working_directory="/",
     )
+    if resp.exit_code != 0:
+        logger.warning("Sandbox workspace bootstrap incomplete: %s", resp.output)
 
 
 def format_command_output(execution) -> str:

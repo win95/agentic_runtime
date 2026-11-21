@@ -7,7 +7,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from runtime.deep_agent import ADMIN_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT
+from runtime.agents.admin import AdminAgent
+from runtime.deep_agent import DEFAULT_SYSTEM_PROMPT
 from runtime.harness.schema import GuestChannelHarness, MissionHarness
 from runtime.harness.loader import (
     load_mission_harness_from_file,
@@ -82,12 +83,17 @@ def test_harness_context_budget_rejects_extra_fields():
 def test_harness_sandbox_command_timeout_defaults_and_bounds():
     harness = parse_mission_harness({})
     assert harness.sandbox.command_timeout_seconds == 90
+    assert harness.sandbox.command_timeout_max_seconds == 600
     harness = parse_mission_harness({"sandbox": {"command_timeout_seconds": 120}})
     assert harness.sandbox.command_timeout_seconds == 120
     with pytest.raises(ValueError, match="command_timeout_seconds"):
         parse_mission_harness({"sandbox": {"command_timeout_seconds": 0}})
     with pytest.raises(ValueError):
         parse_mission_harness({"sandbox": {"command_timeout_seconds": 90, "extra": True}})
+    with pytest.raises(ValueError, match="command_timeout_max_seconds"):
+        parse_mission_harness(
+            {"sandbox": {"command_timeout_seconds": 200, "command_timeout_max_seconds": 100}}
+        )
 
 
 def test_deny_template_rejects_doubled_braces():
@@ -207,7 +213,7 @@ def test_agent_harness_prompt_fallbacks():
     inv = load_missions.load_agent_file(BASE / "agents" / "fault_investigator.yaml")
     assert inv["system_prompt"] == DEFAULT_SYSTEM_PROMPT
     adm = load_missions.load_agent_file(BASE / "agents" / "admin_bot.yaml")
-    assert adm["system_prompt"] == ADMIN_SYSTEM_PROMPT
+    assert adm["system_prompt"] == AdminAgent.FALLBACK_SYSTEM_PROMPT
 
 
 def test_new_agent_skill_slug_uses_removesuffix(tmp_path):

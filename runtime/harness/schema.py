@@ -127,13 +127,20 @@ class SandboxHarness(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     command_timeout_seconds: int = 90
+    command_timeout_max_seconds: int = 600
 
     @model_validator(mode="after")
     def _validate_timeout(self) -> SandboxHarness:
         if self.command_timeout_seconds < 1:
             raise ValueError("sandbox.command_timeout_seconds must be >= 1")
-        if self.command_timeout_seconds > 3600:
-            raise ValueError("sandbox.command_timeout_seconds must be <= 3600")
+        if self.command_timeout_max_seconds < 1:
+            raise ValueError("sandbox.command_timeout_max_seconds must be >= 1")
+        if self.command_timeout_max_seconds > 7200:
+            raise ValueError("sandbox.command_timeout_max_seconds must be <= 7200")
+        if self.command_timeout_seconds > self.command_timeout_max_seconds:
+            raise ValueError(
+                "sandbox.command_timeout_seconds must be <= command_timeout_max_seconds"
+            )
         return self
 
 

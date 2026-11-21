@@ -111,6 +111,7 @@ def _attach_backend(
         handle,
         sandbox_id,
         command_timeout_seconds=harness.sandbox.command_timeout_seconds,
+        command_timeout_max_seconds=harness.sandbox.command_timeout_max_seconds,
         recreate_callback=recreate_callback,
     )
     bootstrap_sandbox_workspace(backend)

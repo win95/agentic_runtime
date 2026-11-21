@@ -17,8 +17,12 @@ def log_item_text(item: Any) -> str:
 
 
 def join_stream_chunks(items: list | None) -> str:
-    """Join log chunks without inserting line breaks (preserves partial lines)."""
-    return "".join(log_item_text(item) for item in (items or []))
+    """Join SDK log chunks (one stripped line per chunk) with newlines."""
+    parts = [log_item_text(item) for item in (items or [])]
+    if not parts:
+        return ""
+    text = "\n".join(parts)
+    return f"{text}\n"
 
 
 def split_command_streams(execution) -> tuple[str, str]:
@@ -27,16 +31,22 @@ def split_command_streams(execution) -> tuple[str, str]:
     stdout = join_stream_chunks(getattr(logs, "stdout", None) if logs else None)
     stderr = join_stream_chunks(getattr(logs, "stderr", None) if logs else None)
     if not stdout and not stderr:
-        stdout = "".join(
-            log_item_text(item) for item in (getattr(execution, "result", None) or [])
-        )
+        stdout = join_stream_chunks(getattr(execution, "result", None) or [])
     return stdout, stderr
 
 
 def combine_stdout_stderr(stdout: str, stderr: str, exit_code: int) -> str:
-    """Prefer stdout alone on success; append stderr on failure (keeps JSON parse clean)."""
-    if exit_code == 0:
+    """Merge streams for ``execute`` tool text.
+
+    On success, stdout stays primary (e.g. JSON from grep helpers); stderr is
+    appended when present so warnings remain visible. Stdout from the SDK already
+    ends with a trailing newline, so we do not insert an extra blank line.
+    """
+    _ = exit_code
+    if not stderr:
         return stdout
-    if stderr and stdout:
-        return f"{stdout}\n{stderr}"
-    return stdout or stderr
+    if not stdout:
+        return stderr
+    if stdout.endswith("\n"):
+        return f"{stdout}{stderr}"
+    return f"{stdout}\n{stderr}"

@@ -25,3 +25,4 @@ tool_budget:
   max_calls: {}
 sandbox:
   command_timeout_seconds: 90
+  command_timeout_max_seconds: 600

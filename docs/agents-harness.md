@@ -34,7 +34,8 @@ Docker images copy `seeds/` and `skills/` at build time — rebuild the image
 | `notifications.notify_admin_actions` | SUCCEEDED runs of this mission notify Slack when output has a non-empty `actions_taken` (admin actions; failures notify for every mission) |
 | `context_budget.reclaim_retrieval_for_history` | Opt-in: move unused retrieval slice into history trim budget |
 | `output_files.required` | Opt-in: `stop_completion` nudges the agent to write top-level report files under `/output` in the live sandbox before stopping (same `list_directory` + run start mtime logic as file export) |
-| `sandbox.command_timeout_seconds` | Default `90` (1–3600): caps every sandbox `execute` / `grep`; model timeout cannot exceed this |
+| `sandbox.command_timeout_seconds` | Default per-command timeout when the model omits one (default `90`) |
+| `sandbox.command_timeout_max_seconds` | Ceiling for model-requested timeouts (default `600`); must be ≥ `command_timeout_seconds` |
 | `tool_calls.sequential` | Tool names that must not run in parallel within one model turn; later parallel calls get a deferral `ToolMessage` (enforced in middleware, not via model bind) |
 | `tool_budget.tools` | Tool names subject to the shared execution result budget |
 | `tool_budget.max_result_tokens` | Max estimated tokens of tool results charged per execution (main + subagents) |

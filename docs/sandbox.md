@@ -52,9 +52,10 @@ that only exists in the sandbox is lost. Missions that declare
 `files` in their output schema get their files exported at the end
 of every run, inline in the execution result:
 
-- The agent writes ALL its report files into the sandbox `output/`
-  dir (prefer `/output/bao-cao.html`; `output/...` is also scanned) —
-  the skill tells it to; files anywhere else are not exported.
+- The agent writes report files under the real directory `/output`
+  (also reachable as `output/` from cwd `/workspace` via
+  `/workspace/output` → `/output`). The skill points agents at that
+  layout; files elsewhere are not exported.
 - Only files whose container ``modified_at`` is after this run's start
   time are exported (run start is recorded in Python; container clock
   skew is corrected once per run via ``date +%s`` with a 5s tolerance).
