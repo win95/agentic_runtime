@@ -22,12 +22,12 @@ def test_subagent_excludes_output_files_stop_nudge_config():
         mission_id="agent_analytis_mission",
         output_files_required=True,
         sandbox_backend=object(),
-        export_marker_path="/tmp/.run_x",
+        export_run_started_at=1.0,
     )
     sub = HookMiddleware.for_subagent(parent)
     assert sub.output_files_required is False
     assert sub.sandbox_backend is None
-    assert sub.export_marker_path is None
+    assert sub.export_run_started_at is None
     assert sub._output_files_stop_status() == "skipped"
 
 

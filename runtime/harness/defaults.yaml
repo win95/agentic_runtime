@@ -23,3 +23,5 @@ tool_budget:
   tools: []
   max_result_tokens: 0
   max_calls: {}
+sandbox:
+  command_timeout_seconds: 90

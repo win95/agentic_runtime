@@ -55,14 +55,14 @@ of every run, inline in the execution result:
 - The agent writes ALL its report files into the sandbox `output/`
   dir (prefer `/output/bao-cao.html`; `output/...` is also scanned) —
   the skill tells it to; files anywhere else are not exported.
-- Only files newer than an in-sandbox run marker are exported
-  (``touch /tmp/.run_export_<execution_id>`` at run start, then
-  ``find … -newer``); stale files from prior turns in the same session
-  are skipped with a note. Real ``ls`` listings carry no mtime — the
-  marker is the source of truth.
-- `runtime/sandbox/export.py::export_output_files` lists `/output` and
-  `output` (`backend.ls`), checks size via `stat` before download, then
-  fetches (`backend.download_files`)
+- Only files whose container ``modified_at`` is after this run's start
+  time are exported (run start is recorded in Python; container clock
+  skew is corrected once per run via ``date +%s`` with a 5s tolerance).
+  Stale files from earlier turns in the same session are skipped.
+- `runtime/sandbox/export.py::export_output_files` lists `/output` via
+  the OpenSandbox Files API (`list_directory`, depth 1), uses
+  ``EntryInfo.size`` for caps, then fetches (`read_bytes` /
+  `backend.download_files`)
   and inlines them into `result["files"]` as
   `{name, path, content_type, content}` with content decoded as
   UTF-8 text. The user gets them through the existing
@@ -83,13 +83,16 @@ of every run, inline in the execution result:
 ## Lifecycle
 
 - **Create:** the first opted-in execution of a session creates one
-  sandbox (`SandboxSync.create`) and stores the mapping in Postgres
-  (`session_sandboxes`: `session_id` -> `sandbox_id`, plus agent /
-  mission / image / `last_used_at`).
-- **Reuse:** later executions of the same session re-attach by id
-  (`SandboxSync.connect`) and touch `last_used_at`. If the old
-  sandbox is unreachable server-side, a fresh one is created and the
-  row is rewritten (the old id is not resurrected).
+  sandbox (`SandboxSync.create` with ``timeout=SANDBOX_IDLE_TTL``) and
+  stores the mapping in Postgres (`session_sandboxes`: `session_id` ->
+  `sandbox_id`, plus agent / mission / image / `last_used_at`).
+- **Reuse:** later executions re-attach (`SandboxSync.connect`) and call
+  ``renew(timeout)`` so idle TTL matches settings. If the sandbox is gone
+  (`SANDBOX_NOT_FOUND`), a fresh one is created and the row is rewritten
+  (log: ``sandbox expired, recreated``).
+- **Command timeout:** harness ``sandbox.command_timeout_seconds`` (default
+  90) caps every ``execute`` / ``grep`` call; model-supplied timeouts cannot
+  exceed that ceiling or the sandbox's remaining lifetime.
 - **Reap:** Celery beat runs `app.worker.tasks.reap_idle_sandboxes`
   every `SANDBOX_IDLE_TTL_SECONDS` (default 3600). It destroys
   sandboxes idle longer than the TTL and marks their rows

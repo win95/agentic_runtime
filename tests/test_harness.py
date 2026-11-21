@@ -79,6 +79,17 @@ def test_harness_context_budget_rejects_extra_fields():
         )
 
 
+def test_harness_sandbox_command_timeout_defaults_and_bounds():
+    harness = parse_mission_harness({})
+    assert harness.sandbox.command_timeout_seconds == 90
+    harness = parse_mission_harness({"sandbox": {"command_timeout_seconds": 120}})
+    assert harness.sandbox.command_timeout_seconds == 120
+    with pytest.raises(ValueError, match="command_timeout_seconds"):
+        parse_mission_harness({"sandbox": {"command_timeout_seconds": 0}})
+    with pytest.raises(ValueError):
+        parse_mission_harness({"sandbox": {"command_timeout_seconds": 90, "extra": True}})
+
+
 def test_deny_template_rejects_doubled_braces():
     with pytest.raises(ValueError, match="escaped braces"):
         parse_mission_harness(

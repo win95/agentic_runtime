@@ -162,51 +162,38 @@ ANALYTIS_MISSION = {
 
 
 def _fake_sandbox_backend(files):
-    """OpenSandboxBackend stand-in: ls lists output/, download_files
-    returns the canned bytes (SimpleNamespace mirrors
-    FileDownloadResponse's path/content/error fields).
-
-    Implements the export marker contract (runtime/sandbox/export.py):
-    ``execute`` answers ``touch`` (run marker), ``find … -newer`` (all
-    canned files are newer than the marker), ``stat`` (byte size) and
-    ``readlink -f``/``realpath`` (echo the path back absolute).
-    """
-    entries = [{"path": f"output/{name}", "is_dir": False} for name in files]
-
-    def ls(directory):
-        assert directory == "output"
-        return SimpleNamespace(entries=list(entries), error=None)
+    """OpenSandboxBackend stand-in using the files-API export contract."""
+    from datetime import datetime, timezone
 
     def _key(path):
         return path.lstrip("/").removeprefix("output/")
+
+    def list_output_files_for_export(run_started_at, clock_skew=0.0):  # noqa: ARG001
+        items = [
+            {
+                "path": f"/output/{name}",
+                "size": len(content),
+                "modified_at": datetime.now(timezone.utc),
+            }
+            for name, content in files.items()
+        ]
+        return items, []
 
     def download_files(paths):
         return [
             SimpleNamespace(path=p, content=files[_key(p)], error=None) for p in paths
         ]
 
-    def execute(command):
-        import shlex
+    def begin_run_export(host_started_at):
+        backend._run_started_at = host_started_at
 
-        if command.startswith("touch "):
-            return SimpleNamespace(output="", exit_code=0)
-        if " -newer " in command:
-            out = "\n".join(f"/output/{name}" for name in files)
-            return SimpleNamespace(output=out, exit_code=0)
-        if command.startswith("stat -L -c %s"):
-            # shlex.quote only quotes when needed, so split instead.
-            path = shlex.split(command)[4]
-            return SimpleNamespace(output=str(len(files[_key(path)])), exit_code=0)
-        if "readlink -f" in command or "realpath" in command:
-            tokens = shlex.split(command)
-            path = tokens[tokens.index("-f") + 1]
-            path = path if path.startswith("/") else f"/{path}"
-            return SimpleNamespace(output=path, exit_code=0)
-        return SimpleNamespace(output="", exit_code=0)
-
-    return SimpleNamespace(
-        id="sbx-9", ls=ls, download_files=download_files, execute=execute
+    backend = SimpleNamespace(
+        id="sbx-9",
+        list_output_files_for_export=list_output_files_for_export,
+        download_files=download_files,
+        begin_run_export=begin_run_export,
     )
+    return backend
 
 
 def test_analytis_mission_uses_session_sandbox(monkeypatch):

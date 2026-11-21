@@ -50,12 +50,80 @@ def _handle_id(handle) -> str | None:
     return getattr(handle, "id", None) or getattr(handle, "sandbox_id", None)
 
 
+def _sandbox_ttl_seconds(cfg) -> int:
+    return max(1, int(getattr(cfg, "sandbox_idle_ttl_seconds", 3600) or 3600))
+
+
+def _command_timeout_seconds(mission_id: str | None, execution_config: dict | None) -> int:
+    from runtime.harness.registry import effective_harness
+
+    harness = effective_harness(mission_id, execution_config)
+    return max(1, int(harness.sandbox.command_timeout_seconds or 90))
+
+
+def _make_recreate_callback(
+    db: Session,
+    *,
+    session_id: str,
+    agent_id: str | None,
+    mission_id: str | None,
+    settings,
+    client,
+    row: SessionSandbox,
+):
+    def _recreate() -> tuple[object, str] | None:
+        try:
+            handle = client.create(
+                settings.sandbox_image,
+                timeout_seconds=_sandbox_ttl_seconds(settings),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not recreate sandbox for %s: %s", session_id, exc)
+            return None
+        sandbox_id = _handle_id(handle)
+        if not sandbox_id:
+            return None
+        row.sandbox_id = sandbox_id
+        row.status = "active"
+        _touch(row)
+        db.commit()
+        return handle, sandbox_id
+
+    return _recreate
+
+
+def _attach_backend(
+    handle,
+    sandbox_id: str,
+    *,
+    mission_id: str | None,
+    execution_config: dict | None,
+    recreate_callback,
+) -> OpenSandboxBackend:
+    from runtime.harness.registry import effective_harness
+    from runtime.sandbox.opensandbox_backend import (
+        OpenSandboxBackend,
+        bootstrap_sandbox_workspace,
+    )
+
+    harness = effective_harness(mission_id, execution_config)
+    backend = OpenSandboxBackend(
+        handle,
+        sandbox_id,
+        command_timeout_seconds=harness.sandbox.command_timeout_seconds,
+        recreate_callback=recreate_callback,
+    )
+    bootstrap_sandbox_workspace(backend)
+    return backend
+
+
 def resolve_session_sandbox(
     db: Session,
     *,
     session_id: str,
     agent_id: str | None,
     mission_id: str | None,
+    execution_config: dict | None = None,
     settings=None,
     client=None,
 ) -> OpenSandboxBackend | None:
@@ -92,23 +160,50 @@ def resolve_session_sandbox(
 
     client = client if client is not None else default_client(cfg)
 
+    ttl = _sandbox_ttl_seconds(cfg)
     row = db.get(SessionSandbox, session_id)
     if row is not None and row.status == "active":
         try:
             handle = client.connect(row.sandbox_id)
+            client.renew(handle, ttl)
         except Exception as exc:  # noqa: BLE001 — dead sandbox: replace it
-            logger.warning(
-                "Sandbox %s for session %s unreachable (%s); creating a new one",
-                row.sandbox_id, session_id, exc,
-            )
+            text = str(exc).upper()
+            if "SANDBOX_NOT_FOUND" in text or "DOCKER::SANDBOX_NOT_FOUND" in text:
+                logger.info(
+                    "Sandbox %s for session %s expired; creating a new one",
+                    row.sandbox_id,
+                    session_id,
+                )
+            else:
+                logger.warning(
+                    "Sandbox %s for session %s unreachable (%s); creating a new one",
+                    row.sandbox_id,
+                    session_id,
+                    exc,
+                )
         else:
             _touch(row)
             db.commit()
-            return OpenSandboxBackend(handle, row.sandbox_id)
+            recreate = _make_recreate_callback(
+                db,
+                session_id=session_id,
+                agent_id=agent_id,
+                mission_id=mission_id,
+                settings=cfg,
+                client=client,
+                row=row,
+            )
+            return _attach_backend(
+                handle,
+                row.sandbox_id,
+                mission_id=mission_id,
+                execution_config=execution_config,
+                recreate_callback=recreate,
+            )
 
     # No usable sandbox: create one (fresh row, or replace the dead one).
     try:
-        handle = client.create(cfg.sandbox_image)
+        handle = client.create(cfg.sandbox_image, timeout_seconds=ttl)
     except Exception as exc:  # noqa: BLE001 — server down: no sandbox
         logger.warning("Could not create sandbox for session %s: %s", session_id, exc)
         return None
@@ -134,7 +229,22 @@ def resolve_session_sandbox(
         row.image = cfg.sandbox_image
     _touch(row)
     db.commit()
-    return OpenSandboxBackend(handle, sandbox_id)
+    recreate = _make_recreate_callback(
+        db,
+        session_id=session_id,
+        agent_id=agent_id,
+        mission_id=mission_id,
+        settings=cfg,
+        client=client,
+        row=row,
+    )
+    return _attach_backend(
+        handle,
+        sandbox_id,
+        mission_id=mission_id,
+        execution_config=execution_config,
+        recreate_callback=recreate,
+    )
 
 
 def destroy_session_sandbox(
