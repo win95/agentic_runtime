@@ -4,14 +4,12 @@
 # AgentVersion snapshot (Option C). To change the model, set LLM_MODEL
 # in .env and re-run `make seed` — a new version is created.
 #
-# system_prompt mirrors ADMIN_SYSTEM_PROMPT in runtime/deep_agent.py,
-# which is the runtime fallback (the registry version lives in MLflow
-# under the name "admin_bot" — see scripts/register_prompts.py).
+# system_prompt mirrors AdminAgent.FALLBACK_SYSTEM_PROMPT in
+# runtime/agents/admin.py, which is the runtime fallback (the registry
+# version lives in MLflow under the name "admin_bot" — see
+# scripts/register_prompts.py).
 # allowed_tools is the full admin tool set; the registry permission
 # check only hands these tools to missions with capability system_admin.
-harness:
-  system_prompt_fallback: admin
-
 id: admin_bot
 name: Admin Bot
 provider: openai

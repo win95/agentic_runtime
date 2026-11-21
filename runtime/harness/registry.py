@@ -308,43 +308,22 @@ def guest_output_capabilities() -> list[str]:
 
 
 def resolve_no_version_system_prompt(agent_id: str | None) -> str:
-    """Prompt when no AgentVersion exists: harness fallback or seed YAML text."""
-    from pathlib import Path
+    """Prompt when no AgentVersion exists: the agent's own fallback.
 
-    import yaml
-
-    from runtime.deep_agent import ADMIN_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT
+    The agent class declares it (``BaseAgent.fallback_system_prompt``
+    reads the agent's seed YAML; ``AdminAgent`` returns its own text
+    without a file). The old harness ``system_prompt_fallback``
+    Literal (default/admin/seed) and the ``ADMIN_SYSTEM_PROMPT``
+    constant are gone — no string dispatch, no shared constant.
+    """
+    from runtime.deep_agent import DEFAULT_SYSTEM_PROMPT
 
     if not agent_id or not _AGENT_ID_RE.match(agent_id):
         return DEFAULT_SYSTEM_PROMPT
-    fb = agent_system_prompt_fallback(agent_id)
-    if fb == "admin":
-        return ADMIN_SYSTEM_PROMPT
-    if fb == "default":
-        return DEFAULT_SYSTEM_PROMPT
-    path = Path(__file__).resolve().parents[2] / "seeds" / "agents" / f"{agent_id}.yaml"
-    if path.is_file() and fb in ("seed", None):
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-        prompt = data.get("system_prompt")
-        if isinstance(prompt, str) and prompt.strip():
-            return prompt
-    return DEFAULT_SYSTEM_PROMPT
+    from runtime.agents.registry import resolve_agent
 
-
-def agent_system_prompt_fallback(agent_id: str | None) -> str | None:
-    """``default`` / ``admin`` / ``seed`` from agent seed harness, else None."""
-    if not agent_id or not _AGENT_ID_RE.match(agent_id):
-        return None
-    from pathlib import Path
-
-    from runtime.harness.loader import load_agent_harness_from_file
-
-    repo = Path(__file__).resolve().parents[2]
-    path = repo / "seeds" / "agents" / f"{agent_id}.yaml"
-    if not path.is_file():
-        return None
     try:
-        return load_agent_harness_from_file(path).system_prompt_fallback
-    except ValueError as exc:
-        logger.warning("Invalid agent harness for %s: %s", agent_id, exc)
-        return None
+        prompt = resolve_agent(agent_id, {"mission_id": ""}).fallback_system_prompt()
+    except Exception:  # noqa: BLE001 — a broken agent class must not kill the run
+        return DEFAULT_SYSTEM_PROMPT
+    return prompt or DEFAULT_SYSTEM_PROMPT

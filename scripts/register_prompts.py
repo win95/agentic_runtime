@@ -57,11 +57,12 @@ def main(argv: list[str] | None = None) -> int:
                         help="Register only this prompt (default: all)")
     args = parser.parse_args(argv)
 
-    from runtime.deep_agent import ADMIN_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT
+    from runtime.agents.admin import AdminAgent
+    from runtime.deep_agent import DEFAULT_SYSTEM_PROMPT
 
     templates = {
         "fault_investigator": DEFAULT_SYSTEM_PROMPT,
-        "admin_bot": ADMIN_SYSTEM_PROMPT,
+        "admin_bot": AdminAgent.FALLBACK_SYSTEM_PROMPT,
     }
     names = [args.prompt] if args.prompt else sorted(PROMPTS)
     try:

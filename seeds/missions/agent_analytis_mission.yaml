@@ -33,7 +33,7 @@ execution:
   sandbox: true
 
 capabilities:
-  - agent_analytis
+  - web_research
 
 # Harness: giữ mặc định — security.user_runnable: false (chỉ admin /
 # API key chạy được mission này; muốn mở cho JWT user thì đặt

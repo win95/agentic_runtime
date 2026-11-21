@@ -9,8 +9,8 @@ Configure **`HARNESS_SOURCE`** (`db` | `seed`, default `db` in production).
 |--------|-----------------|
 | RBAC (`user_runnable`), guest `/guest/chat` routing, builtin deny / flow flags in the global index | **`HARNESS_SOURCE=db`:** `missions.execution_config.harness` for rows in Postgres; per-row fallback to that mission's seed YAML only when the `harness` key is missing; invalid DB harness → closed defaults (deny off). **Empty table → no missions in index** (no RBAC grants). **`HARNESS_SOURCE=seed`:** all `seeds/missions/*.yaml`. |
 | Per-execution deny / flow during a run | `execution_config.harness` on the mission snapshot (same as DB after seed) |
-| Guest tool registration (`reply_to_guest`, `confirm_guest_booking`) | **Image `seeds/missions/*.yaml` only** at process start (not DB) |
-| No AgentVersion system prompt | **Image `seeds/agents/*.yaml`:** `harness.system_prompt_fallback` (`default` / `admin` / `seed`) |
+| Guest tool registration (`reply_to_guest`, `confirm_booking_create`) | **Image `seeds/missions/*.yaml` only** at process start (not DB) |
+| No AgentVersion system prompt | The agent class's own fallback: `BaseAgent.fallback_system_prompt` reads the seed YAML; `AdminAgent` returns its own text (no `system_prompt_fallback` Literal anymore) |
 
 `GET /health` reports `harness_index_degraded` when the DB index refresh failed
 and a stale snapshot is served.
@@ -31,6 +31,7 @@ Docker images copy `seeds/` and `skills/` at build time — rebuild the image
 | `flow_subgraph.enabled` | Use the structured flow router when skills are mapped |
 | `guest_output.register_reply_tools` | Register `reply_to_guest` / booking confirmation tools (seed-time only) |
 | `guest_output.capability` | Registry capability for those synthetic tools |
+| `notifications.notify_admin_actions` | SUCCEEDED runs of this mission notify Slack when output has a non-empty `actions_taken` (admin actions; failures notify for every mission) |
 | `context_budget.reclaim_retrieval_for_history` | Opt-in: move unused retrieval slice into history trim budget |
 | `output_files.required` | Opt-in: `stop_completion` nudges the agent to write top-level report files under `/output` in the live sandbox before stopping (uses the same export marker + find logic as file export) |
 | `tool_calls.sequential` | Tool names that must not run in parallel within one model turn; later parallel calls get a deferral `ToolMessage` (enforced in middleware, not via model bind) |
@@ -38,10 +39,10 @@ Docker images copy `seeds/` and `skills/` at build time — rebuild the image
 | `tool_budget.max_result_tokens` | Max estimated tokens of tool results charged per execution (main + subagents) |
 | `tool_budget.max_calls` | Per-tool call caps for the execution (e.g. `tavily_search: 4`) |
 
-Agent YAML: `harness.system_prompt_fallback`:
-
-- `default` / `admin` — code constants (fault / admin agents)
-- `seed` — use the agent file's `system_prompt` when no AgentVersion (hotel)
+Agent fallback prompt (no AgentVersion): the agent class declares it
+— `BaseAgent.fallback_system_prompt` reads the agent's seed YAML
+(`system_prompt`); `AdminAgent` returns its own text without a file.
+There is no `system_prompt_fallback` Literal anymore.
 
 ## Add a new agent (after)
 

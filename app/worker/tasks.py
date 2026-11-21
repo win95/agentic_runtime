@@ -228,8 +228,11 @@ def run_execution(self, execution_id: str, resume_decision: str | None = None) -
         publish_execution_event(execution.id, "status", status=status, **_event_extra)
         # Slack notification (scope: failures + admin actions only).
         # Best-effort, after persistence, never blocks the return.
+        # The admin-action flag comes from the mission harness, not
+        # from a hardcoded mission id.
         try:
             from app.config import settings
+            from runtime.harness.registry import effective_harness
             from runtime.notifications.slack import notify_execution
 
             notify_execution(
@@ -241,6 +244,9 @@ def run_execution(self, execution_id: str, resume_decision: str | None = None) -
                 error=execution.error,
                 enabled=settings.slack_notifications_enabled,
                 webhook_url=settings.slack_webhook_url,
+                notify_admin_actions=effective_harness(
+                    execution.mission_id
+                ).notifications.notify_admin_actions,
             )
         except Exception as exc:  # noqa: BLE001 — notify never blocks
             logger.warning("Slack notification failed for %s: %s", execution_id, exc)

@@ -356,6 +356,15 @@ def deep_agent_node(state: MissionState) -> dict:
         if agent_version is not None:
             context["allowed_tools"] = list(agent_version.allowed_tools or [])
 
+        # Phase 2 (guest scope): the agent object travels in the
+        # execution context, so the registry can apply the agent's own
+        # scope policy when it builds the tool list. Resolved here so
+        # both the flow branch and the free-form branch share one
+        # object (the free-form branch reuses it for definition /
+        # compile below).
+        agent_obj = resolve_agent(agent_id, mission, agent_version)
+        context["agent"] = agent_obj
+
         # Layer 4: MCP tools go through the registry permission check
         # like built-in tools. load_mcp_tools() registers only the MCP
         # tools mapped to a capability (default deny for the rest);
@@ -684,8 +693,9 @@ def deep_agent_node(state: MissionState) -> dict:
         else:
             from runtime.harness.registry import resolve_no_version_system_prompt
 
-            # No-version fallback: harness ``system_prompt_fallback`` or
-            # agent seed YAML — never MLflow (docs/agent-versioning.md).
+            # No-version fallback: the agent class's own fallback
+            # prompt (BaseAgent reads the seed YAML, AdminAgent returns
+            # its text) — never MLflow (docs/agent-versioning.md).
             base_prompt_text = resolve_no_version_system_prompt(
                 mission.get("agent_id")
             )
@@ -761,6 +771,7 @@ def deep_agent_node(state: MissionState) -> dict:
                 model_config=version_cfg,
                 middleware=flow_middleware,
                 backend=sandbox_backend,
+                pipeline_agent=agent_obj,
                 skills=skill_sources,
                 files=skill_files,
                 callbacks=[handler],
@@ -800,7 +811,9 @@ def deep_agent_node(state: MissionState) -> dict:
             prompt_for_budget = system_prompt_text
             if history_block:
                 system_prompt_text = system_prompt_text + "\n\n" + history_block
-            agent_obj = resolve_agent(agent_id, mission, agent_version)
+            # agent_obj was resolved above (shared with the flow branch
+            # and carried in the context for the registry's scope
+            # policy); the definition is built from it here.
             definition = agent_obj.definition(
                 tools=tools,
                 instructions=system_prompt_text,

@@ -7,12 +7,9 @@ from typing import Any
 
 from langchain_core.messages import ToolMessage
 
+from runtime.grounding_config import GroundingConfig
 from runtime.guest_locale import localized_setting
 from runtime.tool_message_parse import collect_tool_results, tool_call_id_index, tool_content_dict
-
-POLICY_SEARCH_TOOL = "search_policy_documents"
-POLICY_READ_TOOL = "read_policy_document"
-POLICY_TOOLS = frozenset({POLICY_SEARCH_TOOL, POLICY_READ_TOOL})
 
 _TOKEN_RE = re.compile(r"[\w]{3,}", re.UNICODE)
 _DIGITS = re.compile(r"\d+")
@@ -89,8 +86,10 @@ def maybe_extend_policy_corpus(
     *,
     guest_message: str,
     tools_by_name: dict | None,
+    config: GroundingConfig | None = None,
 ) -> tuple[list[str], list[str]]:
     """One retrieval retry when search returned nothing; optionally read top hit."""
+    cfg = config or GroundingConfig()
     notes: list[str] = []
     corpus, meta = collect_policy_corpus(messages)
     if corpus:
@@ -99,14 +98,14 @@ def maybe_extend_policy_corpus(
         return corpus, notes
     if not tools_by_name:
         return corpus, notes
-    search_tool = tools_by_name.get(POLICY_SEARCH_TOOL)
-    read_tool = tools_by_name.get(POLICY_READ_TOOL)
+    search_tool = tools_by_name.get(cfg.policy_search_tool) if cfg.policy_search_tool else None
+    read_tool = tools_by_name.get(cfg.policy_read_tool) if cfg.policy_read_tool else None
     if search_tool is None:
         return corpus, notes
     prior_query = ""
     for message in reversed(messages or []):
         for call in getattr(message, "tool_calls", None) or []:
-            if isinstance(call, dict) and call.get("name") == POLICY_SEARCH_TOOL:
+            if isinstance(call, dict) and call.get("name") == cfg.policy_search_tool:
                 args = call.get("args") or {}
                 if isinstance(args, dict) and args.get("query"):
                     prior_query = str(args["query"])
@@ -221,15 +220,18 @@ def apply_policy_grounding(
     guest_message: str = "",
     tools_by_name: dict | None = None,
     guest_locale: str = "en",
+    config: GroundingConfig | None = None,
 ) -> tuple[str, list[str]]:
     """Ground policy answers in retrieved documents, or refuse to invent content."""
+    cfg = config or GroundingConfig()
     notes: list[str] = []
-    if not (_messages_tool_names(messages) & POLICY_TOOLS):
+    if not (_messages_tool_names(messages) & cfg.policy_tools):
         return reply, notes
     corpus, extend_notes = maybe_extend_policy_corpus(
         messages,
         guest_message=guest_message,
         tools_by_name=tools_by_name,
+        config=cfg,
     )
     notes.extend(extend_notes)
     if not corpus:

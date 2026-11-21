@@ -9,12 +9,12 @@ from langchain_core.tools import StructuredTool
 
 from runtime.guest_locale import (
     detect_guest_locale,
-    guest_language_instruction,
     localized_setting,
 )
 from runtime.policy_grounding import apply_policy_grounding
 from runtime.reply_grounding import apply_reply_grounding, grounded_reply_from_tools
 from runtime.scope import get_bound_guest_id
+
 GUEST_REPLY_TOOL_NAME = "reply_to_guest"
 GUEST_REPLY_REPROMPT = (
     "Call reply_to_guest exactly once with the final message for the guest."
@@ -224,9 +224,18 @@ def finalize_guest_reply(
     input_data: dict | None = None,
     tools_by_name: dict | None = None,
     reprompt_invoke=None,
+    agent=None,
 ) -> tuple[str, list[str]]:
-    """Guest text ONLY from reply_to_guest, then reprompt, then structured/generic fallback."""
+    """Guest text ONLY from reply_to_guest, then reprompt, then structured/generic fallback.
+
+    The grounding config comes from the agent (``agent.grounding_config``);
+    without an agent no grounding runs and the reply passes through the
+    generic path.
+    """
     notes: list[str] = []
+    from runtime.grounding_config import GroundingConfig
+
+    config = agent.grounding_config if agent is not None else GroundingConfig()
     channel_raw = reply_from_tool_calls(messages)
     raw = channel_raw
     trust_channel = channel_raw is not None
@@ -238,7 +247,7 @@ def finalize_guest_reply(
         if raw:
             notes.append("Guest reply from reprompt")
     if raw is None:
-        built = grounded_reply_from_tools(messages)
+        built = grounded_reply_from_tools(messages, config=config)
         if built:
             raw = built
             notes.append("Guest reply from structured tool results")
@@ -253,6 +262,7 @@ def finalize_guest_reply(
         guest_message=guest_message,
         tools_by_name=tools_by_name,
         guest_locale=guest_locale,
+        config=config,
     )
     notes.extend(pnotes)
     cleaned, gnotes = guard_guest_reply(
@@ -267,6 +277,7 @@ def finalize_guest_reply(
         messages,
         guest_locale=guest_locale,
         trust_channel=trust_channel,
+        config=config,
     )
     notes.extend(gnotes2)
     return cleaned.strip(), notes
@@ -280,6 +291,7 @@ def extract_flow_guest_reply(
     input_data: dict | None = None,
     tools_by_name: dict | None = None,
     reprompt_invoke=None,
+    agent=None,
 ) -> tuple[str, list[str]]:
     """Guest-facing reply via reply_to_guest channel only."""
     return finalize_guest_reply(
@@ -289,4 +301,5 @@ def extract_flow_guest_reply(
         input_data=input_data,
         tools_by_name=tools_by_name,
         reprompt_invoke=reprompt_invoke,
+        agent=agent,
     )

@@ -1,10 +1,12 @@
 """Slack notifications for executions — Incoming Webhook, stdlib only.
 
 Scope (tran's choice, 2026-11-11): notify ONLY on failure + admin
-actions, never on every execution. "Admin action" means an execution
-of mission ``system_admin`` whose output reports a non-empty
-``actions_taken`` list — a read-only admin query (empty / missing
-``actions_taken``) does not notify.
+actions, never on every execution. "Admin action" means a SUCCEEDED
+execution of a mission whose harness sets
+``notifications.notify_admin_actions`` (today: ``system_admin``)
+whose output reports a non-empty ``actions_taken`` list — a
+read-only admin query (empty / missing ``actions_taken``) does not
+notify.
 
 The worker calls :func:`notify_execution` best-effort after the final
 status is persisted; a notification failure (no webhook configured,
@@ -23,7 +25,6 @@ from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 
-ADMIN_MISSION_ID = "system_admin"
 MAX_ERROR_CHARS = 500
 MAX_ACTION_CHARS = 200
 MAX_ACTIONS = 5
@@ -43,6 +44,7 @@ def should_notify(
     output: Any = None,
     enabled: bool = True,
     webhook_url: str = "",
+    notify_admin_actions: bool = False,
 ) -> bool:
     """True iff this execution deserves a Slack message. Never raises."""
     try:
@@ -52,7 +54,7 @@ def should_notify(
             return False
         if status == "FAILED":
             return True
-        if mission_id == ADMIN_MISSION_ID and status == "SUCCEEDED":
+        if notify_admin_actions and status == "SUCCEEDED":
             actions = _as_dict(output).get("actions_taken")
             return isinstance(actions, list) and len(actions) > 0
         return False
@@ -68,6 +70,7 @@ def build_message(
     status: str | None,
     output: Any = None,
     error: str | None = None,
+    notify_admin_actions: bool = False,
 ) -> dict:
     """Build the ``{"text": ...}`` webhook payload (plain text, Vietnamese).
 
@@ -82,7 +85,7 @@ def build_message(
         lines = []
         if status == "FAILED":
             lines.append(f"Execution FAILED — mission {mission}")
-        elif mission_id == ADMIN_MISSION_ID:
+        elif notify_admin_actions:
             lines.append(f"Hành động admin — mission {mission}")
         else:
             lines.append(f"Execution {status or 'UNKNOWN'} — mission {mission}")
@@ -149,6 +152,7 @@ def notify_execution(
     enabled: bool = True,
     webhook_url: str = "",
     timeout: int = 5,
+    notify_admin_actions: bool = False,
     _post: Sender | None = None,
 ) -> bool:
     """Scope check + build + post. True only when a message was posted;
@@ -160,6 +164,7 @@ def notify_execution(
             output=output,
             enabled=enabled,
             webhook_url=webhook_url,
+            notify_admin_actions=notify_admin_actions,
         ):
             return False
         payload = build_message(
@@ -169,6 +174,7 @@ def notify_execution(
             status=status,
             output=output,
             error=error,
+            notify_admin_actions=notify_admin_actions,
         )
         return post_notification(
             webhook_url, payload, timeout=timeout, _post=_post

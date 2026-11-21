@@ -152,28 +152,24 @@ def block_dangerous_tool_call(context: HookContext) -> HookDecision | None:
     return None
 
 
-# Destructive admin tools -> the id argument(s) that name their target.
-# A call is only legitimate when the target id was named in the
-# execution input (see guard_destructive_target). save_mission joins
-# the set because on_exists=overwrite replaces a mission in place;
-# dispatch_execution stays out — it creates an execution (audited,
-# allowed_tools-gated) instead of destroying config.
-_DESTRUCTIVE_TARGET_ARGS = {
-    "delete_mission": ("mission_id",),
-    "cancel_execution": ("execution_id",),
-    "save_mission": ("mission_id",),
-}
-
-
 def enforce_write_preconditions(context: HookContext) -> HookDecision | None:
     """Deny write calls that fail schema/precondition checks (generic)."""
     from runtime.tool_preconditions import check_write_preconditions
 
+    # The booking-ownership check runs through the agent's policy when
+    # the run has one (the hook context carries agent_id + mission);
+    # without an agent the legacy shim in tool_preconditions applies.
+    agent = None
+    if context.agent_id:
+        from runtime.agents.registry import resolve_agent
+
+        agent = resolve_agent(context.agent_id, context.mission or {})
     msg = check_write_preconditions(
         context.tool_name,
         context.tool_input or {},
         session_id=context.session_id,
         execution_id=context.execution_id,
+        agent=agent,
     )
     if msg:
         return HookDecision(action="deny", message=msg)
@@ -244,6 +240,18 @@ def enforce_layer(context: HookContext) -> HookDecision | None:
         )
 
 
+def _destructive_target_keys(tool_name: str) -> tuple[str, ...]:
+    """Id-arg names for one destructive tool, from its registry entry.
+
+    Declared at register time (``destructive_target_args``) — the
+    hook never keeps its own map of which tools are destructive.
+    """
+    from runtime.tools.registry import registry
+
+    entry = registry.get(tool_name)
+    return entry.destructive_target_args if entry is not None else ()
+
+
 def guard_destructive_target(context: HookContext) -> HookDecision | None:
     """PreToolUse: a destructive call needs its target id in the input.
 
@@ -254,6 +262,12 @@ def guard_destructive_target(context: HookContext) -> HookDecision | None:
     invented by the model or planted by an injected instruction — is
     denied before the tool runs, and the agent sees the reason.
 
+    Which arguments name the target is metadata on the tool's
+    registry entry (``destructive_target_args``, declared at register
+    time — ``save_mission`` joins the set because on_exists=overwrite
+    replaces a mission in place; ``dispatch_execution`` stays out, it
+    creates an execution instead of destroying config).
+
     Known limit: the check proves the id was *in the request*, not
     who put it there. If injected text itself names the id verbatim,
     the call passes this hook (the pattern matcher, the system-prompt
@@ -261,7 +275,7 @@ def guard_destructive_target(context: HookContext) -> HookDecision | None:
     A missing/empty id arg is not denied here — the tool itself
     reports the missing argument.
     """
-    id_keys = _DESTRUCTIVE_TARGET_ARGS.get(context.tool_name)
+    id_keys = _destructive_target_keys(context.tool_name)
     if not id_keys:
         return None
     serialized_input = json.dumps(context.input, ensure_ascii=False, default=str)
@@ -290,10 +304,11 @@ def request_permission(context: HookContext) -> HookDecision | None:
     reports the missing argument (same convention as
     ``guard_destructive_target``).
     """
-    if context.tool_name not in _DESTRUCTIVE_TARGET_ARGS:
+    id_keys = _destructive_target_keys(context.tool_name)
+    if not id_keys:
         return None
     target = None
-    for key in _DESTRUCTIVE_TARGET_ARGS[context.tool_name]:
+    for key in id_keys:
         value = (context.tool_input or {}).get(key)
         if isinstance(value, str) and value:
             target = value

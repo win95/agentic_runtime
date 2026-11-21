@@ -15,7 +15,7 @@ map:
         - when: "đã có dữ liệu/draft (từ flow research trong turn này hoặc turn trước), cần xuất báo cáo HTML/CSV/MD"
           goto: report-generate
     - id: clarify-scope
-      goal: "Chốt câu hỏi + nguồn cần tìm. Nếu câu hỏi mơ hồ, hỏi lại người dùng một câu duy nhất qua reply_to_guest rồi dừng flow — không đoán."
+      goal: "Chốt câu hỏi + nguồn cần tìm. Nếu câu hỏi mơ hồ, hỏi lại người dùng một câu duy nhất bằng text rồi dừng flow — không đoán."
       tools: []
     - id: search-collect
       goal: "Gọi tavily_search (tối đa 10 kết quả), chọn tối đa 3 URL quan trọng nhất cho câu hỏi."
@@ -25,14 +25,14 @@ map:
       tools: [tavily_extract]
       requires: [tavily_search]
     - id: analyze-synthesize
-      goal: "Tổng hợp từ các draft trong sandbox bằng pandas: viết script Python rồi chạy bằng execute — tính toán, bảng số liệu, JSON dữ liệu cho biểu đồ. Không viết báo cáo ở bước này. Kết thúc bằng reply_to_guest tóm tắt dữ liệu đã có và nói rõ bước tiếp theo là xuất báo cáo."
+      goal: "Tổng hợp từ các draft trong sandbox bằng pandas: viết script Python rồi chạy bằng execute — tính toán, bảng số liệu, JSON dữ liệu cho biểu đồ. Không viết báo cáo ở bước này. Kết thúc bằng câu trả lời text tóm tắt dữ liệu đã có và nói rõ bước tiếp theo là xuất báo cáo."
       tools: []
       terminal: true
     - id: report-generate
       goal: "Viết script Python đọc dữ liệu đã phân tích, sinh báo cáo HTML (bảng + biểu đồ Chart.js) + CSV + Markdown vào output/ rồi chạy bằng execute. HTML phải do script sinh, không paste toàn bộ qua write_file. Không gọi tavily ở flow này — chỉ dùng dữ liệu đã có."
       tools: []
     - id: verify-export
-      goal: "Đọc lại các file trong output/ (ls/read_file): đủ HTML + CSV + MD, HTML đầy đủ không bị cắt, chứa <canvas + new Chart(. Thiếu file nào thì sinh lại ngay trong flow này rồi kiểm tra lại — không kết thúc khi còn thiếu. Kết thúc bằng reply_to_guest tóm tắt file đã xuất."
+      goal: "Đọc lại các file trong output/ (ls/read_file): đủ HTML + CSV + MD, HTML đầy đủ không bị cắt, chứa <canvas + new Chart(. Thiếu file nào thì sinh lại ngay trong flow này rồi kiểm tra lại — không kết thúc khi còn thiếu. Kết thúc bằng câu trả lời text tóm tắt file đã xuất."
       tools: []
       terminal: true
 ---

@@ -10,9 +10,6 @@
 # under the name "fault_investigator" — see scripts/register_prompts.py).
 # allowed_tools is the fault-analysis tool set; the registry permission
 # check only hands these tools to missions with a matching capability.
-harness:
-  system_prompt_fallback: default
-
 id: fault_investigator
 name: Fault Investigator
 provider: openai

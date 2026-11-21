@@ -8,7 +8,7 @@ from typing import Any
 
 import yaml
 
-from runtime.harness.schema import AgentHarness, MissionHarness
+from runtime.harness.schema import MissionHarness
 
 _DEFAULTS_PATH = pathlib.Path(__file__).resolve().parent / "defaults.yaml"
 _SEEDS_MISSIONS = (
@@ -54,19 +54,6 @@ def parse_mission_harness(
         raise ValueError(f"Invalid harness for {source}: {exc}") from exc
 
 
-def parse_agent_harness(
-    raw: dict[str, Any] | None,
-    *,
-    source: str = "agent",
-) -> AgentHarness:
-    if not raw:
-        return AgentHarness()
-    try:
-        return AgentHarness.model_validate(raw)
-    except Exception as exc:
-        raise ValueError(f"Invalid agent harness for {source}: {exc}") from exc
-
-
 def harness_dict_from_model(model: MissionHarness) -> dict[str, Any]:
     return model.model_dump(mode="json")
 
@@ -98,13 +85,6 @@ def iter_seed_mission_harnesses(
 def load_mission_harness_from_file(path: pathlib.Path) -> MissionHarness:
     mission_id, data = _read_mission_seed_file(path)
     return parse_mission_harness(data.get("harness"), source=str(path))
-
-
-def load_agent_harness_from_file(path: pathlib.Path) -> AgentHarness:
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    if not isinstance(data, dict):
-        raise ValueError(f"Agent file must be a mapping: {path}")
-    return parse_agent_harness(data.get("harness"), source=str(path))
 
 
 def iter_mission_seed_paths() -> list[pathlib.Path]:

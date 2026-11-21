@@ -1,8 +1,6 @@
-"""Pydantic models for declarative mission/agent harness profiles."""
+"""Pydantic models for declarative mission harness profiles."""
 
 from __future__ import annotations
-
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
@@ -69,6 +67,20 @@ class GuestOutputHarness(BaseModel):
         return self
 
 
+class NotificationsHarness(BaseModel):
+    """Slack notification scope (opt-in per mission).
+
+    When true, a SUCCEEDED execution of this mission notifies Slack
+    when its output reports a non-empty ``actions_taken`` list — the
+    "admin action" scope (tran's choice, 2026-11-11). Failures notify
+    for every mission regardless of this flag.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    notify_admin_actions: StrictBool = False
+
+
 class ContextBudgetHarness(BaseModel):
     """Optional context-window reallocations (opt-in per mission)."""
 
@@ -129,15 +141,8 @@ class MissionHarness(BaseModel):
     builtin_tools: BuiltinToolsHarness = Field(default_factory=BuiltinToolsHarness)
     flow_subgraph: FlowSubgraphHarness = Field(default_factory=FlowSubgraphHarness)
     guest_output: GuestOutputHarness = Field(default_factory=GuestOutputHarness)
+    notifications: NotificationsHarness = Field(default_factory=NotificationsHarness)
     context_budget: ContextBudgetHarness = Field(default_factory=ContextBudgetHarness)
     output_files: OutputFilesHarness = Field(default_factory=OutputFilesHarness)
     tool_calls: ToolCallsHarness = Field(default_factory=ToolCallsHarness)
     tool_budget: ToolBudgetHarness = Field(default_factory=ToolBudgetHarness)
-
-
-class AgentHarness(BaseModel):
-    """Agent seed metadata — prompt fallback identity for drift checks."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    system_prompt_fallback: Literal["default", "admin", "seed"] | None = None

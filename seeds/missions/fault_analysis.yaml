@@ -11,6 +11,7 @@ input_schema:
   properties:
     asset_id:
       type: string
+      pattern: ^[A-Za-z0-9_-]{1,64}$
     start_date:
       type: string
       format: date

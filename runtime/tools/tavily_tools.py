@@ -131,8 +131,8 @@ def tavily_extract(
             "stub": False, "provenance": "tavily:extract"}
 
 
-# Register both tools under the analytics capability — read-only (Layer 4).
-registry.register(tavily_search, capability="agent_analytis",
+# Register both tools under the web-research capability — read-only (Layer 4).
+registry.register(tavily_search, capability="web_research",
                   permission="web:read", timeout_seconds=60, read_only=True)
-registry.register(tavily_extract, capability="agent_analytis",
+registry.register(tavily_extract, capability="web_research",
                   permission="web:read", timeout_seconds=90, read_only=True)

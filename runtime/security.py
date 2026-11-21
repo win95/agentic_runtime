@@ -80,13 +80,18 @@ def _parse_date(value: str) -> date | None:
 def validate_execution_input_data(mission: dict, input_data: dict) -> list[str]:
     """Validate one execution input. Returns a list of problems (empty = ok).
 
-    Checks, in order: required fields present, total JSON size, per-field
-    string length, ``asset_id`` allowlist, ``start_date``/``end_date``
-    shape and ordering. Callers sanitize control characters first
-    (see ``sanitize_input_value``).
+    Checks, in order: required fields present, total JSON size,
+    per-field string length, then the per-field rules the mission's
+    ``input_schema.properties`` declares — ``pattern`` (regex, e.g.
+    the fault mission's ``asset_id`` allowlist) and ``format: date``
+    (valid date; ordering when both ``start_date`` and ``end_date``
+    are declared date fields). A field with no declared rule is only
+    length-checked: the validator names no field of its own. Callers
+    sanitize control characters first (see ``sanitize_input_value``).
     """
     problems: list[str] = []
     input_schema = (mission or {}).get("input_schema") or {}
+    properties = input_schema.get("properties") or {}
     required = input_schema.get("required") or []
     missing = [f for f in required if f not in input_data]
     if missing:
@@ -107,22 +112,31 @@ def validate_execution_input_data(mission: dict, input_data: dict) -> list[str]:
                 f"field '{key}' too long: {len(value)} chars "
                 f"(max {MAX_STRING_FIELD_CHARS})"
             )
-        if key == "asset_id" and not ASSET_ID_RE.match(value):
+        prop = properties.get(key) or {}
+        pattern = prop.get("pattern")
+        if pattern:
+            try:
+                matched = re.fullmatch(pattern, value) is not None
+            except re.error:
+                problems.append(
+                    f"input_schema pattern for '{key}' is invalid: {pattern!r}"
+                )
+                continue
+            if not matched:
+                problems.append(f"field '{key}' must match {pattern}")
+        if prop.get("format") == "date" and _parse_date(value) is None:
+            problems.append(f"field '{key}' is not a valid date: {value!r}")
+    if (properties.get("start_date") or {}).get("format") == "date" and (
+        properties.get("end_date") or {}
+    ).get("format") == "date":
+        start = input_data.get("start_date")
+        end = input_data.get("end_date")
+        start_date = _parse_date(start) if isinstance(start, str) else None
+        end_date = _parse_date(end) if isinstance(end, str) else None
+        if start_date is not None and end_date is not None and end_date < start_date:
             problems.append(
-                "field 'asset_id' must match ^[A-Za-z0-9_-]{1,64}$"
+                f"field 'end_date' ({end}) is before 'start_date' ({start})"
             )
-    start = input_data.get("start_date")
-    end = input_data.get("end_date")
-    start_date = _parse_date(start) if isinstance(start, str) else None
-    end_date = _parse_date(end) if isinstance(end, str) else None
-    if isinstance(start, str) and start_date is None:
-        problems.append(f"field 'start_date' is not a valid date: {start!r}")
-    if isinstance(end, str) and end_date is None:
-        problems.append(f"field 'end_date' is not a valid date: {end!r}")
-    if start_date is not None and end_date is not None and end_date < start_date:
-        problems.append(
-            f"field 'end_date' ({end}) is before 'start_date' ({start})"
-        )
     return problems
 
 

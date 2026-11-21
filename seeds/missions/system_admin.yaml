@@ -23,6 +23,10 @@ input_schema:
   required:
     - request
 
+harness:
+  notifications:
+    notify_admin_actions: true
+
 execution:
   mode: autonomous
   agent_id: admin_bot

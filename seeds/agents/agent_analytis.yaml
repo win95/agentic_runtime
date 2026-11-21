@@ -1,8 +1,6 @@
 # Agent agent_analytis — phân tích dữ liệu + nghiên cứu web, xuất báo cáo
 # HTML (bảng, biểu đồ) + file dữ liệu. Tạo bằng scripts/new_agent;
 # playbook đầy đủ ở skills/agent-analytis/SKILL.md.
-harness:
-  system_prompt_fallback: seed
 id: agent_analytis
 name: Agent Analytis
 provider: openai

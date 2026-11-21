@@ -160,36 +160,6 @@ def _resolve_arg_path(tools: dict, path: list) -> object | None:
     return cur
 
 
-CONFIRM_GUEST_BOOKING_TOOL_NAME = "confirm_guest_booking"
-
-
-def _requested_room_type(tools: dict) -> str | None:
-    for data in (tools or {}).values():
-        if not isinstance(data, dict):
-            continue
-        for key in ("room_type", "requested_room_type"):
-            val = data.get(key)
-            if isinstance(val, str) and val.strip():
-                return val.strip()
-        guests = data.get("guests")
-        if isinstance(guests, dict):
-            rt = guests.get("room_type")
-            if isinstance(rt, str) and rt.strip():
-                return rt.strip()
-    return None
-
-
-def _pick_rate_row(rates: list, room_type: str | None) -> dict | None:
-    if not isinstance(rates, list) or not rates:
-        return None
-    if room_type:
-        for row in rates:
-            if isinstance(row, dict) and row.get("room_type") == room_type:
-                return row
-    first = rates[0]
-    return first if isinstance(first, dict) else None
-
-
 def mark_pipeline_confirmed(session_id: str, pipeline_id: str) -> dict:
     pending = get_pending(session_id, pipeline_id)
     if pending is None:
@@ -206,41 +176,65 @@ def mark_pipeline_confirmed(session_id: str, pipeline_id: str) -> dict:
     return {"confirmed": True, "pipeline_id": pipeline_id}
 
 
-def make_confirm_guest_booking_tool(
+def make_confirm_tool(
     session_id: str,
     pipeline_id: str,
+    tool_name: str,
+    description: str,
 ) -> StructuredTool:
+    """The session-scoped confirm tool for one pipeline.
+
+    The name comes from the agent (pipeline-id-based); this factory
+    only builds the tool. Real instances are per flow agent — the
+    registry holds only a stub under the same name (see
+    :func:`ensure_confirm_tool_registered`), so the L2 call-time gate
+    knows the tool.
+    """
+
     def _confirm() -> str:
         payload = mark_pipeline_confirmed(session_id, pipeline_id)
         return json.dumps(payload, ensure_ascii=False)
 
     return StructuredTool.from_function(
-        name=CONFIRM_GUEST_BOOKING_TOOL_NAME,
-        description=(
-            "Record that the guest explicitly confirmed the quoted booking "
-            "in this conversation. Call once after they agree, before the "
-            "create step runs."
-        ),
+        name=tool_name,
+        description=description,
         func=_confirm,
     )
 
 
-def confirm_guest_booking_tool() -> StructuredTool:
+def confirm_tool_stub(tool_name: str, description: str) -> StructuredTool:
     """Registry stub; real instances are session-scoped per flow agent."""
 
     def _missing() -> str:
         return json.dumps(
             {
-                "error": "confirm_guest_booking requires an active session context",
+                "error": f"{tool_name} requires an active session context",
             },
             ensure_ascii=False,
         )
 
     return StructuredTool.from_function(
-        name=CONFIRM_GUEST_BOOKING_TOOL_NAME,
-        description="Confirm a quoted write pipeline (session-scoped in flow agents).",
+        name=tool_name,
+        description=description,
         func=_missing,
     )
+
+
+def ensure_confirm_tool_registered(tool_name: str, description: str) -> None:
+    """Register the confirm stub (idempotent) so ``enforce_layer`` knows it.
+
+    The stub is registered under every guest-output capability from the
+    mission seeds — the same set the old import-time stub used. The
+    per-session tool itself is never registered; only the stub is.
+    """
+    from runtime.harness.loader import guest_output_capabilities_from_seed_files
+    from runtime.tools.registry import registry
+
+    if registry.get(tool_name) is not None:
+        return
+    stub = confirm_tool_stub(tool_name, description)
+    for capability in guest_output_capabilities_from_seed_files():
+        registry.register(stub, capability=capability, read_only=True)
 
 
 def build_write_args(
@@ -248,34 +242,40 @@ def build_write_args(
     pending_payload: dict,
     *,
     session_id: str,
+    field_resolvers: dict | None = None,
 ) -> dict | None:
+    """Assemble the write tool's args from the quoted data.
+
+    Per field, in order: an agent-supplied ``field_resolvers`` entry
+    (a ``tools -> value`` function — e.g. the hotel agent resolving
+    ``room_type`` from the rate row the guest asked for), the map's
+    ``arg_paths``, then a scan of the quoted tool results for a field
+    of the same name. The engine knows no field names of its own.
+    """
     tools = (pending_payload or {}).get("tools") or {}
     args: dict = {}
     if "guest_id" in pipeline.write_arg_fields:
         bound = get_bound_guest_id(session_id)
         if isinstance(bound, str) and bound:
             args["guest_id"] = bound
-    for field in pipeline.write_arg_fields:
-        if field in args:
+    for field_name in pipeline.write_arg_fields:
+        if field_name in args:
             continue
-        path = pipeline.arg_paths.get(field)
-        if field == "room_type":
-            requested = _requested_room_type(tools)
-            rates_data = tools.get("get_room_rates") if isinstance(tools, dict) else None
-            if isinstance(rates_data, dict):
-                rates = rates_data.get("rates")
-                row = _pick_rate_row(rates if isinstance(rates, list) else [], requested)
-                if row and row.get("room_type"):
-                    args[field] = row["room_type"]
-                    continue
+        resolver = (field_resolvers or {}).get(field_name)
+        if resolver is not None:
+            val = resolver(tools)
+            if val is not None:
+                args[field_name] = val
+                continue
+        path = pipeline.arg_paths.get(field_name)
         if path:
             val = _resolve_arg_path(tools, path)
             if val is not None:
-                args[field] = val
+                args[field_name] = val
                 continue
         for _tool, data in tools.items():
-            if isinstance(data, dict) and field in data:
-                args[field] = data[field]
+            if isinstance(data, dict) and field_name in data:
+                args[field_name] = data[field_name]
                 break
     missing = [f for f in pipeline.write_arg_fields if f not in args]
     if missing:
@@ -296,8 +296,21 @@ def try_automated_write(
     execution_id: str,
     tools_by_name: dict,
     session_turns: int,
+    agent=None,
+    field_resolvers: dict | None = None,
+    confirm_tool_name: str | None = None,
+    success_template: str | None = None,
 ) -> tuple[str, list[str], dict | None]:
-    """Run the pipeline write tool from pending state. Returns (answer, errors, raw)."""
+    """Run the pipeline write tool from pending state. Returns (answer, errors, raw).
+
+    ``agent`` (when the caller has one) is passed through to the
+    write preconditions, so the booking-ownership check runs through
+    the agent's policy. ``field_resolvers`` / ``confirm_tool_name`` /
+    ``success_template`` are the agent's flavour: the engine's
+    defaults are neutral (no hotel nouns), the hotel agent supplies
+    the room-type resolver, its pipeline-id confirm name and the
+    guest-facing booking answer.
+    """
     errors: list[str] = []
     pending = get_pending(session_id, pipeline.id)
     if pending is None:
@@ -312,10 +325,7 @@ def try_automated_write(
         prior = payload.get("write_result")
         if isinstance(prior, dict) and not prior.get("error"):
             booking_id = prior.get("booking_id")
-            answer = (
-                f"Your booking has been created"
-                + (f" (reference {booking_id})." if booking_id else ".")
-            )
+            answer = _success_answer(success_template, booking_id)
             return answer, errors, prior
         errors.append(
             f"Automated write for pipeline '{pipeline.id}' refused: "
@@ -323,13 +333,16 @@ def try_automated_write(
         )
         return "", errors, None
     if status not in ("confirmed",):
+        detail = "guest confirmation required"
+        if confirm_tool_name:
+            detail += f" ({confirm_tool_name})"
         errors.append(
-            f"Automated write for pipeline '{pipeline.id}' refused: "
-            "guest confirmation required (confirm_guest_booking)"
+            f"Automated write for pipeline '{pipeline.id}' refused: {detail}"
         )
         return "", errors, None
     args = build_write_args(
-        pipeline, pending.get("payload") or {}, session_id=session_id
+        pipeline, pending.get("payload") or {}, session_id=session_id,
+        field_resolvers=field_resolvers,
     )
     if args is None:
         errors.append(
@@ -348,6 +361,7 @@ def try_automated_write(
         args,
         session_id=session_id,
         execution_id=execution_id,
+        agent=agent,
     )
     if pre:
         errors.append(
@@ -371,10 +385,7 @@ def try_automated_write(
         )
         return "", errors, result
     booking_id = result.get("booking_id") if isinstance(result, dict) else None
-    answer = (
-        f"Your booking has been created"
-        + (f" (reference {booking_id})." if booking_id else ".")
-    )
+    answer = _success_answer(success_template, booking_id)
     save_pending(
         session_id,
         pipeline.id,
@@ -383,3 +394,10 @@ def try_automated_write(
         idempotency_key=idem,
     )
     return answer, errors, result
+
+
+def _success_answer(success_template: str | None, booking_id: str | None) -> str:
+    """The write's success answer: ``{ref}`` is ``" (reference BK-1)"`` or ``""``."""
+    template = success_template or "Write completed{ref}."
+    ref = f" (reference {booking_id})" if booking_id else ""
+    return template.format(ref=ref)

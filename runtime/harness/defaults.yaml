@@ -11,6 +11,8 @@ flow_subgraph:
 guest_output:
   register_reply_tools: false
   capability: null
+notifications:
+  notify_admin_actions: false
 context_budget:
   reclaim_retrieval_for_history: false
 output_files:

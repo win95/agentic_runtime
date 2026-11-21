@@ -65,7 +65,7 @@ def expand_env_placeholders(value, defaults=None):
 
 
 def load_mission_file(path: pathlib.Path) -> dict:
-    from runtime.harness.loader import parse_mission_harness, harness_dict_from_model
+    from runtime.harness.loader import harness_dict_from_model, parse_mission_harness
 
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     execution = dict(data.get("execution") or {})
@@ -100,10 +100,7 @@ def load_agent_file(path: pathlib.Path) -> dict:
         yaml.safe_load(path.read_text(encoding="utf-8")),
         defaults={"LLM_MODEL": settings.llm_model},
     )
-    from runtime.harness.loader import parse_agent_harness
     from runtime.session_history import parse_session_history_config
-
-    parse_agent_harness(data.get("harness"), source=str(path))
 
     return {
         "id": data["id"],
@@ -188,10 +185,10 @@ def _select_files(directory: pathlib.Path, wanted: str | None,
 
 def validate_all_mission_harness_policies() -> None:
     """Validate harness across every mission seed file (fail fast on conflict)."""
+    import yaml
+
     from runtime.harness.loader import parse_mission_harness
     from runtime.harness.validation import validate_cross_mission_harness
-
-    import yaml
 
     items: list = []
     for path in _select_files(BASE / "missions", None, "mission"):

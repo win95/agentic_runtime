@@ -96,24 +96,15 @@ from typing_extensions import TypedDict
 
 from runtime.context_budget import ROUTE_INSTRUCTION_TOKENS, estimate_tokens
 from runtime.deep_agent import MAX_INPUT_JSON_BYTES, build_deep_agent, outcome_from_messages
-from runtime.guest_locale import detect_guest_locale
-from runtime.guest_output import extract_flow_guest_reply, guest_reply_tool
+from runtime.guest_output import GUEST_REPLY_TOOL_NAME, extract_flow_guest_reply
 from runtime.guest_result import apply_guest_result_to_state
 from runtime.llm_factory import build_chat_model
 from runtime.observability_resilience import (
     filter_observability_errors,
     invoke_with_observability_fallback,
 )
-from runtime.session_write_pending import get_pending
-from runtime.write_pipeline_runner import (
-    CONFIRM_GUEST_BOOKING_TOOL_NAME,
-    capture_quote_tools,
-    make_confirm_guest_booking_tool,
-    mark_awaiting_confirm,
-    pipeline_for_write_node,
-    try_automated_write,
-)
 from runtime.security import wrap_data
+from runtime.session_write_pending import get_pending
 from runtime.skills.map_plan import SkillMap
 from runtime.subgraph.common import (
     GuestReplyCompleteError,
@@ -122,6 +113,11 @@ from runtime.subgraph.common import (
     last_text,
     next_in_order,
     tools_for_node,
+)
+from runtime.write_pipeline_runner import (
+    capture_quote_tools,
+    mark_awaiting_confirm,
+    pipeline_for_write_node,
 )
 
 logger = logging.getLogger(__name__)
@@ -730,6 +726,7 @@ def build_flow_subgraph(
     route_invoker=None,
     max_steps: int = MAX_FLOW_STEPS,
     max_tool_calls_per_flow: int = MAX_TOOL_CALLS_PER_FLOW,
+    pipeline_agent=None,
 ):
     """Compile a SkillMap into a LangGraph of flow agents + one router.
 
@@ -750,16 +747,31 @@ def build_flow_subgraph(
 
     ``route_invoker`` is a test seam: ``(messages, tool_spec, config)
     -> AIMessage``, replacing the bound route model call.
+
+    ``pipeline_agent`` is the resolved agent object (from the Mission
+    Graph); flow agents get their confirm tool and automated write
+    from it (``pipeline_agent.confirm_tool`` /
+    ``pipeline_agent.write_pipeline``), so pipeline flavour — the
+    confirm name, field resolvers, the guest-facing answer — lives in
+    the agent, not in this compiler. When no agent is passed (older
+    tests calling the compiler directly), a plain ``BaseAgent``
+    supplies the generic defaults. The name is ``pipeline_agent``,
+    not ``agent``, because the executor below binds a local ``agent``
+    to each flow's compiled agent — a parameter named ``agent`` would
+    be shadowed there.
     """
     flows = derive_flows(skill_map, resume_nodes=resume_nodes)
     pipelines = list(skill_map.pipelines or [])
     by_id = {flow.id: flow for flow in flows}
     tools_by_name = {getattr(t, "name", ""): t for t in tools}
+    if pipeline_agent is None:
+        from runtime.agents.base import BaseAgent
+
+        pipeline_agent = BaseAgent("", {})
     route_base_model: object | None = None
     start = skill_map.node_by_id(skill_map.start)
     when_by_entry = {b.goto: b.when for b in (start.branches if start else [])}
     agent_cache: dict[str, object] = {}
-    model_cache: dict[str, object] = {}
     cap_cache: dict[str, ToolCallCap] = {}
 
     def flow_agent(flow: Flow, session_id: str = ""):
@@ -772,14 +784,35 @@ def build_flow_subgraph(
             write_pipe = pipeline_for_write_node(pipelines, flow.id)
             if write_pipe and write_pipe.write_tool in node_tools:
                 node_tools = [t for t in node_tools if t != write_pipe.write_tool]
-            flow_tools = [guest_reply_tool(), *tools_for_node(tools, node_tools)]
+            # The reply tool comes from the agent, not the compiler:
+            # only a mission whose harness sets
+            # guest_output.register_reply_tools gets it (hotel). Other
+            # agents answer in free text — see the prompt + the answer
+            # extraction in _run_flow below.
+            reply_tool = pipeline_agent.guest_reply_tool()
+            flow_tools = (
+                [reply_tool] if reply_tool is not None else []
+            ) + tools_for_node(tools, node_tools)
             for pipe in pipelines:
                 if pipe.confirm_node in {n.id for n in flow.nodes}:
                     if session_id:
                         flow_tools.append(
-                            make_confirm_guest_booking_tool(session_id, pipe.id)
+                            pipeline_agent.confirm_tool(session_id, pipe.id)
                         )
-            tool_names = ", ".join([*(flow.tools or []), "reply_to_guest"]) or "reply_to_guest"
+            names = list(flow.tools or [])
+            if reply_tool is not None:
+                names.append(GUEST_REPLY_TOOL_NAME)
+            tool_names = ", ".join(names) if names else "none (text only)"
+            reply_instruction = (
+                "When ready, call reply_to_guest with the message for "
+                "the guest in the guest's language (do not rely on "
+                "free text alone). If you need information from the "
+                "guest, ask via reply_to_guest and stop — that ends "
+                "this flow's turn."
+                if reply_tool is not None
+                else "When ready, answer in free text — that ends "
+                "this flow's turn."
+            )
             steps = "\n".join(
                 f"{i + 1}. {node.id}: {node.goal}"
                 + (
@@ -815,13 +848,9 @@ def build_flow_subgraph(
                     f"plan: flow '{flow.id}'. Work through these steps in "
                     f"order, skipping any that do not apply to this "
                     f"request:\n{steps}{extra}\n\nYou have ONLY these "
-                    f"tools: {tool_names}, reply_to_guest. Do not call any "
+                    f"tools: {tool_names}. Do not call any "
                     f"other tool. Call the tools for a step as needed. "
-                    f"When ready, call reply_to_guest with the message for "
-                    f"the guest in the guest's language (do not rely on "
-                    f"free text alone). If you need information from the "
-                    f"guest, ask via reply_to_guest and stop — that ends "
-                    f"this flow's turn."
+                    f"{reply_instruction}"
                 ),
                 skills=skills,
                 model_config=model_config,
@@ -980,7 +1009,7 @@ def build_flow_subgraph(
             session_turns = len((state.get("session_history") or {}).get("turns") or [])
             auto_pipe = pipeline_for_write_node(pipelines, flow.id)
             if auto_pipe and session_id:
-                auto_answer, auto_errs, _raw = try_automated_write(
+                auto_answer, auto_errs, _raw = pipeline_agent.write_pipeline(
                     auto_pipe,
                     session_id=session_id,
                     execution_id=state.get("execution_id") or "",
@@ -1072,19 +1101,28 @@ def build_flow_subgraph(
                     )
                 ]
 
-            answer, _guard_notes = extract_flow_guest_reply(
-                reply_messages,
-                context_blobs=context_blobs,
-                session_id=state.get("session_id") or "",
-                input_data=state.get("input_data") or {},
-                tools_by_name=tools_by_name,
-                reprompt_invoke=None,
-            )
+            if pipeline_agent.guest_reply_tool() is not None:
+                answer, _guard_notes = extract_flow_guest_reply(
+                    reply_messages,
+                    context_blobs=context_blobs,
+                    session_id=state.get("session_id") or "",
+                    input_data=state.get("input_data") or {},
+                    tools_by_name=tools_by_name,
+                    reprompt_invoke=None,
+                    agent=pipeline_agent,
+                )
+            else:
+                # No guest channel: the agent answers in free text —
+                # the last AI message is the answer (tool outputs are
+                # data, not replies).
+                answer = last_text(
+                    [m for m in reply_messages if isinstance(m, AIMessage)]
+                )
+                _guard_notes = []
             for note in _guard_notes:
                 logger.info("Flow %s guest-output guard: %s", flow.id, note)
             if session_id:
                 flow_tool_set = set(flow.tools or [])
-                flow_node_ids = {n.id for n in flow.nodes}
                 for pipe in pipelines:
                     if set(pipe.quote_tools) & flow_tool_set:
                         capture_quote_tools(session_id, pipe, new_messages)

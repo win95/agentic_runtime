@@ -18,17 +18,6 @@ _CONFIG_PATH = (
     Path(__file__).resolve().parents[1] / "seeds" / "tool_write_preconditions.yaml"
 )
 
-_GUEST_READ_TOOLS = frozenset(
-    {
-        "find_guest",
-        "get_booking",
-        "list_payments",
-        "get_task",
-        "search_policy_documents",
-        "read_policy_document",
-    }
-)
-
 
 def _load_yaml_catalog() -> dict[str, dict]:
     if not _CONFIG_PATH.is_file():
@@ -83,19 +72,15 @@ def reset_precondition_catalog_for_tests() -> None:
 
 
 def _booking_exists_for_session(booking_id: str, session_id: str) -> str | None:
-    from runtime.tools.registry import _booking_owner
+    """Legacy shim — the policy lives in ``HotelReceptionistAgent``.
 
-    if not booking_id:
-        return "missing booking_id"
-    owner = _booking_owner(booking_id)
-    if owner is None:
-        return f"booking {booking_id!r} does not exist or is not readable"
-    bound = get_bound_guest_id(session_id)
-    if bound is SCOPE_UNKNOWN:
-        return "could not verify session guest scope"
-    if isinstance(bound, str) and owner != bound:
-        return f"booking {booking_id!r} belongs to another guest"
-    return None
+    Kept so callers without an agent (and existing tests patching this
+    name) keep working; new callers pass the agent to
+    :func:`check_write_preconditions` instead.
+    """
+    from runtime.agents.hotel import HotelReceptionistAgent
+
+    return HotelReceptionistAgent.booking_exists_for_session(booking_id, session_id)
 
 
 def check_write_preconditions(
@@ -104,8 +89,14 @@ def check_write_preconditions(
     *,
     session_id: str = "",
     execution_id: str = "",
+    agent=None,
 ) -> str | None:
-    """Return a refusal message, or None when the call may proceed."""
+    """Return a refusal message, or None when the call may proceed.
+
+    ``agent`` is the resolved agent object when the caller has one
+    (the hook layer does); the booking-ownership check then runs
+    through the agent's policy instead of the legacy shim above.
+    """
     _ = execution_id
     entry = registry.get(tool_name)
     if entry is None:
@@ -123,7 +114,10 @@ def check_write_preconditions(
         bid = (args or {}).get(booking_arg)
         if not isinstance(bid, str) or not bid.strip():
             return f"{tool_name}: {booking_arg} is required"
-        problem = _booking_exists_for_session(bid.strip(), session_id)
+        if agent is not None:
+            problem = agent.booking_exists_for_session(bid.strip(), session_id)
+        else:
+            problem = _booking_exists_for_session(bid.strip(), session_id)
         if problem:
             return f"{tool_name} refused: {problem}"
     if catalog.get("requires_bound_guest") and session_id:
@@ -136,7 +130,3 @@ def check_write_preconditions(
         if isinstance(guest_arg, str) and guest_arg and guest_arg != bound:
             return f"{tool_name} refused: guest_id outside session scope"
     return None
-
-
-def guest_read_tool_names() -> frozenset[str]:
-    return _GUEST_READ_TOOLS

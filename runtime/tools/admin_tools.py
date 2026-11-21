@@ -424,10 +424,13 @@ registry.register(list_agents, capability="system_admin",
 registry.register(system_health, capability="system_admin",
                   permission="admin", timeout_seconds=30, read_only=True)
 registry.register(save_mission, capability="system_admin",
-                  permission="admin", timeout_seconds=30, read_only=False)
+                  permission="admin", timeout_seconds=30, read_only=False,
+                  destructive_target_args=("mission_id",))
 registry.register(delete_mission, capability="system_admin",
-                  permission="admin", timeout_seconds=30, read_only=False)
+                  permission="admin", timeout_seconds=30, read_only=False,
+                  destructive_target_args=("mission_id",))
 registry.register(dispatch_execution, capability="system_admin",
                   permission="admin", timeout_seconds=60, read_only=False)
 registry.register(cancel_execution, capability="system_admin",
-                  permission="admin", timeout_seconds=30, read_only=False)
+                  permission="admin", timeout_seconds=30, read_only=False,
+                  destructive_target_args=("execution_id",))
