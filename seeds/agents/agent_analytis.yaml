@@ -6,7 +6,13 @@ harness:
 id: agent_analytis
 name: Agent Analytis
 provider: openai
-model: ${LLM_MODEL}
+# TRIAL 2026-11-20 (tran: thử V4-Flash cho analytis trước): model pin
+# thẳng deepseek-v4-flash thay vì ${LLM_MODEL} — chỉ agent này đổi,
+# các agent khác vẫn theo LLM_MODEL. Proxy LiteLLM của tran phải đăng
+# ký đúng tên này (kèm DeepSeek key) TRƯỚC khi seed, nếu không mọi
+# lượt gọi LLM của agent này sẽ lỗi. Revert: trả lại ${LLM_MODEL} +
+# seed-agent. Đổi model + re-seed tạo AgentVersion mới.
+model: deepseek-v4-flash
 system_prompt: >-
   Bạn là Agent Analytis — chuyên phân tích dữ liệu và nghiên cứu trên web.
   Trả lời bằng tiếng Việt; nếu người dùng viết bằng ngôn ngữ khác thì trả
