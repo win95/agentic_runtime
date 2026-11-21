@@ -2,6 +2,39 @@
 name: agent-analytis
 description: Phân tích dữ liệu và nghiên cứu web bằng Tavily, chạy tính toán trong sandbox, xuất báo cáo HTML tự chứa (bảng + biểu đồ) kèm CSV và Markdown — dùng với mission `agent_analytis_mission`.
 keywords: analytics research chart table html tavily phân tích nghiên cứu báo cáo biểu đồ bảng
+map:
+  start: route
+  nodes:
+    - id: route
+      goal: "Một lần mỗi lượt — chọn đúng một flow: research khi cần tìm/trích/phân tích nguồn mới; report khi đã có dữ liệu/draft và cần xuất báo cáo. Không gọi tool ở bước này."
+      tools: []
+      terminal: true
+      branches:
+        - when: "cần nghiên cứu: tìm nguồn mới, trích xuất, phân tích — chưa có dữ liệu/draft cho câu hỏi này"
+          goto: clarify-scope
+        - when: "đã có dữ liệu/draft (từ flow research trong turn này hoặc turn trước), cần xuất báo cáo HTML/CSV/MD"
+          goto: report-generate
+    - id: clarify-scope
+      goal: "Chốt câu hỏi + nguồn cần tìm. Nếu câu hỏi mơ hồ, hỏi lại người dùng một câu duy nhất qua reply_to_guest rồi dừng flow — không đoán."
+      tools: []
+    - id: search-collect
+      goal: "Gọi tavily_search (tối đa 10 kết quả), chọn tối đa 3 URL quan trọng nhất cho câu hỏi."
+      tools: [tavily_search]
+    - id: extract-draft
+      goal: "Mỗi URL quan trọng: 1 subagent (task) trích xuất qua tavily_extract, draft ≤ ~800 token vào output/drafts/<slug>.md. Ưu tiên subagent song song; chỉ tự trích bằng tavily_extract khi subagent lỗi."
+      tools: [tavily_extract]
+      requires: [tavily_search]
+    - id: analyze-synthesize
+      goal: "Tổng hợp từ các draft trong sandbox bằng pandas: viết script Python rồi chạy bằng execute — tính toán, bảng số liệu, JSON dữ liệu cho biểu đồ. Không viết báo cáo ở bước này. Kết thúc bằng reply_to_guest tóm tắt dữ liệu đã có và nói rõ bước tiếp theo là xuất báo cáo."
+      tools: []
+      terminal: true
+    - id: report-generate
+      goal: "Viết script Python đọc dữ liệu đã phân tích, sinh báo cáo HTML (bảng + biểu đồ Chart.js) + CSV + Markdown vào output/ rồi chạy bằng execute. HTML phải do script sinh, không paste toàn bộ qua write_file. Không gọi tavily ở flow này — chỉ dùng dữ liệu đã có."
+      tools: []
+    - id: verify-export
+      goal: "Đọc lại các file trong output/ (ls/read_file): đủ HTML + CSV + MD, HTML đầy đủ không bị cắt, chứa <canvas + new Chart(. Thiếu file nào thì sinh lại ngay trong flow này rồi kiểm tra lại — không kết thúc khi còn thiếu. Kết thúc bằng reply_to_guest tóm tắt file đã xuất."
+      tools: []
+      terminal: true
 ---
 
 # Agent Analytis

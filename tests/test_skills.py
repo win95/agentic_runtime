@@ -166,6 +166,7 @@ def test_seed_yaml_declares_skills():
         "charting",
         "session-memory",
     ]
+    assert analytis["execution_config"]["harness"]["flow_subgraph"]["enabled"] is True
 
 
 # --- Wiring: run_deep_agent passes files through ---

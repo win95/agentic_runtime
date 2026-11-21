@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import json
 
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage
 
 from runtime.context_budget import ROUTE_INSTRUCTION_TOKENS
-from runtime.mission_graph import validate_results, _errors_explain_empty_evidence
+from runtime.mission_graph import _errors_explain_empty_evidence, validate_results
 from runtime.skills.map_plan import MapBranch, MapNode, SkillMap
 from runtime.subgraph.flow import (
     ROUTE_TOOL_NAME,
@@ -162,6 +162,44 @@ def test_flow_subgraph_structured_route_success():
     )
     assert "check" in (out.get("visited_nodes") or [])
     assert not any("Router declared no flow" in e for e in out.get("errors") or [])
+
+
+def test_analytis_router_runs_research_then_report():
+    """The real analytis map: router picks research, then report, then END.
+
+    A visited flow is never re-entered, so after research the only
+    eligible flow is report — the router cannot loop back, and the
+    report flow (no tavily tools) cannot start new research.
+    """
+    from runtime.skills import load_skills
+
+    skill_map = {s.name: s for s in load_skills()}["agent-analytis"].map
+    assert skill_map is not None
+    calls = iter(
+        [_tool_call("clarify-scope"), _tool_call("report-generate"), _tool_call("END")]
+    )
+
+    def route_invoker(messages, tool_spec, config):  # noqa: ARG001
+        return next(calls)
+
+    def flow_executor(flow, state, messages):  # noqa: ARG001
+        return messages + [AIMessage(content=f"ran {flow.id}")]
+
+    compiled = build_flow_subgraph(
+        skill_map,
+        tools=[],
+        system_prompt="base",
+        flow_executor=flow_executor,
+        route_invoker=route_invoker,
+    )
+    out = run_flow_subgraph(
+        compiled,
+        {"mission_id": "agent_analytis_mission", "objective": "research"},
+        {"message": "nghiên cứu giá cà phê robusta"},
+        skill_maps=[skill_map],
+    )
+    assert out.get("visited_nodes") == ["clarify-scope", "report-generate"]
+    assert not any("Router declared" in e for e in out.get("errors") or [])
 
 
 def test_run_flow_subgraph_surfaces_empty_turn_without_flows():
