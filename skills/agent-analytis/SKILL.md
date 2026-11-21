@@ -2,6 +2,39 @@
 name: agent-analytis
 description: Phân tích dữ liệu và nghiên cứu web bằng Tavily, chạy tính toán trong sandbox, xuất báo cáo HTML tự chứa (bảng + biểu đồ) kèm CSV và Markdown — dùng với mission `agent_analytis_mission`.
 keywords: analytics research chart table html tavily phân tích nghiên cứu báo cáo biểu đồ bảng
+map:
+  start: route
+  nodes:
+    - id: route
+      goal: "Một lần mỗi lượt — chọn đúng một flow: research khi cần tìm/trích/phân tích nguồn mới; report khi đã có dữ liệu/draft và cần xuất báo cáo. Không gọi tool ở bước này."
+      tools: []
+      terminal: true
+      branches:
+        - when: "cần nghiên cứu: tìm nguồn mới, trích xuất, phân tích — chưa có dữ liệu/draft cho câu hỏi này"
+          goto: clarify-scope
+        - when: "đã có dữ liệu/draft (từ flow research trong turn này hoặc turn trước), cần xuất báo cáo HTML/CSV/MD"
+          goto: report-generate
+    - id: clarify-scope
+      goal: "Chốt câu hỏi + nguồn cần tìm. Nếu câu hỏi mơ hồ, hỏi lại người dùng một câu duy nhất qua reply_to_guest rồi dừng flow — không đoán."
+      tools: []
+    - id: search-collect
+      goal: "Gọi tavily_search (tối đa 10 kết quả), chọn tối đa 3 URL quan trọng nhất cho câu hỏi."
+      tools: [tavily_search]
+    - id: extract-draft
+      goal: "Mỗi URL quan trọng: 1 subagent (task) trích xuất qua tavily_extract, draft ≤ ~800 token vào output/drafts/<slug>.md. Ưu tiên subagent song song; chỉ tự trích bằng tavily_extract khi subagent lỗi."
+      tools: [tavily_extract]
+      requires: [tavily_search]
+    - id: analyze-synthesize
+      goal: "Tổng hợp từ các draft trong sandbox bằng pandas: viết script Python rồi chạy bằng execute — tính toán, bảng số liệu, JSON dữ liệu cho biểu đồ. Không viết báo cáo ở bước này. Kết thúc bằng reply_to_guest tóm tắt dữ liệu đã có và nói rõ bước tiếp theo là xuất báo cáo."
+      tools: []
+      terminal: true
+    - id: report-generate
+      goal: "Viết script Python đọc dữ liệu đã phân tích, sinh báo cáo HTML (bảng + biểu đồ Chart.js) + CSV + Markdown vào output/ rồi chạy bằng execute. HTML phải do script sinh, không paste toàn bộ qua write_file. Không gọi tavily ở flow này — chỉ dùng dữ liệu đã có."
+      tools: []
+    - id: verify-export
+      goal: "Đọc lại các file trong output/ (ls/read_file): đủ HTML + CSV + MD, HTML đầy đủ không bị cắt, chứa <canvas + new Chart(. Thiếu file nào thì sinh lại ngay trong flow này rồi kiểm tra lại — không kết thúc khi còn thiếu. Kết thúc bằng reply_to_guest tóm tắt file đã xuất."
+      tools: []
+      terminal: true
 ---
 
 # Agent Analytis
@@ -23,7 +56,8 @@ quả dưới dạng **file, bảng, biểu đồ HTML** — không chỉ text.
    nhiều subagent trong cùng 1 message khi độc lập. Giao việc chặt:
    "Dùng `tavily_extract` đọc URL này, trích fact/số liệu/trích dẫn
    quan trọng + nguồn, trả lại bản draft tối đa ~800 token, và ghi
-   draft vào `output/drafts/<slug>.md`". Main agent KHÔNG tự
+   draft vào `/output/drafts/<slug>.md` (hoặc `output/drafts/...`).
+   Main agent KHÔNG tự
    `tavily_extract` toàn văn — chỉ đọc draft các subagent trả về rồi
    tổng hợp. Dữ liệu người dùng đưa: `read_file` / `ls` để xem file,
    không bịa nội dung file chưa đọc.
@@ -35,14 +69,21 @@ quả dưới dạng **file, bảng, biểu đồ HTML** — không chỉ text.
    luận. Tính sai thì sửa script và chạy lại — không sửa số liệu bằng
    tay cho khớp.
 4. **Xuất kết quả — bắt buộc ra file.** Xem bảng dưới. Ghi MỌI file
-   báo cáo vào thư mục `output/` (đường dẫn tương đối, ví dụ
-   `output/bao-cao.html`) — chỉ `.html` / `.csv` / `.md` (+ `.txt` /
-   `.json` khi cần), mỗi file ≤ 256KB. Runtime tự tải các file trong
+   báo cáo vào thư mục `/output/` (ưu tiên đường dẫn tuyệt đối, ví dụ
+   `/output/bao-cao.html`; `output/...` cũng được) — chỉ `.html` /
+   `.csv` / `.md` (+ `.txt` / `.json` khi cần), mỗi file ≤ 256KB.
+   Runtime tự tải các file trong
    `output/` ra ngoài và đưa vào kết quả; file nằm ngoài `output/`
    hoặc quá lớn sẽ KHÔNG tới được người đọc. Báo cáo HTML KHÔNG dán
    toàn bộ qua `write_file` — viết script Python nhỏ sinh HTML từ
    template + dữ liệu CSV rồi chạy trong sandbox; nội dung lớn chỉ
-   sống trong sandbox, không vào context. Ghi rõ đường dẫn từng
+   sống trong sandbox, không vào context. Quy trình đúng: ghi dữ liệu
+   ra CSV trước → viết script đọc CSV sinh HTML → chạy bằng `execute`
+   → đọc lại file để chắc nó đầy đủ. Mỗi `write_file` một file, một
+   lần một cái: gọi nhiều `write_file` cùng 1 path trong 1 lần trả
+   lời sẽ bị từ chối ("parallel file mutations to the same path are
+   not allowed"), và dán toàn bộ HTML qua `write_file` sẽ bị cắt giữa
+   chừng, file ra thiếu nội dung. Ghi rõ đường dẫn từng
    file trong câu trả lời cuối.
 5. **Trả lời tóm tắt.** Kết luận chính + 2–3 con số quan trọng nhất +
    đường dẫn file + nguồn. Nguồn web nào cũng kèm URL.
@@ -79,5 +120,9 @@ quả dưới dạng **file, bảng, biểu đồ HTML** — không chỉ text.
   file và câu trả lời của run này.
 - Không tự `tavily_extract` toàn văn — giao cho subagent, main agent
   chỉ đọc draft.
+- Không gọi nhiều `write_file`/`edit_file` cùng 1 path trong 1 lần
+  trả lời — lần sau bị từ chối ("parallel file mutations to the same
+  path are not allowed"), chỉ lần đầu được ghi.
 - Không dán toàn bộ HTML qua `write_file` — sinh HTML bằng script
-  trong sandbox.
+  trong sandbox (dán file lớn sẽ bị cắt giữa chừng, file ra thiếu
+  nội dung).

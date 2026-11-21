@@ -212,7 +212,11 @@ def test_eval_mock_mode_logs_to_mlflow(monkeypatch, tmp_path):
     )
 
     eval_module = _load_eval_module()
-    eval_module.install_mock_llm()
+
+    def _fake_build_deep_agent(*args, **kwargs):  # noqa: ARG001
+        return eval_module._FakeAgent()
+
+    monkeypatch.setattr(deep_agent_module, "build_deep_agent", _fake_build_deep_agent)
     assert deep_agent_module.build_deep_agent() is not None
 
     case = eval_module.TEST_CASES[0]

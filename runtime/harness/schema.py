@@ -69,6 +69,56 @@ class GuestOutputHarness(BaseModel):
         return self
 
 
+class ContextBudgetHarness(BaseModel):
+    """Optional context-window reallocations (opt-in per mission)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # When true, unused retrieval slice (8,024 tok) is added to the history
+    # trim budget — for missions that never fill the retrieval block.
+    reclaim_retrieval_for_history: StrictBool = False
+
+
+class ToolCallsHarness(BaseModel):
+    """Per-mission tool invocation policy."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Tools in this list must not run in parallel within one model message.
+    sequential: list[str] = Field(default_factory=list)
+
+
+class ToolBudgetHarness(BaseModel):
+    """Shared execution budget for web tool results (opt-in)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tools: list[str] = Field(default_factory=list)
+    max_result_tokens: int = 0
+    max_calls: dict[str, int] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def _validate_budget(self) -> ToolBudgetHarness:
+        if self.max_result_tokens < 0:
+            raise ValueError("tool_budget.max_result_tokens must be >= 0")
+        for name, cap in self.max_calls.items():
+            if not (name or "").strip():
+                raise ValueError("tool_budget.max_calls keys must be non-empty")
+            if cap < 0:
+                raise ValueError(f"tool_budget.max_calls[{name!r}] must be >= 0")
+        return self
+
+
+class OutputFilesHarness(BaseModel):
+    """Sandbox report export expectations (opt-in per mission)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # When true, ``stop_completion`` nudges the agent to write top-level
+    # report files under ``/output`` before finishing (sandbox + marker only).
+    required: StrictBool = False
+
+
 class MissionHarness(BaseModel):
     """Effective harness for one mission (merged with defaults)."""
 
@@ -79,6 +129,10 @@ class MissionHarness(BaseModel):
     builtin_tools: BuiltinToolsHarness = Field(default_factory=BuiltinToolsHarness)
     flow_subgraph: FlowSubgraphHarness = Field(default_factory=FlowSubgraphHarness)
     guest_output: GuestOutputHarness = Field(default_factory=GuestOutputHarness)
+    context_budget: ContextBudgetHarness = Field(default_factory=ContextBudgetHarness)
+    output_files: OutputFilesHarness = Field(default_factory=OutputFilesHarness)
+    tool_calls: ToolCallsHarness = Field(default_factory=ToolCallsHarness)
+    tool_budget: ToolBudgetHarness = Field(default_factory=ToolBudgetHarness)
 
 
 class AgentHarness(BaseModel):

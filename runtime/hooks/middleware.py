@@ -44,6 +44,7 @@ encoder, whose failure is logged while the trim still goes ahead.
 from __future__ import annotations
 
 import logging
+import threading
 
 from langchain.agents.middleware import AgentMiddleware, hook_config
 from langchain_core.messages import (
@@ -64,6 +65,80 @@ from runtime.hooks.registry import HookRegistry
 from runtime.long_term_memory import encode_texts, turn_text
 
 logger = logging.getLogger(__name__)
+
+# Subagent hooks: tool-level events only — derived from BUILTIN_HOOKS so new
+# PreToolUse/PostToolUse handlers apply automatically.
+SUBAGENT_EXCLUDED_HOOK_EVENTS = frozenset(
+    {
+        HookEvent.SESSION_START,
+        HookEvent.SESSION_END,
+        HookEvent.USER_PROMPT_SUBMIT,
+        HookEvent.STOP,
+        HookEvent.SUBAGENT_START,
+        HookEvent.SUBAGENT_STOP,
+        HookEvent.NOTIFICATION,
+        HookEvent.PERMISSION_REQUEST,
+        HookEvent.PRE_COMPACT,
+    }
+)
+SUBAGENT_TOOL_HOOK_EVENTS = frozenset(
+    {
+        HookEvent.PRE_TOOL_USE,
+        HookEvent.POST_TOOL_USE,
+        HookEvent.POST_TOOL_USE_FAILURE,
+    }
+)
+
+
+def builtin_subagent_hook_names() -> list[str]:
+    """Built-in hook names safe for subagents (tool enforcement only)."""
+    from runtime.hooks.builtin import BUILTIN_HOOKS
+
+    names: list[str] = []
+    for name, pairs in BUILTIN_HOOKS.items():
+        events = {event for event, _handler in pairs}
+        if events & SUBAGENT_EXCLUDED_HOOK_EVENTS:
+            continue
+        if events & SUBAGENT_TOOL_HOOK_EVENTS:
+            names.append(name)
+    return names
+
+
+class SharedRunCounters:
+    """Thread-safe counters shared by main agent + subagent middleware."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.tool_calls_made = 0
+        self.tool_budget_tokens_used = 0
+        self.tool_budget_calls: dict[str, int] = {}
+
+    def increment_tool_calls(self) -> int:
+        with self._lock:
+            self.tool_calls_made += 1
+            return self.tool_calls_made
+
+    def snapshot_tool_calls(self) -> int:
+        with self._lock:
+            return self.tool_calls_made
+
+    def reserve_budget_call(self, tool_name: str, cap: int | None) -> bool:
+        """Atomically reserve one call slot before the tool runs."""
+        if cap is None:
+            return True
+        with self._lock:
+            used = self.tool_budget_calls.get(tool_name, 0)
+            if used >= cap:
+                return False
+            self.tool_budget_calls[tool_name] = used + 1
+            return True
+
+    def release_budget_call(self, tool_name: str) -> None:
+        """Rollback a reserved call when the tool never completed charging."""
+        with self._lock:
+            used = self.tool_budget_calls.get(tool_name, 0)
+            if used > 0:
+                self.tool_budget_calls[tool_name] = used - 1
 
 
 class HookMiddleware(AgentMiddleware):
@@ -86,6 +161,16 @@ class HookMiddleware(AgentMiddleware):
         capabilities: list | None = None,
         reserved_history_tokens: int = 0,
         history_budget_tokens: int | None = None,
+        shared_counters: SharedRunCounters | None = None,
+        events_sink: list | None = None,
+        subagent_mode: bool = False,
+        sandbox_backend=None,
+        export_marker_path: str | None = None,
+        output_files_required: bool = False,
+        sequential_tool_names: frozenset[str] | None = None,
+        tool_budget_tools: frozenset[str] | None = None,
+        tool_budget_max_result_tokens: int = 0,
+        tool_budget_max_calls: dict[str, int] | None = None,
     ):
         self.registry = registry
         self.execution_id = execution_id
@@ -112,12 +197,52 @@ class HookMiddleware(AgentMiddleware):
             if history_budget_tokens
             else HISTORY_TOKENS
         )
+        self.shared_counters = shared_counters or SharedRunCounters()
+        self.events_sink = events_sink
+        self.subagent_mode = subagent_mode
         self.tool_calls_made = 0
         self.continues = 0
         self.trimmed_messages = 0
         self.trimmed_tokens = 0
         self.encoded_turns = 0
         self.events: list[dict] = []
+        self.sandbox_backend = sandbox_backend
+        self.export_marker_path = export_marker_path
+        self.output_files_required = output_files_required
+        self.sequential_tool_names = frozenset(sequential_tool_names or ())
+        self.tool_budget_tools = frozenset(tool_budget_tools or ())
+        self.tool_budget_max_result_tokens = max(
+            0, int(tool_budget_max_result_tokens or 0)
+        )
+        self.tool_budget_max_calls = dict(tool_budget_max_calls or {})
+
+    @classmethod
+    def for_subagent(cls, parent: HookMiddleware) -> HookMiddleware:
+        """Tool-enforcement middleware for the general-purpose subagent."""
+        sub_registry = parent.registry.with_only(builtin_subagent_hook_names())
+        return cls(
+            sub_registry,
+            execution_id=parent.execution_id,
+            mission_id=parent.mission_id,
+            tenant=parent.tenant,
+            agent_id=parent.agent_id,
+            mission=parent.mission,
+            input_data=parent.input_data,
+            evidence_count=0,
+            max_continues=0,
+            session_id=parent.session_id,
+            allowed_tools=list(parent.allowed_tools),
+            capabilities=list(parent.capabilities),
+            reserved_history_tokens=0,
+            history_budget_tokens=HISTORY_TOKENS,
+            shared_counters=parent.shared_counters,
+            events_sink=parent.events,
+            subagent_mode=True,
+            sequential_tool_names=parent.sequential_tool_names,
+            tool_budget_tools=parent.tool_budget_tools,
+            tool_budget_max_result_tokens=parent.tool_budget_max_result_tokens,
+            tool_budget_max_calls=parent.tool_budget_max_calls,
+        )
 
     # -- helpers ------------------------------------------------------
     def _base_context(self) -> HookContext:
@@ -134,17 +259,19 @@ class HookMiddleware(AgentMiddleware):
         )
 
     def _record(self, event: HookEvent, decisions, **extra) -> None:
-        self.events.append(
-            {
-                "event": event.value,
-                "decisions": [d.action for d in decisions],
-                "messages": [d.message for d in decisions if d.message],
-                **extra,
-            }
-        )
+        record = {
+            "event": event.value,
+            "decisions": [d.action for d in decisions],
+            "messages": [d.message for d in decisions if d.message],
+            **extra,
+        }
+        target = self.events_sink if self.events_sink is not None else self.events
+        target.append(record)
 
     # -- SessionStart --------------------------------------------------
     def before_agent(self, state, runtime):  # noqa: ARG002 - runtime unused
+        if self.subagent_mode:
+            return None
         context = self._base_context()
         decisions = self.registry.dispatch(HookEvent.SESSION_START, context)
         self._record(HookEvent.SESSION_START, decisions)
@@ -165,17 +292,15 @@ class HookMiddleware(AgentMiddleware):
             remove = trim_history(messages, budget)
             if not remove:
                 return None
-            # Encode-then-remove: the trimmed turns go into long-term
-            # memory BEFORE the RemoveMessage goes out, so no turn is
-            # ever lost in the gap. The encoder never raises; a
-            # storage failure just means this run's trimmed turns are
-            # not retrievable later.
-            self.encoded_turns += encode_texts(
-                self.session_id,
-                self.execution_id,
-                [turn_text(turn) for turn in group_turns(remove)],
-                source="trim",
-            )
+            # Encode-then-remove on the main agent only — subagent turns
+            # can contain untrusted web/tool text and must not enter LTM.
+            if not self.subagent_mode:
+                self.encoded_turns += encode_texts(
+                    self.session_id,
+                    self.execution_id,
+                    [turn_text(turn) for turn in group_turns(remove)],
+                    source="trim",
+                )
             remove_ids = [getattr(m, "id", "") or "" for m in remove]
             removed_tokens = sum(message_tokens(m) for m in remove)
             self.trimmed_messages += len(remove)
@@ -200,10 +325,64 @@ class HookMiddleware(AgentMiddleware):
 
     # -- Pre/PostToolUse + PostToolUseFailure --------------------------
     def wrap_tool_call(self, request, handler):
+        from runtime.tool_call_policy import (
+            BUDGET_EXHAUSTED_TEMPLATE,
+            apply_tool_result_budget,
+            budget_token_block_reason,
+            sequential_defer_message,
+            tool_budget_enabled,
+        )
+
         tool_call = request.tool_call or {}
         tool_name = str(tool_call.get("name") or "")
         tool_input = dict(tool_call.get("args") or {})
         tool_call_id = str(tool_call.get("id") or "")
+
+        deferred = sequential_defer_message(
+            request,
+            tool_name=tool_name,
+            tool_call_id=tool_call_id,
+            sequential_tools=self.sequential_tool_names,
+        )
+        if deferred is not None:
+            return deferred
+
+        cap_reserved = False
+        if tool_name in self.tool_budget_tools and tool_budget_enabled(
+            budget_tools=self.tool_budget_tools,
+            max_result_tokens=self.tool_budget_max_result_tokens,
+            max_calls=self.tool_budget_max_calls,
+        ):
+            with self.shared_counters._lock:
+                reason = budget_token_block_reason(
+                    self.shared_counters,
+                    max_result_tokens=self.tool_budget_max_result_tokens,
+                )
+            if reason:
+                logger.info("Tool budget blocked %s before run: %s", tool_name, reason)
+                return ToolMessage(
+                    content=BUDGET_EXHAUSTED_TEMPLATE.format(
+                        tool_name=tool_name, reason=reason
+                    ),
+                    tool_call_id=tool_call_id,
+                    status="error",
+                )
+            cap = self.tool_budget_max_calls.get(tool_name)
+            if not self.shared_counters.reserve_budget_call(tool_name, cap):
+                logger.info(
+                    "Tool budget blocked %s before run: call cap %s reached",
+                    tool_name,
+                    cap,
+                )
+                return ToolMessage(
+                    content=BUDGET_EXHAUSTED_TEMPLATE.format(
+                        tool_name=tool_name,
+                        reason=f"call cap {cap} reached for {tool_name}",
+                    ),
+                    tool_call_id=tool_call_id,
+                    status="error",
+                )
+            cap_reserved = cap is not None
 
         pre = self._base_context()
         pre.tool_name = tool_name
@@ -222,7 +401,11 @@ class HookMiddleware(AgentMiddleware):
         try:
             result = handler(request)
         except Exception as exc:  # noqa: BLE001 — tool errors are evidence
-            self.tool_calls_made += 1
+            if cap_reserved:
+                self.shared_counters.release_budget_call(tool_name)
+            self.shared_counters.increment_tool_calls()
+            if not self.subagent_mode:
+                self.tool_calls_made += 1
             failure = self._base_context()
             failure.tool_name = tool_name
             failure.tool_input = tool_input
@@ -241,7 +424,9 @@ class HookMiddleware(AgentMiddleware):
                 content += f"\n\n{feedback}"
             return ToolMessage(content=content, tool_call_id=tool_call_id, status="error")
 
-        self.tool_calls_made += 1
+        self.shared_counters.increment_tool_calls()
+        if not self.subagent_mode:
+            self.tool_calls_made += 1
         result_content = result.content if isinstance(result, ToolMessage) else ""
         is_error = isinstance(result, ToolMessage) and result.status == "error"
         post_event = (
@@ -257,6 +442,15 @@ class HookMiddleware(AgentMiddleware):
         feedback = "\n\n".join(
             d.message for d in post_decisions if d.action == "feedback" and d.message
         )
+        if isinstance(result, ToolMessage):
+            result = apply_tool_result_budget(
+                result,
+                shared_counters=self.shared_counters,
+                tool_name=tool_name,
+                budget_tools=self.tool_budget_tools,
+                max_result_tokens=self.tool_budget_max_result_tokens,
+                max_calls=self.tool_budget_max_calls,
+            )
         if feedback and isinstance(result, ToolMessage) and isinstance(
             result.content, str
         ):
@@ -267,9 +461,35 @@ class HookMiddleware(AgentMiddleware):
             )
         return result
 
+    def _output_files_stop_status(self) -> str:
+        """present | missing | skipped | unknown (check failed, fail-open)."""
+        if not self.output_files_required:
+            return "skipped"
+        if self.sandbox_backend is None or not self.export_marker_path:
+            return "skipped"
+        from runtime.sandbox.export import has_exportable_files_since_marker
+
+        try:
+            present, err = has_exportable_files_since_marker(
+                self.sandbox_backend, self.export_marker_path
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "stop_completion output-files check failed (fail-open): %s", exc
+            )
+            return "unknown"
+        if present is None:
+            logger.warning(
+                "stop_completion output-files check failed (fail-open): %s", err
+            )
+            return "unknown"
+        return "present" if present else "missing"
+
     # -- Stop (Ralph loop) ---------------------------------------------
     @hook_config(can_jump_to=["model"])
     def after_model(self, state, runtime):  # noqa: ARG002 - runtime unused
+        if self.subagent_mode:
+            return None
         messages = (state or {}).get("messages") or []
         last = messages[-1] if messages else None
         # Only the stop case reaches this hook: while the agent still
@@ -278,10 +498,12 @@ class HookMiddleware(AgentMiddleware):
             return None
         context = self._base_context()
         context.messages = list(messages)
-        context.data["tool_calls_made"] = self.tool_calls_made
+        context.data["tool_calls_made"] = self.shared_counters.snapshot_tool_calls()
         context.data["evidence_count"] = self.evidence_count
         context.data["continues"] = self.continues
         context.data["max_continues"] = self.max_continues
+        context.data["output_files_required"] = bool(self.output_files_required)
+        context.data["output_files_status"] = self._output_files_stop_status()
         decisions = self.registry.dispatch(HookEvent.STOP, context)
         self._record(HookEvent.STOP, decisions)
         for decision in decisions:
@@ -301,6 +523,8 @@ class HookMiddleware(AgentMiddleware):
 
     # -- SessionEnd (agent run) -----------------------------------------
     def after_agent(self, state, runtime):  # noqa: ARG002 - unused
+        if self.subagent_mode:
+            return None
         context = self._base_context()
         context.reason = "agent_finished"
         decisions = self.registry.dispatch(HookEvent.SESSION_END, context)

@@ -88,6 +88,29 @@ def get_chat_model():
     return build_chat_model()
 
 
+def allowed_builtin_tool_names(
+    mission_id: str | None,
+    execution_config: dict | None = None,
+    *,
+    sandbox_enabled: bool = False,
+) -> set[str]:
+    """Built-in deepagents tool names that may appear in ``actions_taken``.
+
+    When the mission denies built-ins (hotel), none are allowed. Otherwise
+    all standard built-ins count as in-policy; ``execute`` is included only
+    when the mission opts into a sandbox backend (it is not offered on the
+    in-memory backend).
+    """
+    from runtime.harness.registry import mission_denies_builtin_tools
+
+    if mission_denies_builtin_tools(mission_id, execution_config):
+        return set()
+    names = set(BUILTIN_TOOL_NAMES)
+    if not sandbox_enabled:
+        names.discard("execute")
+    return names
+
+
 def builtin_tools_exclusion(
     mission_id: str | None,
     execution_config: dict | None = None,
@@ -118,8 +141,49 @@ def builtin_tools_exclusion(
     return _ToolExclusionMiddleware(excluded=BUILTIN_TOOL_NAMES)
 
 
-def build_deep_agent(tools: list, system_prompt: str | None = None, skills: list | None = None,
-                     model_config=None, middleware=None, backend=None):
+def _subagents_inherit_main_middleware(
+    middleware: list | None,
+    skills: list[str] | None = None,
+) -> list | None:
+    """Explicit general-purpose subagent: skills + subagent hook enforcement.
+
+    deepagents 0.7.x does not forward user middleware or main ``skills`` to the
+    auto-added GP subagent unless we supply our own ``general-purpose`` spec.
+    """
+    if not middleware:
+        return None
+    from deepagents.middleware._tool_exclusion import _ToolExclusionMiddleware
+    from deepagents.middleware.subagents import GENERAL_PURPOSE_SUBAGENT
+
+    from runtime.hooks.middleware import HookMiddleware
+
+    parent_hook = next(
+        (m for m in middleware if isinstance(m, HookMiddleware) and not m.subagent_mode),
+        None,
+    )
+    if parent_hook is None:
+        return None
+    inherited: list = [HookMiddleware.for_subagent(parent_hook)]
+    exclusion = next(
+        (m for m in middleware if isinstance(m, _ToolExclusionMiddleware)),
+        None,
+    )
+    if exclusion is not None:
+        inherited.append(exclusion)
+    spec: dict = {**GENERAL_PURPOSE_SUBAGENT, "middleware": inherited}
+    if skills is not None:
+        spec["skills"] = skills
+    return [spec]
+
+
+def build_deep_agent(
+    tools: list,
+    system_prompt: str | None = None,
+    skills: list | None = None,
+    model_config=None,
+    middleware=None,
+    backend=None,
+):
     """Create a Deep Agent (compiled LangGraph) over the given tools.
 
     The system prompt defaults to DEFAULT_SYSTEM_PROMPT (the code
@@ -156,12 +220,14 @@ def build_deep_agent(tools: list, system_prompt: str | None = None, skills: list
         if model_config is not None
         else get_chat_model()
     )
+    subagents = _subagents_inherit_main_middleware(middleware, skills)
     return create_deep_agent(
         model=model,
         tools=tools,
         system_prompt=system_prompt or DEFAULT_SYSTEM_PROMPT,
         skills=skills,
         middleware=middleware,
+        subagents=subagents,
         backend=backend,
     )
 

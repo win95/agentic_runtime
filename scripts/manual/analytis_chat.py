@@ -36,7 +36,9 @@ Self-test checks (one canned research question): the run SUCCEEDED,
 the answer is non-empty, and ``files`` contains ``.html`` + ``.csv`` +
 ``.md``. The files check also proves the sandbox backend ran: the
 in-memory fallback exports nothing (``files: []``), so non-empty files
-mean the agent really wrote and ran code in a sandbox.
+mean the agent really wrote and ran code in a sandbox. The HTML
+report must also embed a Chart.js chart (``<canvas`` + ``new Chart(``)
+— see ``_html_has_chart`` — or the check fails.
 """
 
 from __future__ import annotations
@@ -157,9 +159,23 @@ def _run_once(api_url: str, message: str, session_id: str,
         raise _die(f"GET result thất bại ({exc}).", code=1)
     _print_answer(result)
     saved = _save_files(result, out_dir, execution_id)
+    output = result.get("output") or {}
+    warnings = output.get("export_warnings") or []
+    if warnings:
+        for line in warnings:
+            print(f"  export warning: {line}", file=sys.stderr)
     if not saved:
         print("  (không có file nào được xuất — xem lại output/ trong sandbox)", file=sys.stderr)
+        raise _die(
+            "output schema yêu cầu files nhưng không có file nào được export.",
+            code=1,
+        )
     return execution, result, saved
+
+
+def _html_has_chart(html: str) -> bool:
+    """True when an HTML report embeds a Chart.js chart (canvas + call)."""
+    return "<canvas" in html and "new Chart(" in html
 
 
 def _self_test(api_url: str, out_dir: Path, interval: float, timeout: float) -> int:
@@ -181,6 +197,14 @@ def _self_test(api_url: str, out_dir: Path, interval: float, timeout: float) -> 
         for ext in SELF_TEST_EXTENSIONS:
             checks.append((f"files có {ext}", any(n.endswith(ext) for n in names)))
         checks.append(("files không rỗng (sandbox đã chạy)", bool(files)))
+        html_contents = [
+            str(f.get("content") or "")
+            for f in files
+            if isinstance(f, dict) and str(f.get("name") or "").endswith(".html")
+        ]
+        checks.append(
+            ("báo cáo HTML có biểu đồ Chart.js", any(_html_has_chart(h) for h in html_contents))
+        )
     except SystemExit as exc:
         checks.append((f"run hoàn thành (exit {exc.code})", False))
     failed = [name for name, ok in checks if not ok]

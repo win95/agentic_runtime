@@ -102,6 +102,44 @@ def test_loader_parses_data_access_map():
     }
 
 
+def test_loader_parses_analytis_map():
+    skills = {s.name: s for s in load_skills()}
+    skill_map = skills["agent-analytis"].map
+    assert skill_map is not None
+    assert skill_map.start == "route"
+    assert skill_map.node_ids == [
+        "route",
+        "clarify-scope",
+        "search-collect",
+        "extract-draft",
+        "analyze-synthesize",
+        "report-generate",
+        "verify-export",
+    ]
+    # Only the registry tools are gated by the map — the deepagents
+    # built-ins (write_file / execute / task / read_file / ls) come from
+    # create_deep_agent in every flow, so the report flow's empty list
+    # means "no tavily here", not "no tools at all".
+    tools = {t for n in skill_map.nodes for t in n.tools}
+    assert tools == {"tavily_search", "tavily_extract"}
+    assert skill_map.node_by_id("extract-draft").requires == ["tavily_search"]
+
+    from runtime.subgraph.flow import derive_flows
+
+    flows = derive_flows(skill_map)
+    assert [f.id for f in flows] == ["clarify-scope", "report-generate"]
+    assert [n.id for n in flows[0].nodes] == [
+        "clarify-scope",
+        "search-collect",
+        "extract-draft",
+        "analyze-synthesize",
+    ]
+    assert [n.id for n in flows[1].nodes] == ["report-generate", "verify-export"]
+    assert flows[0].tools == ["tavily_search", "tavily_extract"]
+    assert flows[1].tools == []
+    assert not any(f.resume_gated for f in flows)
+
+
 def test_loader_mapless_skills_have_no_map():
     skills = {s.name: s for s in load_skills()}
     assert skills["fault-investigation"].map is None

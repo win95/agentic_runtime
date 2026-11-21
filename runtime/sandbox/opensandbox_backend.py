@@ -28,6 +28,36 @@ from deepagents.backends.sandbox import BaseSandbox
 logger = logging.getLogger(__name__)
 
 
+def _log_item_text(item) -> str:
+    if item is None:
+        return ""
+    if isinstance(item, str):
+        return item
+    text = getattr(item, "text", None)
+    if text is not None:
+        return str(text)
+    return str(item)
+
+
+def format_command_output(execution) -> str:
+    """Shell output from OpenSandbox execution (1.2+ logs or legacy result)."""
+    logs = getattr(execution, "logs", None)
+    stdout = getattr(logs, "stdout", None) if logs is not None else None
+    stderr = getattr(logs, "stderr", None) if logs is not None else None
+    out_lines = [_log_item_text(item) for item in (stdout or [])]
+    err_lines = [_log_item_text(item) for item in (stderr or [])]
+    out_lines = [line for line in out_lines if line]
+    err_lines = [line for line in err_lines if line]
+    if out_lines or err_lines:
+        chunks: list[str] = []
+        if out_lines:
+            chunks.append("\n".join(out_lines))
+        if err_lines:
+            chunks.append("\n".join(err_lines))
+        return "\n".join(chunks)
+    return "".join(_log_item_text(item) for item in (getattr(execution, "result", None) or []))
+
+
 class OpenSandboxBackend(BaseSandbox):
     """A ``BaseSandbox`` whose shell and files live in one OpenSandbox
     sandbox. ``sandbox_id`` is the server-side id (the same value the
@@ -51,7 +81,7 @@ class OpenSandboxBackend(BaseSandbox):
             else None
         )
         execution = self._sandbox.commands.run(command, opts=opts)
-        output = "".join((r.text or "") for r in (execution.result or []))
+        output = format_command_output(execution)
         if not output and execution.error:
             output = str(execution.error)
         return ExecuteResponse(

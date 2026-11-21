@@ -74,11 +74,12 @@ def test_delete_agent_without_versions_returns_204(client):
 
 # --- P0-6: GET /tools/db reports the real read_only -----------------------
 def test_tools_db_read_only_mirrors_registry(client, db_session):
+    import runtime.tools  # noqa: F401
     from seeds import demo_data
 
     demo_data.seed_tools_demo(db_session)
     rows = {row["name"]: row for row in client.get("/tools/db").json()}
-    assert len(rows) == 16
+    assert len(rows) == len(registry.list())
     assert rows["search_fault_history"]["read_only"] is True
     assert rows["delete_mission"]["read_only"] is False
     assert rows["dispatch_execution"]["read_only"] is False

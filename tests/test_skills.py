@@ -65,6 +65,8 @@ NEUTRAL_MISSION = {
 }
 
 ALL_SKILL_NAMES = {
+    "agent-analytis",
+    "charting",
     "fault-investigation", "admin-operations", "report-writing",
     "data-access", "session-memory", "reception",
 }
@@ -158,6 +160,13 @@ def test_seed_yaml_declares_skills():
         "report-writing",
         "session-memory",
     ]
+    analytis = load_missions.load_mission_file(BASE / "missions" / "agent_analytis_mission.yaml")
+    assert analytis["execution_config"]["skills"] == [
+        "agent-analytis",
+        "charting",
+        "session-memory",
+    ]
+    assert analytis["execution_config"]["harness"]["flow_subgraph"]["enabled"] is True
 
 
 # --- Wiring: run_deep_agent passes files through ---

@@ -124,12 +124,16 @@ def test_seed_executions_demo_idempotent(db_session):
 
 
 def test_seed_tools_and_policies_demo(db_session):
+    import runtime.tools  # noqa: F401
+    from runtime.tools.registry import registry
+
     db = SessionLocal()
     try:
+        expected = len(registry.list())
         first = demo_data.seed_tools_demo(db)
         second = demo_data.seed_tools_demo(db)
-        assert first == second == {"tools": 16}
-        assert db.query(Tool).count() == 16
+        assert first == second == {"tools": expected}
+        assert db.query(Tool).count() == expected
         assert db.get(Tool, "tool_get_sensor_data") is not None
         assert db.get(Tool, "tool_dispatch_execution") is not None
         policies = demo_data.seed_policies_demo(db)

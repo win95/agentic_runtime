@@ -504,7 +504,9 @@ def deep_agent_node(state: MissionState) -> dict:
             effective_history_tokens,
             estimate_tokens,
         )
+        from runtime.harness.registry import effective_harness, harness_requires_output_files
 
+        _run_harness = effective_harness(state.get("mission_id"), execution_cfg)
         hook_middleware = HookMiddleware(
             hook_registry,
             execution_id=state.get("execution_id") or "",
@@ -520,6 +522,13 @@ def deep_agent_node(state: MissionState) -> dict:
             capabilities=list(context.get("capabilities") or []),
             reserved_history_tokens=estimate_tokens(history_block),
             history_budget_tokens=effective_history_tokens(mission),
+            output_files_required=harness_requires_output_files(
+                state.get("mission_id"), execution_cfg
+            ),
+            sequential_tool_names=frozenset(_run_harness.tool_calls.sequential),
+            tool_budget_tools=frozenset(_run_harness.tool_budget.tools),
+            tool_budget_max_result_tokens=_run_harness.tool_budget.max_result_tokens,
+            tool_budget_max_calls=dict(_run_harness.tool_budget.max_calls),
         )
         # Part 1 (b): the per-run middleware list. For missions that
         # must not see any built-in tool (hotel only), append the
@@ -586,6 +595,23 @@ def deep_agent_node(state: MissionState) -> dict:
                 sandbox_note = "Sandbox unavailable — in-memory file backend"
             else:
                 sandbox_note = f"Sandbox backend: {sandbox_backend.id}"
+        export_marker_path = None
+        export_marker_failed = False
+        if sandbox_backend is not None and state.get("execution_id"):
+            from runtime.sandbox.export import touch_export_run_marker
+
+            export_marker_path = touch_export_run_marker(
+                sandbox_backend, state["execution_id"]
+            )
+            if export_marker_path is None:
+                export_marker_failed = True
+        hook_middleware.sandbox_backend = sandbox_backend
+        hook_middleware.export_marker_path = (
+            export_marker_path if not export_marker_failed else None
+        )
+        if use_flow:
+            flow_hook_middleware.sandbox_backend = hook_middleware.sandbox_backend
+            flow_hook_middleware.export_marker_path = hook_middleware.export_marker_path
         # The fixed prefix measured against the system-prompt budget —
         # set in each branch below, BEFORE the history block is
         # appended (history is charged to the history bucket, not here).
@@ -723,14 +749,15 @@ def deep_agent_node(state: MissionState) -> dict:
                 prompt_for_budget = system_prompt_text
                 if history_block:
                     system_prompt_text = system_prompt_text + "\n\n" + history_block
-                agent = build_deep_agent(
-                    tools,
-                    system_prompt=system_prompt_text,
-                    skills=skill_sources,
-                    model_config=version_cfg,
-                    middleware=middleware,
-                    backend=sandbox_backend,
-                )
+                _agent_kw: dict = {
+                    "tools": tools,
+                    "system_prompt": system_prompt_text,
+                    "skills": skill_sources,
+                    "model_config": version_cfg,
+                    "middleware": middleware,
+                    "backend": sandbox_backend,
+                }
+                agent = build_deep_agent(**_agent_kw)
             else:
                 system_prompt_text = base_prompt_text
                 if plan_block:
@@ -738,13 +765,14 @@ def deep_agent_node(state: MissionState) -> dict:
                 prompt_for_budget = system_prompt_text
                 if history_block:
                     system_prompt_text = system_prompt_text + "\n\n" + history_block
-                agent = build_deep_agent(
-                    tools,
-                    system_prompt=system_prompt_text,
-                    skills=skill_sources,
-                    middleware=middleware,
-                    backend=sandbox_backend,
-                )
+                _agent_kw = {
+                    "tools": tools,
+                    "system_prompt": system_prompt_text,
+                    "skills": skill_sources,
+                    "middleware": middleware,
+                    "backend": sandbox_backend,
+                }
+                agent = build_deep_agent(**_agent_kw)
             # Fixed prefix (see the shared computation above):
             # prompt_for_budget was set by whichever branch ran.
             prefix_overruns = check_prefix_budgets(prompt_for_budget, tools_text, skills_text)
@@ -866,9 +894,16 @@ def deep_agent_node(state: MissionState) -> dict:
             # "Sandbox unavailable" note above already says why.
             from runtime.sandbox.export import export_output_files
 
-            exported, export_notes = export_output_files(sandbox_backend)
+            exported, export_notes = export_output_files(
+                sandbox_backend,
+                run_marker_path=export_marker_path,
+                marker_create_failed=export_marker_failed,
+            )
             result["files"] = exported
             notes.extend(export_notes)
+            warnings = build_export_result_warnings(exported, export_notes)
+            if warnings is not None:
+                result["export_warnings"] = warnings
         tool_failures = outcome.get("errors") or []
         graph_errors = _execution_diagnostic_errors(tool_failures)
         if tool_failures:
@@ -1004,12 +1039,13 @@ def _is_grounded(cause: str, evidence: list) -> bool:
     return not tokens
 
 
-def _allowed_tool_names(mission: dict) -> set[str] | None:
+def _allowed_tool_names(mission: dict, *, sandbox_enabled: bool = False) -> set[str] | None:
     """Tool names this mission's capabilities allow (None = cannot tell,
     e.g. the tool modules failed to import — the trace check is then
     skipped instead of flagging everything)."""
     try:
         import runtime.tools  # noqa: F401 — registers built-in tools
+        from runtime.deep_agent import allowed_builtin_tool_names
         from runtime.tools.registry import registry
     except Exception:  # noqa: BLE001 — validation must never crash
         return None
@@ -1017,7 +1053,12 @@ def _allowed_tool_names(mission: dict) -> set[str] | None:
         e.name
         for e in registry.list_for_context({"capabilities": mission.get("capabilities") or []})
     }
-    return allowed or None
+    allowed |= allowed_builtin_tool_names(
+        mission.get("mission_id"),
+        mission.get("execution") or {},
+        sandbox_enabled=sandbox_enabled,
+    )
+    return allowed
 
 
 def _execution_diagnostic_errors(errors: list[str] | None) -> list[str]:
@@ -1055,6 +1096,18 @@ def _errors_explain_empty_evidence(errors: list[str]) -> bool:
         "ending turn",
     )
     return any(any(m in line for m in markers) for line in diag)
+
+
+def build_export_result_warnings(
+    exported: list, export_notes: list[str]
+) -> list[str] | None:
+    """``result.export_warnings`` payload from export notes + file count."""
+    warns = [n for n in export_notes if n.startswith("Export:")]
+    if warns:
+        return warns
+    if not exported:
+        return ["Export: output schema requires files but none were exported"]
+    return None
 
 
 def validate_results(state: MissionState) -> dict:
@@ -1109,7 +1162,8 @@ def validate_results(state: MissionState) -> dict:
                 flags.append({"type": "ungrounded_root_cause", "cause": str(cause)[:200]})
     actions = result.get("actions_taken")
     if isinstance(actions, list) and actions:
-        allowed = _allowed_tool_names(mission)
+        sandbox_cfg = bool((mission.get("execution") or {}).get("sandbox"))
+        allowed = _allowed_tool_names(mission, sandbox_enabled=sandbox_cfg)
         if allowed is not None:
             for name in actions:
                 if name not in allowed:

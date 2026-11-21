@@ -49,6 +49,7 @@ def test_defaults_validate():
     assert h.security.user_runnable is False
     assert h.flow_subgraph.enabled is False
     assert h.builtin_tools.deny is False
+    assert h.context_budget.reclaim_retrieval_for_history is False
 
 
 def test_deny_requires_message_template():
@@ -59,6 +60,23 @@ def test_deny_requires_message_template():
 def test_harness_rejects_unknown_builtin_keys():
     with pytest.raises(ValueError):
         parse_mission_harness({"builtin_tools": {"deni": True}})
+
+
+def test_harness_tool_calls_rejects_extra_fields():
+    with pytest.raises(ValueError):
+        parse_mission_harness({"tool_calls": {"sequential": ["a"], "extra": True}})
+
+
+def test_harness_output_files_rejects_extra_fields():
+    with pytest.raises(ValueError):
+        parse_mission_harness({"output_files": {"required": True, "bogus": True}})
+
+
+def test_harness_context_budget_rejects_extra_fields():
+    with pytest.raises(ValueError):
+        parse_mission_harness(
+            {"context_budget": {"reclaim_retrieval_for_history": True, "extra": True}}
+        )
 
 
 def test_deny_template_rejects_doubled_braces():

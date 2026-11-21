@@ -11,3 +11,13 @@ flow_subgraph:
 guest_output:
   register_reply_tools: false
   capability: null
+context_budget:
+  reclaim_retrieval_for_history: false
+output_files:
+  required: false
+tool_calls:
+  sequential: []
+tool_budget:
+  tools: []
+  max_result_tokens: 0
+  max_calls: {}
