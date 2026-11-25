@@ -119,7 +119,8 @@ def persist_output_files_to_minio(
         if not isinstance(entry, dict):
             updated.append(entry)
             continue
-        name = safe_basename(str(entry.get("name") or ""))
+        raw_name = str(entry.get("name") or "").strip() or str(entry.get("path") or "")
+        name = safe_basename(raw_name)
         if name is None:
             notes.append(f"Artifacts: rejected unsafe file name {entry.get('name')!r}")
             out = dict(entry)

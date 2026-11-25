@@ -123,6 +123,29 @@ class ToolBudgetHarness(BaseModel):
         return self
 
 
+class SandboxHarness(BaseModel):
+    """OpenSandbox command and lifetime policy for sandbox missions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    command_timeout_seconds: int = 90
+    command_timeout_max_seconds: int = 600
+
+    @model_validator(mode="after")
+    def _validate_timeout(self) -> SandboxHarness:
+        if self.command_timeout_seconds < 1:
+            raise ValueError("sandbox.command_timeout_seconds must be >= 1")
+        if self.command_timeout_max_seconds < 1:
+            raise ValueError("sandbox.command_timeout_max_seconds must be >= 1")
+        if self.command_timeout_max_seconds > 7200:
+            raise ValueError("sandbox.command_timeout_max_seconds must be <= 7200")
+        if self.command_timeout_seconds > self.command_timeout_max_seconds:
+            raise ValueError(
+                "sandbox.command_timeout_seconds must be <= command_timeout_max_seconds"
+            )
+        return self
+
+
 class OutputFilesHarness(BaseModel):
     """Sandbox report export expectations (opt-in per mission)."""
 
@@ -163,3 +186,12 @@ class MissionHarness(BaseModel):
     )
     tool_calls: ToolCallsHarness = Field(default_factory=ToolCallsHarness)
     tool_budget: ToolBudgetHarness = Field(default_factory=ToolBudgetHarness)
+    sandbox: SandboxHarness = Field(default_factory=SandboxHarness)
+
+
+class AgentHarness(BaseModel):
+    """Agent seed metadata — prompt fallback identity for drift checks."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    system_prompt_fallback: Literal["default", "admin", "seed"] | None = None

@@ -71,6 +71,38 @@ def _mission_with_minio_sink() -> dict:
 
 @patch("runtime.artifacts.sink.presigned_get_url", return_value="https://minio.example/presigned")
 @patch("runtime.artifacts.sink.upload_bytes")
+def test_sink_minio_export_shape_path_and_content_type(mock_upload, mock_presign):
+    """Files API export entries use path, name, content_type (size pre-check only)."""
+    mock_upload.return_value = "key"
+    mission = _mission_with_minio_sink()
+    output = {
+        "files": [
+            {
+                "name": "chart.html",
+                "path": "/output/chart.html",
+                "content_type": "text/html",
+                "content": "<html/>",
+            }
+        ],
+    }
+    result = apply_output_artifact_storage(
+        output,
+        mission_dict=mission,
+        execution_id="exec_1",
+        agent_id="agent_analytis",
+        session_id="sess_1",
+    )
+    entry = result["files"][0]
+    assert entry["path"] == "/output/chart.html"
+    assert entry["storage"] == "minio"
+    assert entry["content_type"] == "text/html"
+    mock_upload.assert_called_once()
+    _args, kwargs = mock_upload.call_args
+    assert kwargs["content_type"] == "text/html"
+
+
+@patch("runtime.artifacts.sink.presigned_get_url", return_value="https://minio.example/presigned")
+@patch("runtime.artifacts.sink.upload_bytes")
 def test_sink_minio_success_strips_inline(mock_upload, mock_presign):
     mock_upload.return_value = "artifacts/agents/a/sessions/s/e/f.html"
     mission = _mission_with_minio_sink()

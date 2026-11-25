@@ -118,42 +118,27 @@ def test_stop_completion_check_failure_fail_open():
     )
 
 
-def test_has_exportable_files_since_marker_fail_open_on_execute_missing():
-    backend = SimpleNamespace()
-    present, err = has_exportable_files_since_marker(backend, "/tmp/.run_x")
+def test_has_exportable_files_since_run_fail_open_on_list_error():
+    class _BrokenLs:
+        def ls(self, _path):
+            raise RuntimeError("down")
+
+    backend = _BrokenLs()
+    present, err = has_exportable_files_since_marker(backend, 1.0)
     assert present is None
     assert err
 
 
-class _MarkerBackend:
-    def __init__(self, *, find_output: str = "", fail_find: bool = False):
-        self._find_output = find_output
-        self._fail_find = fail_find
+class _StopCheckBackend:
+    def __init__(self, *, present: bool):
+        self._present = present
+        self._clock_skew = 0.0
 
-    def execute(self, command: str):
-        if "find /output" in command:
-            if self._fail_find:
-                raise RuntimeError("sandbox down")
-            return SimpleNamespace(output=self._find_output, exit_code=0)
-        if "readlink" in command or "realpath" in command:
-            before_redirect = command.split("2>/dev/null")[0].strip()
-            path = before_redirect.rsplit(maxsplit=1)[-1].strip("'\"")
-            canon = path if path.startswith("/") else f"/{path}"
-            return SimpleNamespace(output=f"{canon}\n", exit_code=0)
-        return SimpleNamespace(output="", exit_code=1)
+    def has_exportable_files_since_run(self, run_started_at, clock_skew=0.0):  # noqa: ARG002
+        return (self._present, None)
 
 
-def _middleware_with_backend(backend, *, find_output: str = "") -> HookMiddleware:
-    if backend is None:
-        b = None
-        marker = None
-    else:
-        b = backend if isinstance(backend, _MarkerBackend) else backend
-        if not isinstance(b, _MarkerBackend):
-            b = _MarkerBackend(find_output=find_output)
-        else:
-            b = backend
-        marker = "/tmp/.run_e1"
+def _middleware_with_backend(backend) -> HookMiddleware:
     registry = HookRegistry()
     registry.register(HookEvent.STOP, builtin.stop_completion, name="stop_completion")
     mw = HookMiddleware(
@@ -162,8 +147,8 @@ def _middleware_with_backend(backend, *, find_output: str = "") -> HookMiddlewar
         mission_id="agent_analytis_mission",
         max_continues=3,
         output_files_required=True,
-        sandbox_backend=b,
-        export_marker_path=marker,
+        sandbox_backend=backend,
+        export_run_started_at=1000.0 if backend else None,
     )
     mw.shared_counters.increment_tool_calls()
     mw.shared_counters.increment_tool_calls()
@@ -171,7 +156,7 @@ def _middleware_with_backend(backend, *, find_output: str = "") -> HookMiddlewar
 
 
 def test_middleware_after_model_nudges_missing_output_files():
-    mw = _middleware_with_backend(_MarkerBackend(find_output=""))
+    mw = _middleware_with_backend(_StopCheckBackend(present=False))
     out = mw.after_model({"messages": [AIMessage(content="Báo cáo sẽ được tạo")]}, None)
     assert out is not None and out.get("jump_to") == "model"
     assert "/output" in out["messages"][0].content
@@ -179,7 +164,7 @@ def test_middleware_after_model_nudges_missing_output_files():
 
 
 def test_middleware_after_model_no_nudge_when_files_present():
-    mw = _middleware_with_backend(_MarkerBackend(find_output="/output/report.md\n"))
+    mw = _middleware_with_backend(_StopCheckBackend(present=True))
     out = mw.after_model({"messages": [AIMessage(content="done")]}, None)
     assert out is None
 
@@ -191,7 +176,11 @@ def test_middleware_after_model_no_nudge_without_sandbox():
 
 
 def test_middleware_after_model_fail_open_on_check_error():
-    mw = _middleware_with_backend(_MarkerBackend(fail_find=True))
+    class _FailBackend:
+        def has_exportable_files_since_run(self, *_a, **_k):
+            return None, "list failed"
+
+    mw = _middleware_with_backend(_FailBackend())
     out = mw.after_model({"messages": [AIMessage(content="done")]}, None)
     assert out is None
 

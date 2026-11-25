@@ -35,11 +35,17 @@ def build_connection_config(settings):
     )
 
 
-def create_sandbox(image, connection_config):
+def create_sandbox(image, connection_config, *, timeout_seconds: int):
     """Create a sandbox from ``image`` and return the live handle."""
+    from datetime import timedelta
+
     from opensandbox import SandboxSync
 
-    return SandboxSync.create(image=image, connection_config=connection_config)
+    return SandboxSync.create(
+        image=image,
+        connection_config=connection_config,
+        timeout=timedelta(seconds=max(1, int(timeout_seconds))),
+    )
 
 
 def connect_sandbox(sandbox_id, connection_config):
@@ -60,8 +66,15 @@ class OpenSandboxClient:
     def __init__(self, connection_config):
         self._config = connection_config
 
-    def create(self, image):
-        return create_sandbox(image, self._config)
+    def create(self, image, *, timeout_seconds: int):
+        return create_sandbox(
+            image, self._config, timeout_seconds=timeout_seconds
+        )
+
+    def renew(self, handle, timeout_seconds: int) -> None:
+        from datetime import timedelta
+
+        handle.renew(timedelta(seconds=max(1, int(timeout_seconds))))
 
     def connect(self, sandbox_id):
         return connect_sandbox(sandbox_id, self._config)
