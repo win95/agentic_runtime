@@ -17,6 +17,10 @@ context_budget:
   reclaim_retrieval_for_history: false
 output_files:
   required: false
+output_artifacts:
+  sink: none
+  strip_inline: true
+  inline_fallback: true
 tool_calls:
   sequential: []
 tool_budget:

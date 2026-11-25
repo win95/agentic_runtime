@@ -198,6 +198,22 @@ def run_execution(self, execution_id: str, resume_decision: str | None = None) -
             output["report_markdown"] = report_markdown
             output["report_storage"] = "inline"
 
+        # Sandbox output files: optional MinIO artifact sink (harness-driven).
+        try:
+            from runtime.artifacts.sink import apply_output_artifact_storage
+
+            output = apply_output_artifact_storage(
+                output,
+                mission_dict=mission_dict,
+                execution_id=execution.id,
+                agent_id=execution.agent_id,
+                session_id=execution.session_id,
+            )
+        except Exception as exc:  # noqa: BLE001 — artifact storage is best-effort
+            logger.warning(
+                "Could not persist output artifacts for %s: %s", execution_id, exc
+            )
+
         db.add(
             models.ExecutionResult(
                 id=f"res_{uuid.uuid4().hex[:12]}",

@@ -8,6 +8,33 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from runtime.harness.schema import MissionHarness
 
+
+def output_schema_declares_files(output_schema: dict | None) -> bool:
+    """True when the mission output schema exposes a top-level ``files`` field."""
+    if not isinstance(output_schema, dict):
+        return False
+    props = output_schema.get("properties")
+    if not isinstance(props, dict):
+        return False
+    return "files" in props
+
+
+def validate_output_artifacts_policy(
+    harness: "MissionHarness",
+    output_schema: dict | None,
+    *,
+    source: str = "mission",
+) -> None:
+    """``sink: minio`` requires ``output_schema.properties.files``."""
+    if harness.output_artifacts.sink != "minio":
+        return
+    if output_schema_declares_files(output_schema):
+        return
+    raise ValueError(
+        f"Invalid harness for {source}: output_artifacts.sink=minio requires "
+        "output_schema.properties.files"
+    )
+
 _ALLOWED_DENY_FIELDS = frozenset({"tool_name"})
 
 

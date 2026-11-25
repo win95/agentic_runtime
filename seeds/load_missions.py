@@ -73,6 +73,13 @@ def load_mission_file(path: pathlib.Path) -> dict:
         data.get("harness"),
         source=str(path),
     )
+    from runtime.harness.validation import validate_output_artifacts_policy
+
+    validate_output_artifacts_policy(
+        harness_model,
+        data.get("output_schema") or {},
+        source=str(path),
+    )
     execution["harness"] = harness_dict_from_model(harness_model)
     return {
         "id": data["mission_id"],
@@ -188,7 +195,10 @@ def validate_all_mission_harness_policies() -> None:
     import yaml
 
     from runtime.harness.loader import parse_mission_harness
-    from runtime.harness.validation import validate_cross_mission_harness
+    from runtime.harness.validation import (
+        validate_cross_mission_harness,
+        validate_output_artifacts_policy,
+    )
 
     items: list = []
     for path in _select_files(BASE / "missions", None, "mission"):
@@ -197,6 +207,11 @@ def validate_all_mission_harness_policies() -> None:
             if not isinstance(data, dict) or not data.get("mission_id"):
                 continue
             harness = parse_mission_harness(data.get("harness"), source=str(path))
+            validate_output_artifacts_policy(
+                harness,
+                data.get("output_schema") or {},
+                source=str(path),
+            )
             items.append((data["mission_id"], harness))
         except Exception as exc:  # noqa: BLE001 — broken files skip validation row
             logger.warning("Harness policy skip %s: %s", path, exc)

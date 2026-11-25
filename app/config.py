@@ -96,6 +96,11 @@ class Settings(BaseSettings):
     minio_reports_bucket: str = "reports"
     minio_documents_bucket: str = "documents"
     minio_secure: bool = False
+    # Presigned GET URLs for artifact objects (browser/host access). Empty
+    # endpoint => reuse MINIO_ENDPOINT (e.g. localhost:9000 on the host).
+    minio_presign_endpoint: str = ""
+    minio_presign_secure: bool = False
+    minio_artifacts_presign_ttl_seconds: int = 86400
 
     # MLflow (primary observability: tracing, eval, prompt registry)
     mlflow_tracking_uri: str = "http://localhost:5000"
@@ -261,6 +266,10 @@ class Settings(BaseSettings):
         if self.celery_visibility_timeout_seconds > 0:
             return self.celery_visibility_timeout_seconds
         return self.execution_timeout_seconds + 600
+
+    @property
+    def resolved_minio_presign_endpoint(self) -> str:
+        return self.minio_presign_endpoint or self.minio_endpoint
 
 
 settings = Settings()

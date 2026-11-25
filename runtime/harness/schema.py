@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 from runtime.harness.validation import validate_deny_message_template
@@ -131,6 +133,18 @@ class OutputFilesHarness(BaseModel):
     required: StrictBool = False
 
 
+class OutputArtifactsHarness(BaseModel):
+    """Where sandbox ``output.files`` payloads are stored after a run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sink: Literal["none", "minio"] = "none"
+    # Drop inline ``content`` from each file entry after a successful upload.
+    strip_inline: StrictBool = True
+    # When upload fails, keep inline ``content`` and mark storage as inline.
+    inline_fallback: StrictBool = True
+
+
 class MissionHarness(BaseModel):
     """Effective harness for one mission (merged with defaults)."""
 
@@ -144,5 +158,8 @@ class MissionHarness(BaseModel):
     notifications: NotificationsHarness = Field(default_factory=NotificationsHarness)
     context_budget: ContextBudgetHarness = Field(default_factory=ContextBudgetHarness)
     output_files: OutputFilesHarness = Field(default_factory=OutputFilesHarness)
+    output_artifacts: OutputArtifactsHarness = Field(
+        default_factory=OutputArtifactsHarness
+    )
     tool_calls: ToolCallsHarness = Field(default_factory=ToolCallsHarness)
     tool_budget: ToolBudgetHarness = Field(default_factory=ToolBudgetHarness)

@@ -72,6 +72,17 @@ def test_harness_output_files_rejects_extra_fields():
         parse_mission_harness({"output_files": {"required": True, "bogus": True}})
 
 
+def test_harness_output_artifacts_merge_defaults():
+    h = parse_mission_harness({"output_artifacts": {"sink": "minio"}})
+    assert h.output_artifacts.sink == "minio"
+    assert h.output_artifacts.strip_inline is True
+
+
+def test_harness_output_artifacts_rejects_extra_fields():
+    with pytest.raises(ValueError):
+        parse_mission_harness({"output_artifacts": {"sink": "none", "bogus": True}})
+
+
 def test_harness_context_budget_rejects_extra_fields():
     with pytest.raises(ValueError):
         parse_mission_harness(
