@@ -390,11 +390,11 @@ class OpenSandboxBackend(BaseSandbox):
                     return None, note
             import os
 
-            from runtime.sandbox.export import _CONTENT_TYPES
+            from runtime.sandbox.export import REPORT_FILE_CONTENT_TYPES
 
             for item in items:
                 ext = os.path.splitext(item["path"])[1].lower()
-                if ext in _CONTENT_TYPES:
+                if ext in REPORT_FILE_CONTENT_TYPES:
                     return True, None
             return False, None
         except Exception as exc:  # noqa: BLE001

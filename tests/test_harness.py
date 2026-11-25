@@ -5,14 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-import yaml
 
 from runtime.agents.admin import AdminAgent
 from runtime.deep_agent import DEFAULT_SYSTEM_PROMPT
 from runtime.harness.schema import GuestChannelHarness, MissionHarness
 from runtime.harness.loader import (
     load_mission_harness_from_file,
-    parse_agent_harness,
     parse_mission_harness,
 )
 from runtime.harness.registry import (
@@ -210,17 +208,8 @@ def test_load_mission_file_embeds_harness():
     assert harness["security"]["user_runnable"] is True
 
 
-def test_agent_harness_prompt_fallbacks():
-    fault = parse_agent_harness(
-        yaml.safe_load(
-            (BASE / "agents" / "fault_investigator.yaml").read_text()
-        ).get("harness")
-    )
-    admin = parse_agent_harness(
-        yaml.safe_load((BASE / "agents" / "admin_bot.yaml").read_text()).get("harness")
-    )
-    assert fault.system_prompt_fallback == "default"
-    assert admin.system_prompt_fallback == "admin"
+def test_agent_seed_system_prompts_match_class_fallbacks():
+    """Agent fallback prompts live on agent classes + seed YAML (no harness Literal)."""
     inv = load_missions.load_agent_file(BASE / "agents" / "fault_investigator.yaml")
     assert inv["system_prompt"] == DEFAULT_SYSTEM_PROMPT
     adm = load_missions.load_agent_file(BASE / "agents" / "admin_bot.yaml")

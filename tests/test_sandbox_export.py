@@ -30,11 +30,11 @@ class _ListingBackend:
     def has_exportable_files_since_run(self, run_started_at, clock_skew=0.0):  # noqa: ARG002
         import os
 
-        from runtime.sandbox.export import _CONTENT_TYPES
+        from runtime.sandbox.export import REPORT_FILE_CONTENT_TYPES
 
         for item in self._items:
             ext = os.path.splitext(item["path"])[1].lower()
-            if ext in _CONTENT_TYPES:
+            if ext in REPORT_FILE_CONTENT_TYPES:
                 return True, None
         return False, None
 

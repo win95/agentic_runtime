@@ -9,13 +9,19 @@ OUTPUT_DIR = "/output"
 MAX_FILE_BYTES = 256 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024
 
-_CONTENT_TYPES = {
+REPORT_FILE_CONTENT_TYPES = {
     ".html": "text/html",
     ".csv": "text/csv",
     ".md": "text/markdown",
     ".txt": "text/plain",
     ".json": "application/json",
 }
+
+
+def content_type_for_export_filename(filename: str) -> str:
+    """MIME type for a sandbox report filename (export + artifact upload)."""
+    ext = os.path.splitext(filename)[1].lower()
+    return REPORT_FILE_CONTENT_TYPES.get(ext, "application/octet-stream")
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +99,7 @@ def has_exportable_files_since_run(
                 return None, note
         for item in items:
             ext = os.path.splitext(item["path"])[1].lower()
-            if ext in _CONTENT_TYPES:
+            if ext in REPORT_FILE_CONTENT_TYPES:
                 return True, None
         return False, None
     except Exception as exc:  # noqa: BLE001
@@ -136,7 +142,7 @@ def export_output_files(
     for item in items:
         path = item["path"]
         ext = os.path.splitext(path)[1].lower()
-        if ext in _CONTENT_TYPES:
+        if ext in REPORT_FILE_CONTENT_TYPES:
             filtered.append(item)
         else:
             skipped_ext.append(path)
@@ -199,7 +205,7 @@ def export_output_files(
             {
                 "name": os.path.basename(path),
                 "path": path,
-                "content_type": _CONTENT_TYPES[ext],
+                "content_type": REPORT_FILE_CONTENT_TYPES[ext],
                 "content": content.decode("utf-8", errors="replace"),
             }
         )

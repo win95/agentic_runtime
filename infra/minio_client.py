@@ -7,10 +7,6 @@ from datetime import timedelta
 
 from app.config import settings
 
-# Explicit region so the presign client never needs a network lookup.
-_MINIO_REGION = "us-east-1"
-
-
 def get_client():
     """Build the MinIO client, or None when credentials are not configured."""
     if not settings.minio_access_key or not settings.minio_secret_key:
@@ -136,7 +132,7 @@ def get_presign_client():
         access_key=settings.minio_access_key,
         secret_key=settings.minio_secret_key,
         secure=settings.minio_presign_secure,
-        region=_MINIO_REGION,
+        region=settings.minio_region,
     )
 
 

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import logging
 import os
+import posixpath
 import re
 from typing import Any
 
 from infra.minio_client import artifact_location, presigned_get_url, upload_bytes
 from runtime.harness.schema import OutputArtifactsHarness
 from runtime.harness.validation import output_schema_declares_files
-from runtime.sandbox.export import _CONTENT_TYPES
+from runtime.sandbox.export import content_type_for_export_filename
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,19 @@ def safe_basename(name: str) -> str | None:
     return base
 
 
+def resolve_file_basename(entry: dict[str, Any]) -> str | None:
+    """Basename for an export file entry (``name`` and/or sandbox ``path``)."""
+    raw = str(entry.get("name") or "").strip()
+    path = str(entry.get("path") or "").strip()
+    if not raw:
+        if not path:
+            return None
+        raw = posixpath.basename(path)
+    else:
+        raw = posixpath.basename(raw.replace("\\", "/"))
+    return safe_basename(raw)
+
+
 def artifact_object_key(
     *,
     agent_id: str | None,
@@ -57,8 +71,7 @@ def artifact_object_key(
 
 
 def content_type_for_name(name: str) -> str:
-    ext = os.path.splitext(name)[1].lower()
-    return _CONTENT_TYPES.get(ext, "application/octet-stream")
+    return content_type_for_export_filename(name)
 
 
 def _persist_one_file_minio(
@@ -67,17 +80,18 @@ def _persist_one_file_minio(
     object_key: str,
     policy: OutputArtifactsHarness,
     notes: list[str],
+    display_name: str,
 ) -> dict[str, Any]:
     content = entry.get("content")
     if content is None:
-        notes.append(f"Artifacts: skipped {entry.get('name')!r} (no inline content)")
+        notes.append(f"Artifacts: skipped {display_name!r} (no inline content)")
         out = dict(entry)
         out["storage"] = "inline"
         return out
     text = content if isinstance(content, str) else str(content)
     try:
         body = text.encode("utf-8")
-        name = str(entry.get("name") or object_key.rsplit("/", 1)[-1])
+        name = display_name or object_key.rsplit("/", 1)[-1]
         ctype = str(entry.get("content_type") or "") or content_type_for_name(name)
         upload_bytes(object_key, body, content_type=ctype)
         url = presigned_get_url(object_key)
@@ -90,14 +104,20 @@ def _persist_one_file_minio(
             out.pop("content", None)
         return out
     except Exception as exc:  # noqa: BLE001 — best-effort per file
-        logger.warning("Artifact upload failed for %s: %s", object_key, exc)
+        logger.warning(
+            "Artifact upload failed for %s (%s)",
+            object_key,
+            type(exc).__name__,
+            exc_info=True,
+        )
+        exc_label = type(exc).__name__
         if not policy.inline_fallback:
-            notes.append(f"Artifacts: upload failed for {entry.get('name')!r} ({exc})")
+            notes.append(f"Artifacts: upload failed for {display_name!r} ({exc_label})")
             out = dict(entry)
             out["storage"] = "inline"
             return out
         notes.append(
-            f"Artifacts: kept inline content for {entry.get('name')!r} (upload failed: {exc})"
+            f"Artifacts: kept inline content for {display_name!r} (upload failed: {exc_label})"
         )
         out = dict(entry)
         out["storage"] = "inline"
@@ -119,10 +139,10 @@ def persist_output_files_to_minio(
         if not isinstance(entry, dict):
             updated.append(entry)
             continue
-        raw_name = str(entry.get("name") or "").strip() or str(entry.get("path") or "")
-        name = safe_basename(raw_name)
+        name = resolve_file_basename(entry)
+        display = name or str(entry.get("name") or entry.get("path") or "?")
         if name is None:
-            notes.append(f"Artifacts: rejected unsafe file name {entry.get('name')!r}")
+            notes.append(f"Artifacts: rejected unsafe file name {display!r}")
             out = dict(entry)
             out["storage"] = "inline"
             updated.append(out)
@@ -139,6 +159,7 @@ def persist_output_files_to_minio(
                 object_key=key,
                 policy=policy,
                 notes=notes,
+                display_name=name,
             )
         )
     return updated

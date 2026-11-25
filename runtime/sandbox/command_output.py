@@ -29,7 +29,17 @@ def join_stream_chunks(items: list | None) -> str:
         return ""
     if len(parts) == 1:
         return parts[0]
-    return "\n".join(parts)
+    out = parts[0]
+    for part in parts[1:]:
+        if part == "":
+            if not out.endswith("\n"):
+                out += "\n"
+            out += "\n"
+            continue
+        if out and not out.endswith("\n"):
+            out += "\n"
+        out += part
+    return out
 
 
 def split_command_streams(execution) -> tuple[str, str]:

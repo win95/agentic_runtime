@@ -10,6 +10,7 @@ import pytest
 from runtime.artifacts.sink import (
     apply_output_artifact_storage,
     artifact_object_key,
+    resolve_file_basename,
     safe_basename,
 )
 from runtime.harness.loader import parse_mission_harness
@@ -35,6 +36,12 @@ def test_minio_sink_requires_output_schema_files():
     validate_output_artifacts_policy(
         harness, {"properties": {"files": {"type": "array"}}}
     )
+
+
+def test_resolve_file_basename_from_path_only():
+    entry = {"path": "/output/x.md", "content": "hi"}
+    assert resolve_file_basename(entry) == "x.md"
+    assert resolve_file_basename({"name": "", "path": "/output/x.md"}) == "x.md"
 
 
 def test_safe_basename_rejects_unsafe_names():
@@ -143,7 +150,9 @@ def test_sink_minio_failure_inline_fallback(mock_upload):
     entry = result["files"][0]
     assert entry["storage"] == "inline"
     assert entry["content"] == "a,b"
-    assert any("upload failed" in n for n in (result.get("notes") or []))
+    notes = result.get("notes") or []
+    assert any("upload failed" in n and "RuntimeError" in n for n in notes)
+    assert not any("down" in n for n in notes)
 
 
 def test_agent_analytis_mission_seed_enables_minio_sink():

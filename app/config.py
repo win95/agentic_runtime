@@ -96,6 +96,7 @@ class Settings(BaseSettings):
     minio_reports_bucket: str = "reports"
     minio_documents_bucket: str = "documents"
     minio_secure: bool = False
+    minio_region: str = "us-east-1"
     # Presigned GET URLs for artifact objects (browser/host access). Empty
     # endpoint => reuse MINIO_ENDPOINT (e.g. localhost:9000 on the host).
     minio_presign_endpoint: str = ""
