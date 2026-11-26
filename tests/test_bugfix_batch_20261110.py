@@ -16,10 +16,9 @@ from sqlalchemy.exc import IntegrityError
 import infra.repositories as repositories
 from app import models
 from app.services import execution_service, mission_service
-from ingest.loaders import load_relations
-from ingest.schemas import RelationRow
 from ingest import loaders
-from ingest.schemas import FaultRow
+from ingest.loaders import load_relations
+from ingest.schemas import FaultRow, RelationRow
 from runtime.capabilities import fault_analysis as fault_cap
 from runtime.mission_graph import route_after_capability
 from runtime.security import wrap_data
@@ -74,17 +73,26 @@ def test_delete_agent_without_versions_returns_204(client):
 
 # --- P0-6: GET /tools/db reports the real read_only -----------------------
 def test_tools_db_read_only_mirrors_registry(client, db_session):
-    import runtime.tools  # noqa: F401
     from seeds import demo_data
 
     demo_data.seed_tools_demo(db_session)
     rows = {row["name"]: row for row in client.get("/tools/db").json()}
-    assert len(rows) == len(registry.list())
+    # 25, not 18 (Phase 3): the confirm tool is session-scoped now,
+    # so it is no longer a registry tool; the 8 Lark tools (D-LARK)
+    # joined the registry since.
+    assert len(rows) == 25
     assert rows["search_fault_history"]["read_only"] is True
+    assert rows["tavily_search"]["read_only"] is True
+    assert rows["tavily_extract"]["read_only"] is True
     assert rows["delete_mission"]["read_only"] is False
     assert rows["dispatch_execution"]["read_only"] is False
     assert rows["cancel_execution"]["read_only"] is False
     assert rows["save_mission"]["read_only"] is False
+    assert rows["lark_get_group"]["read_only"] is True
+    assert rows["lark_get_history"]["read_only"] is True
+    assert rows["lark_send_message"]["read_only"] is False
+    assert rows["lark_create_group"]["read_only"] is False
+    assert rows["lark_update_group"]["read_only"] is False
 
 
 # --- P0-7: ingest keeps rows merged before a failing row ------------------
@@ -214,6 +222,13 @@ def test_merge_asset_relations_writes_canonical(db_session, monkeypatch):
         "ontology.projection.engine.drain_pending_projections",
         _fake_drain,
     )
+    # load_relations writes through OntologyWriteService, which resolves
+    # its Neo4j store lazily through the provider — point it at the
+    # in-memory fake so no live Neo4j is needed.
+    from ontology.projection import provider as provider_module
+    from tests.ontology.test_projection_fake_store import FakeGraphStore
+
+    monkeypatch.setattr(provider_module, "_store", FakeGraphStore())
     load_relations(
         db_session,
         [

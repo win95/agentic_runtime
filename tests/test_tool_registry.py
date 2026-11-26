@@ -9,6 +9,17 @@ from runtime.tools.registry import registry
 
 TAVILY_TOOLS = {"tavily_search", "tavily_extract"}
 
+LARK_TOOLS = {
+    "lark_create_group",
+    "lark_send_message",
+    "lark_get_group",
+    "lark_upload_image",
+    "lark_add_members",
+    "lark_reply_message",
+    "lark_get_history",
+    "lark_update_group",
+}
+
 EXPECTED_TOOLS = {
     "search_fault_history",
     "get_maintenance_records",
@@ -26,7 +37,9 @@ EXPECTED_TOOLS = {
     "dispatch_execution",
     "cancel_execution",
     "reply_to_guest",
-    "confirm_guest_booking",
+    # No confirm stub anymore (Phase 3): the confirm tool is
+    # session-scoped, its stub is registered lazily by the agent under
+    # the pipeline-id name (confirm_booking_create), never at import.
 }
 
 FAULT_CONTEXT = {
@@ -39,8 +52,10 @@ FAULT_CONTEXT = {
 
 def test_all_tools_registered():
     names = {entry.name for entry in registry.list()}
-    assert names == EXPECTED_TOOLS | TAVILY_TOOLS
-    assert len(names) == len(EXPECTED_TOOLS) + len(TAVILY_TOOLS)
+    assert names == EXPECTED_TOOLS | TAVILY_TOOLS | LARK_TOOLS
+    assert len(names) == (
+        len(EXPECTED_TOOLS) + len(TAVILY_TOOLS) + len(LARK_TOOLS)
+    )
 
 
 def test_tool_schemas_valid():

@@ -18,7 +18,10 @@ Lark SDK. Two public URLs (one server, two paths):
   message path's "enqueue then 200" does not apply here.
 
 Health (D-LARK-18): ``GET /healthz`` (liveness) and ``GET /readyz``
-(platform reachable).
+(platform reachable). In webhook mode they run on the same server as
+the event routes; in websocket mode they run on a separate health-only
+server (``start_health_server``, ``FRAME_HEALTH_PORT``, default 8002),
+because the WS channel opens no HTTP server of its own.
 
 Verification, in order: SHA256 signature (``X-Lark-Signature`` =
 sha256(timestamp + nonce + encrypt_key + body), only when an encrypt
@@ -71,6 +74,10 @@ class FrameConfig:
     bot_open_id: str | None = None  # None -> fetch at startup via bot/v3/info
     host: str = "0.0.0.0"
     port: int = 8000
+    # Health-only server in websocket mode (D-LARK-18): FRAME_PORT
+    # defaults to 8000, which the platform already occupies, so the
+    # health server needs its own port.
+    health_port: int = 8002
     redis_url: str | None = None
     transport: str = "webhook"
 
@@ -388,6 +395,34 @@ def dispatch_card_action(state: FrameState, payload: dict) -> str:
     return "accepted"
 
 
+def _serve_health(handler, state: FrameState) -> bool:
+    """Serve /healthz and /readyz. Returns True when the path was handled.
+
+    Shared by the webhook handler and the health-only server (WS mode),
+    so both transports answer health the same way.
+    """
+    path = urlparse(handler.path).path
+    if path == "/healthz":
+        uptime = int(time.time() - state.started_at)
+        handler._send_json(
+            200,
+            {
+                "status": "ok",
+                "transport": state.config.transport,
+                "uptime_seconds": uptime,
+            },
+        )
+        return True
+    if path == "/readyz":
+        ok = platform_io.platform_health(state.config.platform_base_url)
+        handler._send_json(
+            200 if ok else 503,
+            {"status": "ok" if ok else "platform_unreachable"},
+        )
+        return True
+    return False
+
+
 def make_handler(state: FrameState):
     """Build the request handler bound to one FrameState."""
 
@@ -416,26 +451,8 @@ def make_handler(state: FrameState):
                 return None, raw
 
         def do_GET(self):  # noqa: N802 - stdlib name
-            path = urlparse(self.path).path
-            if path == "/healthz":
-                uptime = int(time.time() - state.started_at)
-                self._send_json(
-                    200,
-                    {
-                        "status": "ok",
-                        "transport": state.config.transport,
-                        "uptime_seconds": uptime,
-                    },
-                )
-                return
-            if path == "/readyz":
-                ok = platform_io.platform_health(state.config.platform_base_url)
-                self._send_json(
-                    200 if ok else 503,
-                    {"status": "ok" if ok else "platform_unreachable"},
-                )
-                return
-            self._send_json(404, {"error": "not found"})
+            if not _serve_health(self, state):
+                self._send_json(404, {"error": "not found"})
 
         def do_POST(self):  # noqa: N802 - stdlib name
             path = urlparse(self.path).path
@@ -504,6 +521,64 @@ def make_handler(state: FrameState):
             )
 
     return LarkFrameHandler
+
+
+def make_health_handler(state: FrameState):
+    """Handler serving only /healthz + /readyz (WS mode, D-LARK-18).
+
+    No POST routes exist here on purpose: in websocket mode no Request
+    URL is registered, so nothing would ever call /lark/events.
+    """
+
+    class LarkHealthHandler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, fmt, *args):  # noqa: A002 - stdlib name
+            logger.debug("lark frame health: %s", fmt % args)
+
+        def _send_json(self, status: int, payload: dict) -> None:
+            body = json.dumps(payload).encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):  # noqa: N802 - stdlib name
+            if not _serve_health(self, state):
+                self._send_json(404, {"error": "not found"})
+
+        def do_POST(self):  # noqa: N802 - stdlib name
+            self._send_json(404, {"error": "not found"})
+
+    return LarkHealthHandler
+
+
+def start_health_server(
+    state: FrameState, host: str | None = None, port: int | None = None
+) -> ThreadingHTTPServer:
+    """Start the health-only server on a daemon thread; returns the server.
+
+    Used by the WS transport, whose channel opens no HTTP server of its
+    own — without this, liveness is visible only via the process and
+    the reconnect logs. A bind failure raises (fail fast at startup)
+    so a supervisor restarts with a clear error instead of running a
+    bot with no health endpoint.
+    """
+    host = host if host is not None else state.config.host
+    port = port if port is not None else state.config.health_port
+    server = ThreadingHTTPServer((host, port), make_health_handler(state))
+    thread = threading.Thread(
+        target=server.serve_forever, daemon=True, name="lark-health"
+    )
+    thread.start()
+    logger.info(
+        "Lark health server listening on %s:%s (transport=%s)",
+        host,
+        server.server_address[1],
+        state.config.transport,
+    )
+    return server
 
 
 def run_webhook(state: FrameState) -> None:

@@ -53,7 +53,7 @@ def test_alembic_upgrade_head_then_downgrade_base(tmp_path):
     db_path = tmp_path / "migrate-test.db"
     result = _alembic(tmp_path, "upgrade", "head")
     assert result.returncode == 0, result.stderr
-    assert _version(db_path) == [("0014_write_idempotency",)]
+    assert _version(db_path) == [("0015_ontology_state_only",)]
     tables = _tables(db_path)
     assert {"missions", "executions", "tools", "agent_versions"} <= tables
     assert "ontology_entities" in tables
@@ -91,12 +91,23 @@ def test_alembic_upgrade_head_then_downgrade_base(tmp_path):
             row[0]
             for row in conn.execute(
                 "SELECT name FROM sqlite_master "
-                "WHERE tbl_name IN ('ontology_versions', "
-                "'ontology_relationships') AND type='index'"
+                "WHERE tbl_name='ontology_relationships' AND type='index'"
             )
         }
-        assert "ix_ontology_versions_subject_version" in ontology_indexes
         assert "ix_ontology_relationships_target" in ontology_indexes
+        # 0015 drops the properties + state_hash columns and the versions table.
+        assert "ontology_versions" not in tables
+        entity_cols = [
+            row[1] for row in conn.execute("PRAGMA table_info(ontology_entities)")
+        ]
+        assert "properties" not in entity_cols
+        assert "state_hash" not in entity_cols
+        rel_cols = [
+            row[1]
+            for row in conn.execute("PRAGMA table_info(ontology_relationships)")
+        ]
+        assert "properties" not in rel_cols
+        assert "state_hash" not in rel_cols
         assert "session_write_pending" in tables
     finally:
         conn.close()
@@ -111,4 +122,4 @@ def test_alembic_current_matches_head(tmp_path):
     assert result.returncode == 0, result.stderr
     result = _alembic(tmp_path, "current")
     assert result.returncode == 0, result.stderr
-    assert "0014_write_idempotency" in result.stdout
+    assert "0015_ontology_state_only" in result.stdout

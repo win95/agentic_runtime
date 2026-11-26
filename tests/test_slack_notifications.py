@@ -2,8 +2,8 @@
 
 No network, no real webhook: posting is always through an injected
 fake sender. Scope (tran's choice): only failures + admin actions
-(mission system_admin with a non-empty actions_taken), never every
-execution.
+(a mission whose harness sets notifications.notify_admin_actions,
+with a non-empty actions_taken), never every execution.
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ def _notify(status, mission_id="fault_analysis", output=None, **kw):
         error=kw.pop("error", None),
         enabled=kw.pop("enabled", True),
         webhook_url=kw.pop("webhook_url", WEBHOOK),
+        notify_admin_actions=kw.pop("notify_admin_actions", False),
         _post=sender,
         **kw,
     )
@@ -71,6 +72,7 @@ def test_succeeded_system_admin_with_actions_notifies():
             "SUCCEEDED",
             mission_id="system_admin",
             output={"actions_taken": ["save_mission"]},
+            notify_admin_actions=True,
             _sender=sender,
         )
         is True
@@ -85,6 +87,7 @@ def test_succeeded_system_admin_empty_actions_does_not_notify():
             "SUCCEEDED",
             mission_id="system_admin",
             output={"actions_taken": []},
+            notify_admin_actions=True,
             _sender=sender,
         )
         is False
@@ -94,7 +97,15 @@ def test_succeeded_system_admin_empty_actions_does_not_notify():
 
 def test_succeeded_system_admin_missing_actions_does_not_notify():
     sender = FakeSender()
-    assert _notify("SUCCEEDED", mission_id="system_admin", _sender=sender) is False
+    assert (
+        _notify(
+            "SUCCEEDED",
+            mission_id="system_admin",
+            notify_admin_actions=True,
+            _sender=sender,
+        )
+        is False
+    )
     assert sender.calls == []
 
 
@@ -120,17 +131,33 @@ def test_empty_webhook_does_not_notify():
 def test_should_notify_never_raises_on_weird_output():
     assert should_notify(
         mission_id="system_admin", status="SUCCEEDED", output="not-a-dict",
-        webhook_url=WEBHOOK,
+        webhook_url=WEBHOOK, notify_admin_actions=True,
     ) is False
     assert should_notify(
         mission_id="system_admin", status="SUCCEEDED", output=None,
-        webhook_url=WEBHOOK,
+        webhook_url=WEBHOOK, notify_admin_actions=True,
     ) is False
     assert should_notify(
         mission_id="system_admin", status="SUCCEEDED",
         output={"actions_taken": "save_mission"}, webhook_url=WEBHOOK,
+        notify_admin_actions=True,
     ) is False
     assert should_notify(mission_id=None, status=None, webhook_url=WEBHOOK) is False
+
+
+def test_succeeded_admin_flag_off_does_not_notify():
+    """The mission id alone never notifies — only the harness flag does."""
+    sender = FakeSender()
+    assert (
+        _notify(
+            "SUCCEEDED",
+            mission_id="system_admin",
+            output={"actions_taken": ["save_mission"]},
+            _sender=sender,
+        )
+        is False
+    )
+    assert sender.calls == []
 
 
 # --- message content ---

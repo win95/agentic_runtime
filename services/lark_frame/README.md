@@ -37,12 +37,14 @@ LARK_APP_ID=cli_... LARK_APP_SECRET=... \
 | `LARK_BOT_OPEN_ID` | no | Override for @bot detection; unset = fetched via `bot/v3/info` at startup, loose mode (any mention routes) when that fails. |
 | `LARK_TRANSPORT` | no | `webhook` (default) or `websocket`. |
 | `FRAME_HOST` / `FRAME_PORT` | no | Default `0.0.0.0:8000`. |
+| `FRAME_HEALTH_PORT` | no | Health-only server in `websocket` mode, default `8002` (`FRAME_PORT` 8000 is taken by the platform). |
 | `REDIS_URL` | no | Durable dedupe (seen-set). Unset = in-memory (lost on restart). |
 
 ## Health
 
 - `GET /healthz` — liveness: `{"status": "ok", "transport": ..., "uptime_seconds": N}`.
 - `GET /readyz` — 200 only when the platform's `GET /health` answers.
+- In `websocket` mode the two endpoints run on a separate health-only server (`FRAME_HEALTH_PORT`, default `8002`), started before the WS connects — so `/healthz` answers even while the WS is down/reconnecting. It serves no POST routes (`/lark/events` is 404 there).
 
 ## Files
 

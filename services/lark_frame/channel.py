@@ -6,7 +6,10 @@ owns the connection: outbound WS (no public URL needed, runs local /
 behind NAT), auto-reconnect (``reconnecting`` / ``reconnected`` events),
 and its own Deduper on top of the frame's seen-set. Card callbacks
 arrive on the same connection as ``cardAction`` events — no
-``/lark/card`` URL, no 1s HTTP challenge, no hand-rolled SHA1.
+``/lark/card`` URL, no 1s HTTP challenge, no hand-rolled SHA1. Health
+(D-LARK-18) runs on a separate health-only server
+(``FRAME_HEALTH_PORT``, default 8002) started before ``connect()``,
+so ``/healthz`` answers even while the WS is down.
 
 The channel SDK is legacy (supported until 2027-06-02); its successor
 is the standalone ``lark-channel-sdk`` (import ``lark_channel``) — that
@@ -26,6 +29,7 @@ from services.lark_frame.webhook import (
     FrameState,
     dispatch_card_action,
     handle_message_event,
+    start_health_server,
 )
 
 logger = logging.getLogger(__name__)
@@ -69,6 +73,12 @@ async def run_channel(state: FrameState) -> None:
     """Connect the WS channel forever (auto-reconnect is the SDK's)."""
     from lark_oapi.channel import FeishuChannel
 
+    # Liveness for the supervisor (D-LARK-18): the channel opens no
+    # HTTP server of its own, so the health server runs alongside it
+    # on FRAME_HEALTH_PORT (default 8002). Started before connect()
+    # so /healthz answers even while the WS is down/reconnecting.
+    # A bind failure raises — fail fast at startup.
+    start_health_server(state)
     cfg = state.config
     state.ensure_bot_open_id()
     channel = FeishuChannel(

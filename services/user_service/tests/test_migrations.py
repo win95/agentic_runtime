@@ -33,16 +33,24 @@ def test_user_service_migrations_upgrade_head(tmp_path, monkeypatch):
         version = conn.execute(
             "SELECT version_num FROM alembic_version_user_service"
         ).fetchall()
-        assert version == [("0001",)]
+        assert version == [("0002",)]
         tables = {
             row[0]
             for row in conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
-        assert {"users", "alembic_version_user_service"} <= tables
+        assert {
+            "users",
+            "user_identities",
+            "alembic_version_user_service",
+        } <= tables
         cols = [row[1] for row in conn.execute("PRAGMA table_info(users)")]
         assert {"id", "email", "password_hash", "role", "is_active"} <= set(cols)
+        id_cols = [
+            row[1] for row in conn.execute("PRAGMA table_info(user_identities)")
+        ]
+        assert {"id", "provider", "external_id", "user_id"} <= set(id_cols)
     finally:
         conn.close()
 

@@ -57,6 +57,7 @@ def load_config() -> FrameConfig:
         bot_open_id=_env("LARK_BOT_OPEN_ID") or None,
         host=_env("FRAME_HOST", "0.0.0.0"),
         port=int(_env("FRAME_PORT", "8000") or 8000),
+        health_port=int(_env("FRAME_HEALTH_PORT", "8002") or 8002),
         redis_url=_env("REDIS_URL") or None,
         transport=transport,
     )
