@@ -22,6 +22,15 @@ import asyncio
 import json
 import logging
 
+# NOTE: this import MUST stay at module level, never moved inside
+# run_channel. lark_oapi/ws/client.py captures
+# asyncio.get_event_loop() at import time into a module-global loop
+# that start() later drives with run_until_complete. Importing it
+# from inside run_channel (under asyncio.run) binds that global to
+# the already-running loop, and start() then dies with
+# "This event loop is already running" (seen live 2026-11-26).
+from lark_oapi.channel import FeishuChannel  # noqa: E402
+
 from services.lark_frame.routing import (
     NormalizedMessage,
 )
@@ -71,8 +80,6 @@ def normalize_channel_message(msg) -> NormalizedMessage | None:
 
 async def run_channel(state: FrameState) -> None:
     """Connect the WS channel forever (auto-reconnect is the SDK's)."""
-    from lark_oapi.channel import FeishuChannel
-
     # Liveness for the supervisor (D-LARK-18): the channel opens no
     # HTTP server of its own, so the health server runs alongside it
     # on FRAME_HEALTH_PORT (default 8002). Started before connect()
