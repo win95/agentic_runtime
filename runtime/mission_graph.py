@@ -365,6 +365,11 @@ def deep_agent_node(state: MissionState) -> dict:
         # compile below).
         agent_obj = resolve_agent(agent_id, mission, agent_version)
         context["agent"] = agent_obj
+        # Lark scope (agent_lark_me): the agent instance carries this
+        # run's input so its scope policy (LarkAgent.scope_tool) can
+        # check tool calls against the input's chat_id. Fresh instance
+        # per run (resolve_agent), so no state leaks across runs.
+        agent_obj.execution_input = context.get("input") or {}
 
         # Layer 4: MCP tools go through the registry permission check
         # like built-in tools. load_mcp_tools() registers only the MCP

@@ -69,6 +69,13 @@ class BaseAgent:
         self.agent_id = agent_id
         self.mission = mission
         self.agent_version = agent_version
+        # This run's execution input (set by the Mission Graph right
+        # after resolve_agent, before the tool list is built). Agents
+        # whose scope policy needs the input — LarkAgent checks tool
+        # calls against input["chat_id"] — read it here. Empty until
+        # the graph sets it; a policy that needs input must treat an
+        # empty input as "nothing is in scope" (fail-closed).
+        self.execution_input: dict = {}
 
     @property
     def name(self) -> str:

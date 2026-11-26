@@ -103,6 +103,7 @@ langgraph-prebuilt==1.1.1
 langgraph-runtime-inmem==0.37.1
 langgraph-sdk==0.4.14
 langsmith==0.14.17
+lark-oapi==1.9.0
 Mako==1.4.3
 MarkupSafe==3.0.4
 matplotlib==3.11.2
@@ -194,7 +195,9 @@ vine==5.1.0
 watchfiles==1.3.0
 wcmatch==12.0.1
 wcwidth==0.9.4
-websockets==17.4
+# websockets is capped <16 by lark-oapi (agent_lark_me, 2026-11-26);
+# it was 17.4 before the Lark work. langgraph_sdk still imports fine.
+websockets==15.0.1
 Werkzeug==3.1.9
 xxhash==4.0.2
 yarl==1.25.1

@@ -10,6 +10,7 @@ structure.
 from runtime.agents.admin import AdminAgent  # noqa: F401 — self-registers on import
 from runtime.agents.base import AgentDefinition, BaseAgent
 from runtime.agents.hotel import HotelReceptionistAgent  # noqa: F401 — self-registers on import
+from runtime.agents.lark import LarkAgent  # noqa: F401 — self-registers on import
 from runtime.agents.registry import (
     canonical_capability_name,
     register_agent_class,
@@ -23,6 +24,7 @@ __all__ = [
     "AgentDefinition",
     "BaseAgent",
     "HotelReceptionistAgent",
+    "LarkAgent",
     "canonical_capability_name",
     "register_agent_class",
     "register_capability",

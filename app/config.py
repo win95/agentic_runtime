@@ -28,6 +28,16 @@ class Settings(BaseSettings):
     # values MUST match wherever both services run.
     jwt_secret: str = ""
 
+    # User service (services/user_service) — for the Lark user sync
+    # (POST /lark/users/sync, agent_lark_me D-LARK-11). The platform
+    # calls the service's admin identity endpoints with a shared
+    # service key (X-Service-Key), NOT a minted admin JWT: the user
+    # service requires a JWT sub to be an existing User row, and the
+    # platform cannot know an admin's id. The key must match
+    # USER_SERVICE_API_KEY in the user service's env.
+    user_service_url: str = "http://localhost:8001"
+    user_service_api_key: str = ""
+
     # PostgreSQL (missions, agents, tools, executions, results)
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/agentic_runtime"
 

@@ -42,6 +42,12 @@ dependencies = [
     # agent (runtime/tools/tavily_tools.py). Free tier works; the key
     # comes from TAVILY_API_KEY in .env (see .env.example).
     "tavily-python>=0.8,<1",
+    # lark-oapi: official Lark/Feishu Python SDK for agent_lark_me
+    # (runtime/integrations/lark_client.py + the Lark tools). 1.9.0 is
+    # the version verified against (2026-11-26). It caps websockets at
+    # <16, so requirements.txt pins websockets==15.0.1 (was 17.4) —
+    # langgraph_sdk still imports fine on 15.0.1 (checked 2026-11-26).
+    "lark-oapi>=1.9,<2",
     "qdrant-client>=1.11,<2",
     "neo4j>=5.26,<6",
     "minio>=7.2,<8",

@@ -40,3 +40,23 @@ class UserRead(BaseModel):
 
 class UserUpdate(BaseModel):
     is_active: bool
+
+
+class UserIdentityRead(BaseModel):
+    provider: str
+    external_id: str
+    user_id: str
+
+
+class AdminUserCreate(BaseModel):
+    """Create a user + link one external identity, in one call.
+
+    Service-to-service only (POST /admin/users, X-Service-Key) — the
+    platform's Lark sync uses it. The password is a random unusable
+    hash: a synced user never logs in with a password.
+    """
+
+    email: str = Field(max_length=255, pattern=_EMAIL_PATTERN)
+    provider: str = Field(max_length=32)
+    external_id: str = Field(max_length=255)
+    role: str = "user"

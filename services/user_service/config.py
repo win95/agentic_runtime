@@ -29,6 +29,13 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expire_hours: int = 24
 
+    # Service-to-service key shared with the platform API
+    # (app/config.py: user_service_api_key). The platform calls the
+    # admin identity endpoints with it (X-Service-Key). Empty = every
+    # service-key call fails closed. Must match in both services' env,
+    # like JWT_SECRET.
+    service_api_key: str = ""
+
     # Redis for rate limiting (login/register) — db 2, separate from
     # the platform's Celery broker (db 0) and result backend (db 1).
     redis_url: str = "redis://localhost:6379/2"

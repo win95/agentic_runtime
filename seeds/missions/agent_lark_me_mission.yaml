@@ -1,0 +1,87 @@
+# Mission agent_lark_me_mission — bot Lark: hỏi–đáp trong chat + cảnh báo
+# sự cố (tạo group → thêm người phụ trách → gửi card → retrospective →
+# đổi tên group). Theo tutorial message-development của Lark.
+# A Mission is CONFIG, not a LangGraph.
+mission_id: agent_lark_me_mission
+version: 1
+name: Agent Lark Me Mission
+objective: >
+  Làm bot Lark: trả lời người dùng trong DM/group đúng thread, và xử lý
+  cảnh báo sự cố — tạo group, thêm người phụ trách, gửi card cảnh báo,
+  rồi khi xong việc thì đọc history làm retrospective và đổi tên group
+  đánh dấu resolved. Mọi id (chat_id, message_id, user id) phải lấy từ
+  input hoặc kết quả tool — không bịa.
+
+input_schema:
+  type: object
+  properties:
+    message:
+      type: string
+    chat_id:
+      type: string
+    chat_type:
+      type: string
+    sender_id:
+      type: object
+      properties:
+        union_id:
+          type: string
+        user_id:
+          type: string
+        open_id:
+          type: string
+    message_id:
+      type: string
+    root_id:
+      type: string
+  required:
+    - message
+    - chat_id
+
+execution:
+  mode: autonomous
+  agent_id: agent_lark_me
+  skills:
+    - agent-lark
+    - session-memory
+  # No sandbox: lark_me only calls the Lark API — it never runs code.
+  sandbox: false
+
+capabilities:
+  - lark_messaging
+
+# Harness: security.user_runnable: false (chỉ admin / API key chạy được
+# mission này — frame gọi bằng service API key; xem D-LARK-10),
+# flow_subgraph.enabled: true (skill map 3 flow trong
+# skills/agent-lark/SKILL.md — alert, answer, resolve; xem
+# docs/skill-maps.md). tool_budget caps chống spam: 1 run không tạo quá
+# 2 group / gửi quá 5 tin.
+harness:
+  flow_subgraph:
+    enabled: true
+  security:
+    user_runnable: false
+  tool_budget:
+    tools:
+      - lark_send_message
+      - lark_reply_message
+      - lark_create_group
+      - lark_add_members
+      - lark_update_group
+    max_result_tokens: 6000
+    max_calls:
+      lark_send_message: 5
+      lark_reply_message: 3
+      lark_create_group: 2
+      lark_add_members: 3
+      lark_update_group: 2
+
+# Output: tin nhắn Lark đã gửi + hành động đã làm (không có file —
+# lark_me không xuất báo cáo). User lấy qua GET /executions/{id}/result.
+output_schema:
+  type: object
+  properties:
+    answer:
+      type: string
+    actions_taken:
+      type: array
