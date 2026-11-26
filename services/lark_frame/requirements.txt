@@ -1,6 +1,10 @@
-# Lark frame — only what the frame imports (stdlib + these three).
+# Lark frame — only what the frame imports (stdlib + these).
 # Pins match the platform's requirements.txt; keep them in sync.
 lark-oapi==1.9.0
 python-dotenv==1.2.4
 # websockets is capped <16 by lark-oapi (agent_lark_me, 2026-11-26).
 websockets==15.0.1
+# Durable dedupe (SeenSet in Redis, D-LARK-19). Without it the frame
+# falls back to in-memory dedupe and warns at startup (seen live
+# 2026-11-26: "No module named 'redis'").
+redis==5.3.1
