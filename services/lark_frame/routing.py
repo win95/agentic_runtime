@@ -8,13 +8,17 @@ Transport-specific code normalizes its event into a
 Rules, in order (a rule that fails means "no enqueue"):
 1. Only text messages are routed (cards, files, ... are dropped).
 2. The bot's own messages are skipped (sender_type == "app").
-3. Only allowlisted senders route (D-LARK-06) — outsiders get one
+3. Group/topic messages route only when the bot is @-mentioned
+   (mentions carry the bot's open_id). DMs route directly. This
+   check runs BEFORE the allowlist and the rate limit, so chatter
+   that never calls the bot costs nobody a refusal or rate budget
+   (P1-3). A card action (``via_card_action=True``) skips it — a
+   button press on the bot's own card addresses the bot by itself.
+4. Only allowlisted senders route (D-LARK-06) — outsiders get one
    refusal from the frame (rate-limited to 1/hour/user) and no run.
-4. Per-sender rate limit (D-LARK-17): 10 messages/minute/open_id.
+5. Per-sender rate limit (D-LARK-17): 10 messages/minute/open_id.
    The first drop in a window gets one "too fast" notice; the rest
    are silent.
-5. Group/topic messages route only when the bot is @-mentioned
-   (mentions carry the bot's open_id). DMs route directly.
 6. ``session_id`` is per (chat, user): ``"lark-" +
    sha1(chat_id + "|" + open_id)[:16]`` (21 chars, fits the platform's
    64-char session pattern; deterministic, so the frame recomputes it
@@ -204,8 +208,14 @@ def route_message(
     bot_open_id: str | None,
     allowlist: set[str],
     rate_limiter: RateLimiter,
+    via_card_action: bool = False,
 ) -> RouteDecision:
-    """Decide what the frame does with one inbound message."""
+    """Decide what the frame does with one inbound message.
+
+    ``via_card_action``: the operator pressed a button on the bot's
+    own card — that addresses the bot by itself, so the @mention
+    check is skipped (the allowlist + rate limit still apply).
+    """
     if msg.msg_type != "text":
         return RouteDecision("drop", "not_text", message=msg)
     if msg.sender_type == "app":
@@ -213,13 +223,7 @@ def route_message(
     open_id = (msg.sender_id or {}).get("open_id") or ""
     if not open_id:
         return RouteDecision("drop", "no_sender_open_id", message=msg)
-    if open_id not in allowlist:
-        if rate_limiter.allow_refusal(open_id):
-            return RouteDecision("refuse", "not_allowlisted", message=msg)
-        return RouteDecision("drop", "refusal_rate_limited", message=msg)
-    if not rate_limiter.allow_sender(open_id):
-        return RouteDecision("rate_limited", "rate_limited", message=msg)
-    if msg.chat_type in ("group", "topic"):
+    if not via_card_action and msg.chat_type in ("group", "topic"):
         if bot_open_id:
             if bot_open_id not in (msg.mentions or []):
                 return RouteDecision("drop", "not_mentioned", message=msg)
@@ -227,6 +231,12 @@ def route_message(
             # Loose mode (bot open_id unknown — see README): route
             # only when somebody was @-mentioned at all.
             return RouteDecision("drop", "not_mentioned", message=msg)
+    if open_id not in allowlist:
+        if rate_limiter.allow_refusal(open_id):
+            return RouteDecision("refuse", "not_allowlisted", message=msg)
+        return RouteDecision("drop", "refusal_rate_limited", message=msg)
+    if not rate_limiter.allow_sender(open_id):
+        return RouteDecision("rate_limited", "rate_limited", message=msg)
     return RouteDecision(
         "route",
         "ok",

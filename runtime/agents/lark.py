@@ -13,8 +13,9 @@ check against that input:
 
 - the allowed chats start as ``{input chat_id}`` and grow by every
   group ``lark_create_group`` creates in this run;
-- ``lark_update_group`` (rename) is allowed only for groups this run
-  created — never for the chat the user is in;
+- ``lark_update_group`` (rename) is allowed for the run's own chat
+  (the resolve run's input chat IS the incident group) and for
+  groups this run created — never for any other chat;
 - ``lark_send_message`` to a user (``user_id`` / ``open_id``) is allowed
   only to the input sender;
 - ``lark_reply_message`` may only reply in a thread this run takes
@@ -115,11 +116,23 @@ class LarkAgent(BaseAgent):
                 return tool.invoke(kwargs)
             if name == "lark_update_group":
                 target = kwargs.get("chat_id")
-                if not isinstance(target, str) or target not in self._lark_created_chats:
+                # Rename is allowed for the run's own chat (the
+                # resolve run's input chat IS the incident group)
+                # and for groups this run created — nothing else.
+                # _lark_allowed_chats is exactly {input chat} +
+                # created groups, so one membership check covers
+                # both (the created set is checked explicitly so
+                # the intent stays readable if the sets diverge).
+                if not isinstance(target, str) or (
+                    target not in self._lark_created_chats
+                    and target not in self._lark_allowed_chats
+                ):
                     return self._refuse(
                         name,
-                        f"chat_id '{target}' was not created by this run — "
-                        "only groups this run created may be renamed",
+                        f"chat_id '{target}' is not this run's chat "
+                        "and was not created by this run — only the "
+                        "run's own chat or groups it created may be "
+                        "renamed",
                     )
                 return tool.invoke(kwargs)
             if name == "lark_send_message":

@@ -10,7 +10,12 @@ codebase's tool-failure pattern.
 Capability: ``lark_messaging``. Write tools are NOT read-only; the two
 reads (``lark_get_group``, ``lark_get_history``) are. ``lark_update_group``
 renames a group, so it carries ``destructive_target_args=("chat_id",)``
-— the permission layer asks before it runs (Layer 2).
+— the guard hook still checks the target (input chat or a group this
+run created) — but NOT human approval (``requires_approval=False``):
+a Lark user has no way to approve on the platform, and the guard +
+agent scope are the authorization (P1-2). ``lark_create_group`` and
+``lark_add_members`` carry no destructive target args, so they were
+never approval-gated in the first place.
 """
 
 from __future__ import annotations
@@ -224,9 +229,10 @@ _TOKEN_BUDGET = 4000
 def _truncate_to_token_budget(messages: list[dict]) -> tuple[list[dict], bool]:
     """Keep the newest messages that fit ~4,000 tokens (oldest first).
 
-    Messages arrive oldest-first (ByCreateTimeAsc). Token cost is a
-    rough ~4 chars/token + 10/message for the fields. At least the
-    newest message is always kept, even if it alone exceeds the budget.
+    Messages arrive oldest-first (fetched ByCreateTimeDesc, then
+    reversed). Token cost is a rough ~4 chars/token + 10/message
+    for the fields. At least the newest message is always kept,
+    even if it alone exceeds the budget.
     """
     kept: list[dict] = []
     used = 0
@@ -262,7 +268,10 @@ def lark_update_group(
 
 # Register the 8 tools under the lark_messaging capability.
 # Reads are read-only; writes are not. update_group carries its
-# destructive target so the permission layer asks first (Layer 2).
+# destructive target so the guard hook checks it — but no human
+# approval (requires_approval=False): the operator is a Lark user
+# who cannot approve on the platform, and the guard + LarkAgent
+# scope already authorize the call (P1-2).
 registry.register(
     lark_create_group, capability="lark_messaging", permission="lark:write",
     timeout_seconds=60, read_only=False,
@@ -295,4 +304,5 @@ registry.register(
     lark_update_group, capability="lark_messaging", permission="lark:write",
     timeout_seconds=60, read_only=False,
     destructive_target_args=("chat_id",),
+    requires_approval=False,
 )

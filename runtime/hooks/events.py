@@ -102,6 +102,12 @@ class HookContext:
     session_id: str = ""
     allowed_tools: list = field(default_factory=list)
     capabilities: list = field(default_factory=list)
+    # The run's agent object, when the dispatcher has one (the
+    # mission graph sets it). Hooks read only generic attributes
+    # off it — e.g. the set of ids this run created, which
+    # guard_destructive_target accepts as a target. None for
+    # dispatches without an agent (schedules, session-end, tests).
+    agent: object | None = None
 
 
 @dataclass

@@ -23,11 +23,18 @@ the event routes; in websocket mode they run on a separate health-only
 server (``start_health_server``, ``FRAME_HEALTH_PORT``, default 8002),
 because the WS channel opens no HTTP server of its own.
 
-Verification, in order: SHA256 signature (``X-Lark-Signature`` =
-sha256(timestamp + nonce + encrypt_key + body), only when an encrypt
-key is set — the SDK's exact algorithm), ``app_id`` in the event
-header, verification token for ``url_verification``. Any failure is
-401 (fail-closed); nothing is logged that contains a secret, a token
+Verification, in order, on every request: SHA256 signature
+(``X-Lark-Signature`` = sha256(timestamp + nonce + encrypt_key +
+body) — only Lark, holding the encrypt key, can produce one — plus
+a freshness check: the ``X-Lark-Request-Timestamp`` must be within
+5 minutes of now, so a captured request cannot be replayed later),
+then the verification token and ``app_id`` in the event header
+(``event_callback``), or the top-level token (``card.action.trigger``
+— card callbacks carry no ``app_id``; the signature + token are the
+authentication there). Webhook mode refuses to start without
+``LARK_ENCRYPT_KEY`` and ``LARK_VERIFICATION_TOKEN`` (fail-fast in
+``load_config``). Bodies are capped at 1 MB. Any failure is 401
+(fail-closed); nothing is logged that contains a secret, a token
 or message content beyond the routing decision.
 """
 
@@ -61,6 +68,11 @@ logger = logging.getLogger(__name__)
 
 MISSION_ID = "agent_lark_me_mission"
 
+# A signed request older than this is a replay, not a live event.
+SIGNATURE_MAX_AGE_SECONDS = 300
+# Lark event bodies are small JSON; anything larger is not a Lark event.
+MAX_CONTENT_LENGTH = 1_000_000
+
 
 @dataclass
 class FrameConfig:
@@ -80,6 +92,9 @@ class FrameConfig:
     health_port: int = 8002
     redis_url: str | None = None
     transport: str = "webhook"
+    # Mission to enqueue (env LARK_MISSION_ID; default is the
+    # agent_lark_me mission).
+    mission_id: str = MISSION_ID
 
 
 class FrameState:
@@ -114,21 +129,37 @@ class FrameState:
 
 
 def verify_signature(headers, body: bytes, encrypt_key: str) -> bool:
-    """SHA256 request signature (the SDK's exact algorithm).
+    """SHA256 request signature (the SDK's exact algorithm) + freshness.
 
-    signature = sha256(timestamp + nonce + encrypt_key + body). Only
-    enforced when an encrypt key is set — without one Lark sends no
-    signature to check.
+    signature = sha256(timestamp + nonce + encrypt_key + body).
+    Fail-closed: without an encrypt key there is nothing to verify
+    against, so verification fails (webhook mode refuses to start
+    without a key — see ``load_config``). The timestamp must parse
+    and be within ``SIGNATURE_MAX_AGE_SECONDS`` of now, so a captured
+    request cannot be replayed later.
     """
     if not encrypt_key:
-        return True
+        return False
     timestamp = headers.get("X-Lark-Request-Timestamp") or ""
     nonce = headers.get("X-Lark-Request-Nonce") or ""
     signature = headers.get("X-Lark-Signature") or ""
+    try:
+        ts = int(timestamp)
+    except (TypeError, ValueError):
+        return False
+    if abs(time.time() - ts) > SIGNATURE_MAX_AGE_SECONDS:
+        return False
     expected = hashlib.sha256(
         (timestamp + nonce + encrypt_key).encode("utf-8") + body
     ).hexdigest()
     return hmac.compare_digest(signature, expected)
+
+
+def _token_matches(token: str, verification_token: str) -> bool:
+    """A verification token matches only when one is configured."""
+    if not verification_token:
+        return False
+    return hmac.compare_digest(token or "", verification_token)
 
 
 def decrypt_payload(body: dict, encrypt_key: str) -> dict:
@@ -214,7 +245,7 @@ def handle_routed_message(
         platform_io.enqueue(
             cfg.platform_base_url,
             cfg.platform_api_key,
-            mission_id=MISSION_ID,
+            mission_id=cfg.mission_id,
             input_data={
                 "message": msg.text,
                 "chat_id": msg.chat_id,
@@ -303,6 +334,17 @@ def handle_card_action(state: FrameState, payload: dict) -> None:
     The HTTP response (a toast) is already on its way — this runs
     after it, so a platform failure here cannot ask Lark to retry;
     the user gets a 'system busy' message in the chat instead.
+
+    The operator goes through the same routing as a message
+    (allowlist + 10/min rate limit — a button press is not a free
+    pass into the platform). The chat id comes from the event
+    context (``context.open_chat_id`` — Lark puts the card's own chat
+    there, in both transports), cross-checked against the ``chat_id``
+    in the button value: a mismatch is refused, because the value is
+    attacker-controlled text on a card anyone in the group can copy.
+    When the context carries no chat id (older payloads), the value
+    is trusted as a fallback — the allowlist on the operator is then
+    the real gate — and the fallback is logged.
     """
     cfg = state.config
     action = payload.get("action") or {}
@@ -316,18 +358,78 @@ def handle_card_action(state: FrameState, payload: dict) -> None:
         logger.warning("Card action value is not an object: %r", value_raw[:200])
         return
     action_name = value.get("action") or ""
-    chat_id = value.get("chat_id") or ""
+    value_chat_id = value.get("chat_id") or ""
     incident_ref = value.get("incident_ref") or ""
-    if not action_name or not chat_id:
+    if not action_name or not value_chat_id:
         logger.warning("Card action missing action/chat_id: %r", value_raw[:200])
         return
     context = payload.get("context") or {}
     open_message_id = context.get("open_message_id") or ""
+    context_chat_id = context.get("open_chat_id") or ""
+    if context_chat_id and context_chat_id != value_chat_id:
+        logger.warning(
+            "Card action chat_id mismatch: context=%r value=%r",
+            context_chat_id,
+            value_chat_id,
+        )
+        return
+    chat_id = context_chat_id or value_chat_id
+    if not context_chat_id:
+        logger.warning(
+            "Card action without context open_chat_id — trusting "
+            "value.chat_id; allowlist on the operator is the gate"
+        )
     operator = payload.get("operator") or {}
     operator_id = operator.get("operator_id") or {}
     open_id = operator_id.get("open_id") or ""
     if not open_id:
         logger.warning("Card action has no operator open_id")
+        return
+    # Same gate as a message: allowlist + rate limit. A button press
+    # on the bot's own card addresses the bot, so the @mention check
+    # is skipped (via_card_action=True).
+    card_msg = NormalizedMessage(
+        message_id=open_message_id,
+        root_id=None,
+        chat_id=chat_id,
+        chat_type="group",
+        sender_type="user",
+        sender_id=operator_id,
+        text=f"[card action {action_name} for {incident_ref}]",
+        mentions=[],
+        msg_type="text",
+    )
+    decision = route_message(
+        card_msg,
+        bot_open_id=state.bot_open_id,
+        allowlist=cfg.allowlist,
+        rate_limiter=state.rate_limiter,
+        via_card_action=True,
+    )
+    if decision.action == "refuse":
+        platform_io.send_lark_text(
+            cfg.app_id, cfg.app_secret, chat_id=chat_id, text=REFUSAL_TEXT
+        )
+        state.log_event(
+            decision="card_refuse", action=action_name, chat_id=chat_id
+        )
+        return
+    if decision.action == "rate_limited":
+        if state.rate_limiter.allow_rate_notice(open_id):
+            platform_io.send_lark_text(
+                cfg.app_id, cfg.app_secret, chat_id=chat_id, text=RATE_LIMIT_TEXT
+            )
+        state.log_event(
+            decision="card_rate_limited", action=action_name, chat_id=chat_id
+        )
+        return
+    if decision.action != "route":
+        state.log_event(
+            decision="card_drop",
+            action=action_name,
+            chat_id=chat_id,
+            reason=decision.reason,
+        )
         return
     try:
         synced = platform_io.sync_user(
@@ -344,7 +446,7 @@ def handle_card_action(state: FrameState, payload: dict) -> None:
         platform_io.enqueue(
             cfg.platform_base_url,
             cfg.platform_api_key,
-            mission_id=MISSION_ID,
+            mission_id=cfg.mission_id,
             input_data={
                 "message": text,
                 "chat_id": chat_id,
@@ -355,7 +457,7 @@ def handle_card_action(state: FrameState, payload: dict) -> None:
                 "action": action_name,
                 "incident_ref": incident_ref,
             },
-            session_id=session_id_for(chat_id, open_id),
+            session_id=decision.session_id or session_id_for(chat_id, open_id),
             user_id=user_id,
         )
         state.log_event(
@@ -441,7 +543,15 @@ def make_handler(state: FrameState):
             self.wfile.write(body)
 
         def _read_json(self) -> tuple[dict | None, bytes]:
-            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                return None, b""
+            if length > MAX_CONTENT_LENGTH:
+                logger.warning(
+                    "lark frame http: body too large (%s bytes)", length
+                )
+                return None, b""
             raw = self.rfile.read(length) if length > 0 else b""
             if not raw:
                 return None, raw
@@ -474,20 +584,41 @@ def make_handler(state: FrameState):
                 self._send_json(400, {"error": str(exc)})
                 return
             if body.get("type") == "url_verification":
-                token = body.get("token") or ""
-                if not state.config.verification_token or not hmac.compare_digest(
-                    token, state.config.verification_token
+                if not _token_matches(
+                    body.get("token") or "", state.config.verification_token
                 ):
                     self._send_json(401, {"error": "bad verification token"})
                     return
                 # The challenge must be returned verbatim, within 1s.
                 self._send_json(200, {"challenge": body.get("challenge")})
                 return
+            # Token + app_id are checked on EVERY event, not only on
+            # url_verification (they used to be skipped here). The
+            # event header carries both; a card callback carries the
+            # token at the top level and no app_id at all — for cards
+            # the signature + token are the authentication.
             header = body.get("header") or {}
-            app_id = header.get("app_id") or ""
-            if app_id and app_id != state.config.app_id:
-                state.log_event(decision="drop", reason="bad_app_id", path=path)
-                self._send_json(401, {"error": "bad app_id"})
+            if body.get("type") == "event_callback":
+                if not _token_matches(
+                    header.get("token") or "", state.config.verification_token
+                ):
+                    state.log_event(decision="drop", reason="bad_token", path=path)
+                    self._send_json(401, {"error": "bad verification token"})
+                    return
+                app_id = header.get("app_id") or ""
+                if not app_id or app_id != state.config.app_id:
+                    state.log_event(decision="drop", reason="bad_app_id", path=path)
+                    self._send_json(401, {"error": "bad app_id"})
+                    return
+            elif body.get("type") == "card.action.trigger":
+                if not _token_matches(
+                    body.get("token") or "", state.config.verification_token
+                ):
+                    state.log_event(decision="drop", reason="bad_token", path=path)
+                    self._send_json(401, {"error": "bad verification token"})
+                    return
+            else:
+                self._send_json(200, {})
                 return
             if path == "/lark/events":
                 if body.get("type") != "event_callback":
@@ -582,7 +713,20 @@ def start_health_server(
 
 
 def run_webhook(state: FrameState) -> None:
-    """Serve the webhook frame forever (ThreadingHTTPServer)."""
+    """Serve the webhook frame forever (ThreadingHTTPServer).
+
+    Webhook mode refuses to start without an encrypt key and a
+    verification token — without them the signature/token checks
+    have nothing to verify against and the frame would be
+    fail-open (P0-1). WS mode is unaffected (no HTTP event routes).
+    """
+    if state.config.transport == "webhook" and (
+        not state.config.encrypt_key or not state.config.verification_token
+    ):
+        raise SystemExit(
+            "LARK_ENCRYPT_KEY / LARK_VERIFICATION_TOKEN are required in "
+            "webhook mode — without them event verification is fail-open"
+        )
     state.ensure_bot_open_id()
     server = ThreadingHTTPServer(
         (state.config.host, state.config.port), make_handler(state)

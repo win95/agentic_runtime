@@ -61,6 +61,12 @@ harness:
     enabled: true
   security:
     user_runnable: false
+  # Failure notice (D-LARK-16): a FAILED run sends one short error
+  # message into the Lark chat it came from. Opt-in here (default
+  # false) — the worker reads it via effective_harness, like the
+  # Slack admin-action flag.
+  notifications:
+    lark_failure_notice: true
   tool_budget:
     tools:
       - lark_send_message

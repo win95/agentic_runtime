@@ -591,6 +591,11 @@ def deep_agent_node(state: MissionState) -> dict:
             tool_budget_tools=frozenset(_run_harness.tool_budget.tools),
             tool_budget_max_result_tokens=_run_harness.tool_budget.max_result_tokens,
             tool_budget_max_calls=dict(_run_harness.tool_budget.max_calls),
+            # The run's agent object, so hooks can read per-run agent
+            # state (e.g. the Lark agent's set of groups this run
+            # created — guard_destructive_target accepts those as
+            # targets). Resolved above, before this middleware.
+            agent=context.get("agent"),
         )
         # Part 1 (b): the per-run middleware list. For missions that
         # must not see any built-in tool (hotel only), append the

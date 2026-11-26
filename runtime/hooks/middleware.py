@@ -171,12 +171,14 @@ class HookMiddleware(AgentMiddleware):
         tool_budget_tools: frozenset[str] | None = None,
         tool_budget_max_result_tokens: int = 0,
         tool_budget_max_calls: dict[str, int] | None = None,
+        agent=None,
     ):
         self.registry = registry
         self.execution_id = execution_id
         self.mission_id = mission_id
         self.tenant = tenant
         self.agent_id = agent_id
+        self.agent = agent
         self.mission = mission or {}
         self.input_data = input_data or {}
         self.evidence_count = evidence_count
@@ -256,6 +258,7 @@ class HookMiddleware(AgentMiddleware):
             session_id=self.session_id,
             allowed_tools=list(self.allowed_tools),
             capabilities=list(self.capabilities),
+            agent=self.agent,
         )
 
     def _record(self, event: HookEvent, decisions, **extra) -> None:

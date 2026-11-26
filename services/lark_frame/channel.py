@@ -119,14 +119,20 @@ async def run_channel(state: FrameState) -> None:
 
     async def on_card_action(event) -> None:
         # Rebuild the webhook-shaped payload from the SDK event so the
-        # one card dispatcher serves both transports.
+        # one card dispatcher serves both transports. The SDK's
+        # CardActionEvent carries the card's chat_id — it goes into
+        # the context as open_chat_id, the same field the webhook
+        # payload carries (see handle_card_action).
         action = getattr(event, "action", None)
         value = getattr(action, "value", None)
         operator = getattr(event, "operator", None)
         payload = {
             "type": "card.action.trigger",
             "action": {"value": value},
-            "context": {"open_message_id": getattr(event, "message_id", "")},
+            "context": {
+                "open_message_id": getattr(event, "message_id", ""),
+                "open_chat_id": getattr(event, "chat_id", "") or "",
+            },
             "operator": {
                 "operator_id": {
                     "open_id": getattr(operator, "open_id", "") or "",

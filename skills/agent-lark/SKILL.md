@@ -80,8 +80,10 @@ hỏi lại user, không đoán open_id.
 - Mỗi nút có `value` là JSON string:
   `{"action": "resolve"|"assign"|"escalate", "chat_id": "<group chat_id>", "incident_ref": "<alert message_id>"}`.
   `incident_ref` là message_id của tin cảnh báo.
-- Nút bấm được xử lý ở Step 4 của plan (card callback) — handler parse
-  `value` rồi enqueue execution resolve với input lấy từ `value`.
+- Nút bấm được xử lý ở Step 4 của plan (card callback) — handler lấy
+  `chat_id` từ context của event (cross-check với `value`), kiểm tra
+  allowlist + rate limit của người bấm rồi mới enqueue execution
+  resolve với input lấy từ `value`.
 
 ## Output — định dạng bắt buộc
 
@@ -95,8 +97,10 @@ hỏi lại user, không đoán open_id.
 - Không bịa chat_id, message_id, user id hay kết quả tool — mọi id lấy
   từ input hoặc kết quả tool trả về.
 - Không @all.
-- Không đổi tên group không phải do run này tạo (`lark_update_group`
-  chỉ đổi tên group do chính run này tạo — scope_tool chặn ngoài ra).
+- Chỉ đổi tên group của run này — chat trong input hoặc group do
+  chính run này tạo (`lark_update_group`; scope_tool + guard chặn
+  ngoài ra). Không cần bước duyệt trên platform: người dùng Lark
+  không có đường nào duyệt, và guard + scope đã là ủy quyền đủ.
 - Không gửi tin vào chat khác chat của run này (scope_tool chặn).
 - Không dùng session memory để lấy context vụ việc khi resolve — đọc
   history bằng `lark_get_history`.

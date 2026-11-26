@@ -28,6 +28,17 @@ from services.user_service.models import User, UserIdentity
 router = APIRouter(tags=["admin"])
 
 
+def _require_active(user: User) -> None:
+    """A disabled account must not be (re)linked or returned by sync.
+
+    The JWT path rejects disabled users with 401 (dependencies.py);
+    these service-key endpoints use 403 — the caller is
+    authenticated, the target account is disabled.
+    """
+    if not user.is_active:
+        raise HTTPException(status_code=403, detail="User account is disabled")
+
+
 @router.get("/admin/users", response_model=list[schemas.UserRead])
 def list_users(
     db: Session = Depends(get_db),
@@ -94,12 +105,15 @@ def create_user_with_identity(
         user = db.get(User, existing.user_id)
         if user is None:  # identity without a user — cannot happen (FK)
             raise HTTPException(status_code=500, detail="Identity has no user")
+        _require_active(user)
         response.status_code = 200
         return user
     user = db.query(User).filter(User.email == email).first()
     if user is not None:
         # Email already registered (e.g. the user signed up by hand):
         # attach the identity to that account instead of a second one.
+        # A disabled account is not linked — it stays unusable.
+        _require_active(user)
         db.add(UserIdentity(provider=provider, external_id=external_id, user_id=user.id))
         try:
             db.commit()
@@ -175,4 +189,5 @@ def get_user_by_identity(
     user = db.get(User, identity.user_id)
     if user is None:
         raise HTTPException(status_code=500, detail="Identity has no user")
+    _require_active(user)
     return user

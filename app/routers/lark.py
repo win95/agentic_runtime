@@ -63,6 +63,10 @@ def _user_service_get_by_identity(provider: str, external_id: str) -> dict | Non
         ) from exc
     if resp.status_code == 404:
         return None
+    if resp.status_code == 403:
+        # The user service refuses disabled accounts (P1-5) — pass
+        # that through instead of masking it as a 502.
+        raise HTTPException(status_code=403, detail="user account is disabled")
     if resp.status_code != 200:
         raise HTTPException(
             status_code=502,
@@ -91,6 +95,10 @@ def _user_service_create_user(email: str, provider: str, external_id: str) -> di
             status_code=502, detail=f"user service unreachable: {exc}"
         ) from exc
     if resp.status_code not in (200, 201):
+        if resp.status_code == 403:
+            raise HTTPException(
+                status_code=403, detail="user account is disabled"
+            )
         raise HTTPException(
             status_code=502,
             detail=f"user service create failed ({resp.status_code})",
@@ -111,6 +119,12 @@ def sync_lark_user(payload: schemas.LarkUserSyncCreate):
         raise HTTPException(status_code=422, detail="external_id must not be empty")
     linked = _user_service_get_by_identity(provider, external_id)
     if linked is not None:
+        # Defense in depth (P1-5): the user service refuses disabled
+        # accounts itself, but a stale one could still return one.
+        if linked.get("is_active", True) is False:
+            raise HTTPException(
+                status_code=403, detail="user account is disabled"
+            )
         return schemas.LarkUserSyncRead(
             user_id=linked["id"], email=linked["email"], created=False
         )

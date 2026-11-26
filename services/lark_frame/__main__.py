@@ -13,6 +13,7 @@ Environment (see services/lark_frame/README.md):
 - LARK_BOT_OPEN_ID — override for @bot detection (optional; the
   frame fetches it via bot/v3/info when unset)
 - LARK_TRANSPORT / FRAME_HOST / FRAME_PORT / REDIS_URL
+- LARK_MISSION_ID — mission to enqueue (default agent_lark_me_mission)
 
 The frame also loads the repo-root ``.env`` at startup (shell env
 wins over file values), so the vars can live in the same file the
@@ -68,11 +69,22 @@ def load_config() -> FrameConfig:
     transport = _env("LARK_TRANSPORT", "webhook").lower()
     if transport not in ("webhook", "websocket"):
         raise SystemExit(f"unknown LARK_TRANSPORT: {transport!r}")
+    verification_token = _env("LARK_VERIFICATION_TOKEN")
+    encrypt_key = _env("LARK_ENCRYPT_KEY")
+    if transport == "webhook" and (not verification_token or not encrypt_key):
+        # Fail-fast (P0-1): without these the webhook signature /
+        # token checks have nothing to verify against and the frame
+        # would accept forged events. WS mode needs neither (the
+        # channel SDK authenticates with app_id/app_secret).
+        raise SystemExit(
+            "LARK_ENCRYPT_KEY / LARK_VERIFICATION_TOKEN are required in "
+            "webhook mode — set them in .env (Step 1 of the lark_me plan)"
+        )
     return FrameConfig(
         app_id=app_id,
         app_secret=app_secret,
-        verification_token=_env("LARK_VERIFICATION_TOKEN"),
-        encrypt_key=_env("LARK_ENCRYPT_KEY"),
+        verification_token=verification_token,
+        encrypt_key=encrypt_key,
         platform_base_url=_env("PLATFORM_BASE_URL", "http://localhost:8000"),
         platform_api_key=_env("PLATFORM_API_KEY"),
         allowlist=allowlist,
@@ -82,6 +94,7 @@ def load_config() -> FrameConfig:
         health_port=int(_env("FRAME_HEALTH_PORT", "8002") or 8002),
         redis_url=_env("REDIS_URL") or None,
         transport=transport,
+        mission_id=_env("LARK_MISSION_ID", "agent_lark_me_mission"),
     )
 
 

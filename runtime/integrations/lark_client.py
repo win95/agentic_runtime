@@ -391,16 +391,21 @@ def list_messages(
     limit: int = 100,
     start_time: int | None = None,
     end_time: int | None = None,
-    sort_type: str = "ByCreateTimeAsc",
+    sort_type: str = "ByCreateTimeDesc",
 ) -> dict:
     """GET /open-apis/im/v1/messages — paginated history of a chat.
 
     Follows ``page_token`` until ``limit`` messages are collected or
     there are no more pages. ``limit`` is capped at 100 (D-LARK-20).
-    Returns ``{"messages": [...], "count": n, "truncated": bool}`` where
-    each message is ``{message_id, sender_id, create_time, message_type,
-    content}`` (text content only; other types are named, never
-    invented), or ``{"error": ...}``.
+    Fetches newest-first (``ByCreateTimeDesc`` — the default) so a
+    capped history is the NEWEST messages, then reverses the result
+    so callers still see oldest-first order. Returns
+    ``{"messages": [...], "count": n, "truncated": bool}`` where
+    ``truncated`` is the API's own ``has_more`` at the point paging
+    stopped (not "we collected exactly the cap"), and each message is
+    ``{message_id, sender_id, create_time, message_type, content}``
+    (text content only; other types are named, never invented), or
+    ``{"error": ...}``.
     """
     if not chat_id or not chat_id.strip():
         return {"error": "chat_id must not be empty"}
@@ -412,6 +417,7 @@ def list_messages(
         return {"error": str(exc)}
     messages: list[dict] = []
     page_token: str | None = None
+    has_more = False
     while len(messages) < capped:
         builder = (
             model.ListMessageRequest.builder()
@@ -451,9 +457,14 @@ def list_messages(
                     "content": content if isinstance(content, str) else None,
                 }
             )
-        if not getattr(data, "has_more", False):
+        has_more = bool(getattr(data, "has_more", False))
+        if not has_more:
             break
         page_token = getattr(data, "page_token", None)
         if not page_token:
             break
-    return {"messages": messages, "count": len(messages), "truncated": len(messages) >= capped}
+    if sort_type == "ByCreateTimeDesc":
+        # Fetched newest-first; callers (token guard, retrospective)
+        # expect oldest-first.
+        messages.reverse()
+    return {"messages": messages, "count": len(messages), "truncated": has_more}

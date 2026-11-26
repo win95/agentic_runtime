@@ -76,11 +76,18 @@ class NotificationsHarness(BaseModel):
     when its output reports a non-empty ``actions_taken`` list — the
     "admin action" scope (tran's choice, 2026-11-11). Failures notify
     for every mission regardless of this flag.
+
+    ``lark_failure_notice`` is the same opt-in shape for the Lark
+    failure notice (D-LARK-16): when true, a FAILED execution of this
+    mission sends one short error message into the Lark chat it came
+    from. The notifier additionally checks the mission id, so the
+    flag alone on another mission cannot send Lark messages.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     notify_admin_actions: StrictBool = False
+    lark_failure_notice: StrictBool = False
 
 
 class ContextBudgetHarness(BaseModel):

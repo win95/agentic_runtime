@@ -8,7 +8,10 @@ the tools use — NOT a tool call, the run is already over).
 Rules:
 - Only for ``mission_id == "agent_lark_me_mission"`` with a
   ``chat_id`` in the execution input (other missions never get a Lark
-  message, even if their input happens to carry a chat_id).
+  message, even if their input happens to carry a chat_id) AND only
+  when the mission's harness opts in
+  (``notifications.lark_failure_notice`` — the worker passes the
+  flag from ``effective_harness``, like the Slack admin-action flag).
 - Only for status FAILED (not CANCELLED; INTERRUPTED is HITL, not an
   error).
 - Best-effort, never raises, never blocks the worker; a failed send
@@ -27,11 +30,19 @@ _FAILURE_TEXT = "Bot gặp lỗi khi xử lý tin của bạn, vui lòng thử l
 
 
 def notify_lark_execution_failed(
-    *, mission_id: str, execution_input: dict, status: str
+    *,
+    mission_id: str,
+    execution_input: dict,
+    status: str,
+    lark_failure_notice: bool = False,
 ) -> None:
     """Send one short error message when a Lark run FAILED. Never raises."""
     try:
-        if status != "FAILED" or mission_id != LARK_MISSION_ID:
+        if (
+            status != "FAILED"
+            or not lark_failure_notice
+            or mission_id != LARK_MISSION_ID
+        ):
             return
         chat_id = (execution_input or {}).get("chat_id")
         if not isinstance(chat_id, str) or not chat_id:

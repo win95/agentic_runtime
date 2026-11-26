@@ -268,14 +268,20 @@ def run_execution(self, execution_id: str, resume_decision: str | None = None) -
             logger.warning("Slack notification failed for %s: %s", execution_id, exc)
         # Lark failure notice (D-LARK-16): a FAILED Lark run otherwise
         # leaves the user in silence. Best-effort, after persistence,
-        # never blocks the return.
+        # never blocks the return. The flag comes from the mission
+        # harness, like the Slack admin-action flag above — not from
+        # a hardcoded mission id.
         try:
+            from runtime.harness.registry import effective_harness
             from runtime.integrations.lark_notify import notify_lark_execution_failed
 
             notify_lark_execution_failed(
                 mission_id=execution.mission_id,
                 execution_input=execution.input or {},
                 status=status,
+                lark_failure_notice=effective_harness(
+                    execution.mission_id
+                ).notifications.lark_failure_notice,
             )
         except Exception as exc:  # noqa: BLE001 — notify never blocks
             logger.warning("Lark failure notice failed for %s: %s", execution_id, exc)
@@ -340,6 +346,7 @@ def run_execution(self, execution_id: str, resume_decision: str | None = None) -
                 # Lark failure notice (D-LARK-16) — same rule as the
                 # normal path; the run is FAILED here too.
                 try:
+                    from runtime.harness.registry import effective_harness
                     from runtime.integrations.lark_notify import (
                         notify_lark_execution_failed,
                     )
@@ -348,6 +355,9 @@ def run_execution(self, execution_id: str, resume_decision: str | None = None) -
                         mission_id=execution.mission_id,
                         execution_input=execution.input or {},
                         status="FAILED",
+                        lark_failure_notice=effective_harness(
+                            execution.mission_id
+                        ).notifications.lark_failure_notice,
                     )
                 except Exception as exc:  # noqa: BLE001 — notify never blocks
                     logger.warning(
