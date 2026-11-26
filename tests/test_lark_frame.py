@@ -7,6 +7,7 @@ platform stubbed — no credentials, no network.
 
 import hashlib
 import json
+import os
 import threading
 import urllib.error
 import urllib.request
@@ -14,6 +15,7 @@ from http.server import ThreadingHTTPServer
 
 import pytest
 
+from services.lark_frame.__main__ import load_config, load_env_file
 from services.lark_frame.routing import (
     REFUSAL_TEXT,
     NormalizedMessage,
@@ -286,6 +288,41 @@ def test_health_server_has_no_event_routes(health_server):
     assert status == 404
     status, _ = _req(port, "GET", "/nope")
     assert status == 404
+
+
+# --- .env loading ---------------------------------------------------------
+
+def test_load_env_file_loads_values_then_load_config_reads_them(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "LARK_APP_ID=cli_from_dotenv\n"
+        "LARK_APP_SECRET=s_from_dotenv\n"
+        "LARK_TRANSPORT=websocket\n"
+    )
+    for name in ("LARK_APP_ID", "LARK_APP_SECRET", "LARK_TRANSPORT"):
+        monkeypatch.delenv(name, raising=False)
+    assert load_env_file(env_file) == env_file
+    assert os.environ["LARK_APP_ID"] == "cli_from_dotenv"
+    config = load_config()
+    assert config.app_id == "cli_from_dotenv"
+    assert config.app_secret == "s_from_dotenv"
+    assert config.transport == "websocket"
+
+
+def test_load_env_file_shell_env_wins(tmp_path, monkeypatch):
+    env_file = tmp_path / ".env"
+    env_file.write_text("LARK_APP_ID=cli_from_dotenv\nLARK_APP_SECRET=s_from_dotenv\n")
+    monkeypatch.setenv("LARK_APP_ID", "cli_from_shell")
+    monkeypatch.delenv("LARK_APP_SECRET", raising=False)
+    load_env_file(env_file)
+    assert os.environ["LARK_APP_ID"] == "cli_from_shell"
+    assert os.environ["LARK_APP_SECRET"] == "s_from_dotenv"
+
+
+def test_load_env_file_missing_is_noop(tmp_path, monkeypatch):
+    monkeypatch.delenv("LARK_APP_ID", raising=False)
+    assert load_env_file(tmp_path / ".env") is None
+    assert "LARK_APP_ID" not in os.environ
 
 
 def test_url_verification(server):

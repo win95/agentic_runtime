@@ -13,6 +13,10 @@ Environment (see services/lark_frame/README.md):
 - LARK_BOT_OPEN_ID — override for @bot detection (optional; the
   frame fetches it via bot/v3/info when unset)
 - LARK_TRANSPORT / FRAME_HOST / FRAME_PORT / REDIS_URL
+
+The frame also loads the repo-root ``.env`` at startup (shell env
+wins over file values), so the vars can live in the same file the
+platform reads instead of being passed on every command line.
 """
 
 from __future__ import annotations
@@ -20,6 +24,9 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from pathlib import Path
+
+from dotenv import load_dotenv
 
 from services.lark_frame.webhook import FrameConfig, FrameState, run_webhook
 
@@ -28,6 +35,21 @@ logger = logging.getLogger(__name__)
 
 def _env(name: str, default: str = "") -> str:
     return os.environ.get(name, default).strip()
+
+
+def load_env_file(path: Path | None = None) -> Path | None:
+    """Load the repo-root .env into os.environ; returns the path loaded.
+
+    The path is resolved from this file's location, not the CWD, so it
+    works from anywhere. Shell env wins over file values (``override``
+    is False). A missing file is a silent no-op — shell env alone
+    still works.
+    """
+    env_path = path or Path(__file__).resolve().parents[2] / ".env"
+    if not env_path.is_file():
+        return None
+    load_dotenv(env_path, override=False)
+    return env_path
 
 
 def load_config() -> FrameConfig:
@@ -68,6 +90,9 @@ def main() -> None:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
+    env_path = load_env_file()
+    if env_path is not None:
+        logger.info("Lark frame loaded env from %s", env_path)
     config = load_config()
     if not config.platform_api_key:
         logger.warning(

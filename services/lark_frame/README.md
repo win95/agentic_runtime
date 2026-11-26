@@ -16,6 +16,12 @@ LARK_APP_ID=cli_... LARK_APP_SECRET=... \
   python -m services.lark_frame
 ```
 
+The frame also loads the repo-root `.env` at startup (same file the
+platform reads — `LARK_APP_ID`, `LARK_APP_SECRET`, `PLATFORM_API_KEY`,
+`LARK_ALLOWLIST`, ...), so the vars above can live there instead of
+on the command line. Shell env wins over file values; a missing file
+is silently ignored.
+
 - Webhook mode (default): serves `POST /lark/events` + `POST /lark/card`
   on `FRAME_HOST:FRAME_PORT` (default `0.0.0.0:8000`). Register the two
   URLs in the Lark console (Event Subscriptions → Request URL, Bot →
