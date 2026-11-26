@@ -1,0 +1,93 @@
+# Agentic Runtime — DEV compose for the Lark frame + user service.
+#
+# Standalone file (not an override of docker-compose.yml): it runs ONLY
+# these two services in containers, against the platform API, Postgres
+# and Redis that already run on the host. The main compose is the full
+# stack; this file is for the host-run dev flow where the platform
+# (uvicorn :8000) stays outside Docker.
+#
+# Prerequisites on the host before `up`:
+#   - platform API running on :8000 (uvicorn app.main:app)
+#   - Postgres on :5432 with a `user_service` database
+#     (`createdb user_service`, then `make migrate-users` from the host)
+#   - Redis on :6379
+#   - repo-root .env with API_KEY, JWT_SECRET, USER_SERVICE_API_KEY,
+#     LARK_APP_ID, LARK_APP_SECRET, LARK_ALLOWLIST
+#   - if the host Postgres uses different credentials, set
+#     POSTGRES_USER / POSTGRES_PASSWORD in .env (defaults below are the
+#     main compose's dev defaults)
+#
+#   docker compose -f docker-compose.dev.yml up -d --build
+#   curl localhost:8002/healthz   # frame health (WS mode, own port)
+#   curl localhost:8001/health    # user service health
+#   curl localhost:8002/readyz    # 503 until the platform answers :8000
+#
+# Do NOT run the main compose's user-service at the same time — both
+# publish host port 8001. Code changes: user-service reloads live
+# (volume mount + --reload); the frame needs a restart
+# (`docker compose -f docker-compose.dev.yml restart lark-frame`).
+services:
+  user-service:
+    build:
+      context: .
+      dockerfile: services/user_service/Dockerfile
+    # --reload + the volume mount below: edit code on the host, the
+    # service picks it up without a rebuild. Env still comes only from
+    # this file (cwd is /app, so services/user_service/.env is never read).
+    command: uvicorn services.user_service.main:app --host 0.0.0.0 --port 8001 --reload
+    environment:
+      # Host Postgres, reached through the host gateway — the container
+      # cannot see the host's localhost.
+      USER_SERVICE_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@host.docker.internal:5432/user_service
+      # Must match the platform API's JWT_SECRET, or Bearer tokens fail.
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      # Must match the platform API's USER_SERVICE_API_KEY (X-Service-Key).
+      USER_SERVICE_API_KEY: ${USER_SERVICE_API_KEY:?USER_SERVICE_API_KEY must be set in .env}
+      REDIS_URL: redis://host.docker.internal:6379/2
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./services/user_service:/app/services/user_service
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  lark-frame:
+    build:
+      context: .
+      dockerfile: services/lark_frame/Dockerfile
+    environment:
+      LARK_TRANSPORT: websocket
+      LARK_APP_ID: ${LARK_APP_ID:?LARK_APP_ID must be set in .env}
+      LARK_APP_SECRET: ${LARK_APP_SECRET:?LARK_APP_SECRET must be set in .env}
+      # The platform runs on the host, not in this compose network.
+      PLATFORM_BASE_URL: http://host.docker.internal:8000
+      # The frame's service key is the platform's API_KEY (D-LARK-10).
+      PLATFORM_API_KEY: ${API_KEY:?API_KEY must be set in .env}
+      # Empty allowlist refuses every sender — fail fast instead.
+      LARK_ALLOWLIST: ${LARK_ALLOWLIST:?LARK_ALLOWLIST must be set in .env}
+      REDIS_URL: redis://host.docker.internal:6379/2
+      FRAME_HEALTH_PORT: 8002
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "8002:8002"
+    volumes:
+      # Read-only: the frame has no --reload; restart the service after
+      # editing code instead of rebuilding the image.
+      - ./services/lark_frame:/app/services/lark_frame:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10

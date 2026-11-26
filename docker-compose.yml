@@ -142,6 +142,11 @@ services:
       # Shared with the user service — must match its JWT_SECRET, or
       # Bearer tokens fail verification. Required (no dev default).
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
+      # The user service lives in this compose network as `user-service`
+      # — localhost here would be the api container itself (502 "user
+      # service unreachable", seen live 2026-11-26). The .env value
+      # (localhost:8001) is only for the host-run platform.
+      USER_SERVICE_URL: http://user-service:8001
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
       QDRANT_URL: http://qdrant:6333

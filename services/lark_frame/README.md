@@ -30,6 +30,34 @@ is silently ignored.
   URL needed. The console event subscription stays enabled, but the
   two URLs are not registered.
 
+## Docker Compose (dev)
+
+`docker-compose.dev.yml` (repo root) runs the frame + the user service
+in containers, against the platform API, Postgres and Redis on the
+host. The main `docker-compose.yml` is the full stack — this file is
+only the two services, for the host-run dev flow.
+
+```bash
+# prerequisites on the host: platform on :8000, Postgres on :5432 with
+# a `user_service` database (`createdb user_service`, then
+# `make migrate-users` from the host), Redis on :6379, and the repo-root
+# .env with API_KEY, JWT_SECRET, USER_SERVICE_API_KEY, LARK_APP_ID,
+# LARK_APP_SECRET, LARK_ALLOWLIST
+docker compose -f docker-compose.dev.yml up -d --build
+curl localhost:8002/healthz   # frame health (WS mode, own port)
+curl localhost:8001/health    # user service health
+curl localhost:8002/readyz    # 503 until the platform answers :8000
+docker compose -f docker-compose.dev.yml down
+```
+
+Notes: the frame reaches the host platform via
+`host.docker.internal:8000`; the user service reaches host Postgres /
+Redis the same way. Do not run the main compose's user-service at the
+same time (both publish host port 8001). The user service reloads live
+on code edits (volume mount + `--reload`); the frame has no reload —
+`docker compose -f docker-compose.dev.yml restart lark-frame` after
+editing its code.
+
 ## Environment
 
 | Var | Required | Notes |
