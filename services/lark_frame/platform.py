@@ -164,10 +164,12 @@ def send_lark_text(
         return False
     try:
         status, body = _post_json(
-            f"{LARK_DOMAIN}/open-apis/im/v1/messages",
+            # receive_id_type is a QUERY parameter on im/v1/messages, not a
+            # body field — Lark returns 99992402 "receive_id_type is
+            # required" when it is sent in the body (seen live 2026-11-26).
+            f"{LARK_DOMAIN}/open-apis/im/v1/messages?receive_id_type=chat_id",
             {
                 "receive_id": chat_id,
-                "receive_id_type": "chat_id",
                 "msg_type": "text",
                 "content": json.dumps({"text": text}, ensure_ascii=False),
             },

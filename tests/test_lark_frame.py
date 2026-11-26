@@ -404,3 +404,27 @@ def test_outsider_gets_one_refusal(server, monkeypatch):
     )
     assert status == 200
     assert sent == [REFUSAL_TEXT]
+
+
+def test_send_lark_text_puts_receive_id_type_in_query(monkeypatch):
+    """receive_id_type is a query parameter on im/v1/messages, not a body
+    field — Lark returned 99992402 "receive_id_type is required" live on
+    2026-11-26 when it was sent in the body."""
+    import services.lark_frame.platform as lark_platform
+
+    captured: dict = {}
+
+    def fake_post(url, payload, headers, timeout):
+        captured["url"] = url
+        captured["payload"] = payload
+        return 200, {"code": 0, "data": {"message_id": "om_x"}}
+
+    monkeypatch.setattr(lark_platform, "_tenant_access_token", lambda *a: "t-tenant")
+    monkeypatch.setattr(lark_platform, "_post_json", fake_post)
+    assert lark_platform.send_lark_text("cli_x", "sec", chat_id="oc_1", text="hi") is True
+    assert captured["url"] == (
+        "https://open.larksuite.com/open-apis/im/v1/messages?receive_id_type=chat_id"
+    )
+    assert captured["payload"]["receive_id"] == "oc_1"
+    assert "receive_id_type" not in captured["payload"]
+    assert json.loads(captured["payload"]["content"]) == {"text": "hi"}
