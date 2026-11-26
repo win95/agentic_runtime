@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import io
+from datetime import timedelta
 
 from app.config import settings
-
 
 def get_client():
     """Build the MinIO client, or None when credentials are not configured."""
@@ -119,3 +119,47 @@ def download_bytes(key: str) -> bytes:
     finally:
         response.close()
         response.release_conn()
+
+
+def get_presign_client():
+    """MinIO client whose endpoint matches presigned URL host (may differ inside Docker)."""
+    if not settings.minio_access_key or not settings.minio_secret_key:
+        return None
+    from minio import Minio
+
+    return Minio(
+        settings.resolved_minio_presign_endpoint,
+        access_key=settings.minio_access_key,
+        secret_key=settings.minio_secret_key,
+        secure=settings.minio_presign_secure,
+        region=settings.minio_region,
+    )
+
+
+def artifact_location(key: str, bucket: str | None = None) -> str:
+    """MinIO-style location string for a stored artifact object."""
+    bucket = bucket or settings.minio_bucket
+    return f"minio://{bucket}/{key}"
+
+
+def presigned_get_url(
+    key: str,
+    *,
+    bucket: str | None = None,
+    expires_seconds: int | None = None,
+) -> str:
+    """Presigned HTTP GET URL for an object (uses the presign endpoint client)."""
+    client = get_presign_client()
+    if client is None:
+        raise RuntimeError("MinIO not configured (MINIO_ACCESS_KEY/SECRET_KEY empty)")
+    bucket = bucket or settings.minio_bucket
+    ttl = (
+        expires_seconds
+        if expires_seconds is not None
+        else settings.minio_artifacts_presign_ttl_seconds
+    )
+    return client.presigned_get_object(
+        bucket,
+        key,
+        expires=timedelta(seconds=ttl),
+    )

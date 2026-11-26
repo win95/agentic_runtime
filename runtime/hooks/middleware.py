@@ -165,7 +165,7 @@ class HookMiddleware(AgentMiddleware):
         events_sink: list | None = None,
         subagent_mode: bool = False,
         sandbox_backend=None,
-        export_marker_path: str | None = None,
+        export_run_started_at: float | None = None,
         output_files_required: bool = False,
         sequential_tool_names: frozenset[str] | None = None,
         tool_budget_tools: frozenset[str] | None = None,
@@ -207,7 +207,7 @@ class HookMiddleware(AgentMiddleware):
         self.encoded_turns = 0
         self.events: list[dict] = []
         self.sandbox_backend = sandbox_backend
-        self.export_marker_path = export_marker_path
+        self.export_run_started_at = export_run_started_at
         self.output_files_required = output_files_required
         self.sequential_tool_names = frozenset(sequential_tool_names or ())
         self.tool_budget_tools = frozenset(tool_budget_tools or ())
@@ -465,13 +465,16 @@ class HookMiddleware(AgentMiddleware):
         """present | missing | skipped | unknown (check failed, fail-open)."""
         if not self.output_files_required:
             return "skipped"
-        if self.sandbox_backend is None or not self.export_marker_path:
+        if self.sandbox_backend is None or self.export_run_started_at is None:
             return "skipped"
-        from runtime.sandbox.export import has_exportable_files_since_marker
+        from runtime.sandbox.export import has_exportable_files_since_run
 
+        clock_skew = float(getattr(self.sandbox_backend, "_clock_skew", 0.0))
         try:
-            present, err = has_exportable_files_since_marker(
-                self.sandbox_backend, self.export_marker_path
+            present, err = has_exportable_files_since_run(
+                self.sandbox_backend,
+                self.export_run_started_at,
+                clock_skew,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(

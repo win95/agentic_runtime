@@ -154,6 +154,9 @@ services:
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
       MINIO_BUCKET: ${MINIO_BUCKET:-agentic-runtime}
       MINIO_REPORTS_BUCKET: ${MINIO_REPORTS_BUCKET:-reports}
+      MINIO_PRESIGN_ENDPOINT: ${MINIO_PRESIGN_ENDPOINT:-localhost:9000}
+      MINIO_PRESIGN_SECURE: ${MINIO_PRESIGN_SECURE:-false}
+      MINIO_ARTIFACTS_PRESIGN_TTL_SECONDS: ${MINIO_ARTIFACTS_PRESIGN_TTL_SECONDS:-86400}
       MLFLOW_TRACKING_URI: http://mlflow:5000
       # The hotel mock MCP server runs on the host (127.0.0.1:8082) during
       # manual testing; from inside the container that address is the
@@ -227,6 +230,9 @@ services:
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
       MINIO_BUCKET: ${MINIO_BUCKET:-agentic-runtime}
       MINIO_REPORTS_BUCKET: ${MINIO_REPORTS_BUCKET:-reports}
+      MINIO_PRESIGN_ENDPOINT: ${MINIO_PRESIGN_ENDPOINT:-localhost:9000}
+      MINIO_PRESIGN_SECURE: ${MINIO_PRESIGN_SECURE:-false}
+      MINIO_ARTIFACTS_PRESIGN_TTL_SECONDS: ${MINIO_ARTIFACTS_PRESIGN_TTL_SECONDS:-86400}
       MLFLOW_TRACKING_URI: http://mlflow:5000
       # See the api service: the mock MCP server lives on the host.
       MCP_SERVER_URL: ${MCP_SERVER_URL_IN_CONTAINER:-http://host.docker.internal:${MOCK_HOTEL_MCP_PORT:-8082}/mcp}
@@ -274,6 +280,9 @@ services:
       MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
       MINIO_BUCKET: ${MINIO_BUCKET:-agentic-runtime}
       MINIO_REPORTS_BUCKET: ${MINIO_REPORTS_BUCKET:-reports}
+      MINIO_PRESIGN_ENDPOINT: ${MINIO_PRESIGN_ENDPOINT:-localhost:9000}
+      MINIO_PRESIGN_SECURE: ${MINIO_PRESIGN_SECURE:-false}
+      MINIO_ARTIFACTS_PRESIGN_TTL_SECONDS: ${MINIO_ARTIFACTS_PRESIGN_TTL_SECONDS:-86400}
       MLFLOW_TRACKING_URI: http://mlflow:5000
       # See the api service: the mock MCP server lives on the host.
       MCP_SERVER_URL: ${MCP_SERVER_URL_IN_CONTAINER:-http://host.docker.internal:${MOCK_HOTEL_MCP_PORT:-8082}/mcp}

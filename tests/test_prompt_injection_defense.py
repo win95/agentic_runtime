@@ -10,7 +10,8 @@ from types import SimpleNamespace
 import pytest
 
 import runtime.tools  # noqa: F401 — registers built-in tools
-from runtime.deep_agent import ADMIN_SYSTEM_PROMPT, DEFAULT_SYSTEM_PROMPT, run_deep_agent
+from runtime.agents.admin import AdminAgent
+from runtime.deep_agent import DEFAULT_SYSTEM_PROMPT, run_deep_agent
 from runtime.mission_graph import validate_results
 from runtime.report import build_markdown_report
 from runtime.security import (
@@ -71,7 +72,7 @@ def test_layer2_prompt_wraps_input_in_data_tags():
 
 
 def test_layer2_system_prompts_state_hierarchy():
-    for prompt in (DEFAULT_SYSTEM_PROMPT, ADMIN_SYSTEM_PROMPT):
+    for prompt in (DEFAULT_SYSTEM_PROMPT, AdminAgent.FALLBACK_SYSTEM_PROMPT):
         assert "Instruction hierarchy" in prompt
         assert "<data>" in prompt
 
@@ -83,7 +84,7 @@ def test_layer2_seed_prompts_match_constants():
     investigator = load_missions.load_agent_file(base / "fault_investigator.yaml")
     assert investigator["system_prompt"] == DEFAULT_SYSTEM_PROMPT
     admin = load_missions.load_agent_file(base / "admin_bot.yaml")
-    assert admin["system_prompt"] == ADMIN_SYSTEM_PROMPT
+    assert admin["system_prompt"] == AdminAgent.FALLBACK_SYSTEM_PROMPT
 
 
 def test_layer2_wrap_data_labels_source():

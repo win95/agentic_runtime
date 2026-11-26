@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_validator
 
 from runtime.harness.validation import validate_deny_message_template
@@ -121,6 +123,29 @@ class ToolBudgetHarness(BaseModel):
         return self
 
 
+class SandboxHarness(BaseModel):
+    """OpenSandbox command and lifetime policy for sandbox missions."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    command_timeout_seconds: int = 90
+    command_timeout_max_seconds: int = 600
+
+    @model_validator(mode="after")
+    def _validate_timeout(self) -> SandboxHarness:
+        if self.command_timeout_seconds < 1:
+            raise ValueError("sandbox.command_timeout_seconds must be >= 1")
+        if self.command_timeout_max_seconds < 1:
+            raise ValueError("sandbox.command_timeout_max_seconds must be >= 1")
+        if self.command_timeout_max_seconds > 7200:
+            raise ValueError("sandbox.command_timeout_max_seconds must be <= 7200")
+        if self.command_timeout_seconds > self.command_timeout_max_seconds:
+            raise ValueError(
+                "sandbox.command_timeout_seconds must be <= command_timeout_max_seconds"
+            )
+        return self
+
+
 class OutputFilesHarness(BaseModel):
     """Sandbox report export expectations (opt-in per mission)."""
 
@@ -129,6 +154,18 @@ class OutputFilesHarness(BaseModel):
     # When true, ``stop_completion`` nudges the agent to write top-level
     # report files under ``/output`` before finishing (sandbox + marker only).
     required: StrictBool = False
+
+
+class OutputArtifactsHarness(BaseModel):
+    """Where sandbox ``output.files`` payloads are stored after a run."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    sink: Literal["none", "minio"] = "none"
+    # Drop inline ``content`` from each file entry after a successful upload.
+    strip_inline: StrictBool = True
+    # When upload fails, keep inline ``content`` and mark storage as inline.
+    inline_fallback: StrictBool = True
 
 
 class MissionHarness(BaseModel):
@@ -144,5 +181,17 @@ class MissionHarness(BaseModel):
     notifications: NotificationsHarness = Field(default_factory=NotificationsHarness)
     context_budget: ContextBudgetHarness = Field(default_factory=ContextBudgetHarness)
     output_files: OutputFilesHarness = Field(default_factory=OutputFilesHarness)
+    output_artifacts: OutputArtifactsHarness = Field(
+        default_factory=OutputArtifactsHarness
+    )
     tool_calls: ToolCallsHarness = Field(default_factory=ToolCallsHarness)
     tool_budget: ToolBudgetHarness = Field(default_factory=ToolBudgetHarness)
+    sandbox: SandboxHarness = Field(default_factory=SandboxHarness)
+
+
+class AgentHarness(BaseModel):
+    """Agent seed metadata — prompt fallback identity for drift checks."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    system_prompt_fallback: Literal["default", "admin", "seed"] | None = None

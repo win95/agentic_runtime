@@ -21,6 +21,7 @@ import json
 import logging
 import re
 import threading
+import time
 
 from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, StateGraph
@@ -641,6 +642,7 @@ def deep_agent_node(state: MissionState) -> dict:
                         session_id=state["session_id"],
                         agent_id=agent_id,
                         mission_id=state.get("mission_id") or "",
+                        execution_config=execution_cfg,
                     )
                 finally:
                     _sdb.close()
@@ -651,23 +653,17 @@ def deep_agent_node(state: MissionState) -> dict:
                 sandbox_note = "Sandbox unavailable — in-memory file backend"
             else:
                 sandbox_note = f"Sandbox backend: {sandbox_backend.id}"
-        export_marker_path = None
-        export_marker_failed = False
-        if sandbox_backend is not None and state.get("execution_id"):
-            from runtime.sandbox.export import touch_export_run_marker
-
-            export_marker_path = touch_export_run_marker(
-                sandbox_backend, state["execution_id"]
-            )
-            if export_marker_path is None:
-                export_marker_failed = True
+        export_run_started_at: float | None = None
+        if sandbox_backend is not None:
+            export_run_started_at = time.time()
+            begin = getattr(sandbox_backend, "begin_run_export", None)
+            if callable(begin):
+                begin(export_run_started_at)
         hook_middleware.sandbox_backend = sandbox_backend
-        hook_middleware.export_marker_path = (
-            export_marker_path if not export_marker_failed else None
-        )
+        hook_middleware.export_run_started_at = export_run_started_at
         if use_flow:
             flow_hook_middleware.sandbox_backend = hook_middleware.sandbox_backend
-            flow_hook_middleware.export_marker_path = hook_middleware.export_marker_path
+            flow_hook_middleware.export_run_started_at = export_run_started_at
         # The fixed prefix measured against the system-prompt budget —
         # set in each branch below, BEFORE the history block is
         # appended (history is charged to the history bucket, not here).
@@ -1032,8 +1028,7 @@ def deep_agent_node(state: MissionState) -> dict:
 
             exported, export_notes = export_output_files(
                 sandbox_backend,
-                run_marker_path=export_marker_path,
-                marker_create_failed=export_marker_failed,
+                run_started_at=export_run_started_at,
             )
             result["files"] = exported
             notes.extend(export_notes)

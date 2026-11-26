@@ -26,9 +26,30 @@ def _settings(**overrides):
     return SimpleNamespace(**cfg)
 
 
+class _FakeCommands:
+    def run(self, command, opts=None):  # noqa: ARG002
+        return SimpleNamespace(
+            logs=SimpleNamespace(stdout=["0"], stderr=[]),
+            exit_code=0,
+            result=[],
+            error=None,
+        )
+
+
+class _FakeFiles:
+    def list_directory(self, entry):  # noqa: ARG002
+        return []
+
+
 class _FakeHandle:
     def __init__(self, sandbox_id):
         self.id = sandbox_id
+        self.commands = _FakeCommands()
+        self.files = _FakeFiles()
+        self.renewed = None
+
+    def renew(self, timeout):
+        self.renewed = timeout
 
 
 class _FakeClient:
@@ -39,10 +60,13 @@ class _FakeClient:
         self.fail_connect = set()
         self._n = 0
 
-    def create(self, image):
+    def create(self, image, *, timeout_seconds=None):
         self._n += 1
-        self.created.append(image)
+        self.created.append((image, timeout_seconds))
         return _FakeHandle(f"sandbox-{self._n}")
+
+    def renew(self, handle, timeout_seconds):
+        handle.renew(timeout_seconds)
 
     def connect(self, sandbox_id):
         self.connected.append(sandbox_id)
@@ -82,7 +106,8 @@ def test_first_use_creates_sandbox_and_row(db_session):
     assert row.status == "active"
     assert row.agent_id == "fault_investigator"
     assert row.mission_id == "fault_analysis"
-    assert client.created == ["python:3.12-slim"]
+    assert client.created[0][0] == "python:3.12-slim"
+    assert client.created[0][1] == 3600
 
 
 def test_second_use_reconnects_to_same_sandbox(db_session):

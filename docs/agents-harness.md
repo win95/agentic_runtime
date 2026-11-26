@@ -33,7 +33,12 @@ Docker images copy `seeds/` and `skills/` at build time — rebuild the image
 | `guest_output.capability` | Registry capability for those synthetic tools |
 | `notifications.notify_admin_actions` | SUCCEEDED runs of this mission notify Slack when output has a non-empty `actions_taken` (admin actions; failures notify for every mission) |
 | `context_budget.reclaim_retrieval_for_history` | Opt-in: move unused retrieval slice into history trim budget |
-| `output_files.required` | Opt-in: `stop_completion` nudges the agent to write top-level report files under `/output` in the live sandbox before stopping (uses the same export marker + find logic as file export) |
+| `output_files.required` | Opt-in: `stop_completion` nudges the agent to write top-level report files under `/output` in the live sandbox before stopping (same `list_directory` + run start mtime logic as file export) |
+| `output_artifacts.sink` | `none` (default) or `minio`: after the run, the worker uploads `output.files[]` to MinIO when the mission `output_schema` declares `files` (`minio` requires that field). `none` leaves inline content in the result row |
+| `output_artifacts.strip_inline` | When `sink: minio`, drop each file's `content` after a successful upload (default true) |
+| `output_artifacts.inline_fallback` | When upload fails, keep inline `content` and set `storage: inline` on that entry (default true); run status is unchanged |
+| `sandbox.command_timeout_seconds` | Default per-command timeout when the model omits one (default `90`) |
+| `sandbox.command_timeout_max_seconds` | Ceiling for model-requested timeouts (default `600`); must be ≥ `command_timeout_seconds` |
 | `tool_calls.sequential` | Tool names that must not run in parallel within one model turn; later parallel calls get a deferral `ToolMessage` (enforced in middleware, not via model bind) |
 | `tool_budget.tools` | Tool names subject to the shared execution result budget |
 | `tool_budget.max_result_tokens` | Max estimated tokens of tool results charged per execution (main + subagents) |

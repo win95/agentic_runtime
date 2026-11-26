@@ -50,6 +50,8 @@ harness:
   output_files:
     # Stop hook nudges the agent to write /output reports before finishing.
     required: true
+  output_artifacts:
+    sink: minio
   tool_calls:
     sequential:
       - tavily_search

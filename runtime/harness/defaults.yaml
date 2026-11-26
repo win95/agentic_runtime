@@ -17,9 +17,16 @@ context_budget:
   reclaim_retrieval_for_history: false
 output_files:
   required: false
+output_artifacts:
+  sink: none
+  strip_inline: true
+  inline_fallback: true
 tool_calls:
   sequential: []
 tool_budget:
   tools: []
   max_result_tokens: 0
   max_calls: {}
+sandbox:
+  command_timeout_seconds: 90
+  command_timeout_max_seconds: 600

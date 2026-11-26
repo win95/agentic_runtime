@@ -38,7 +38,7 @@ the answer is non-empty, and ``files`` contains ``.html`` + ``.csv`` +
 in-memory fallback exports nothing (``files: []``), so non-empty files
 mean the agent really wrote and ran code in a sandbox. The HTML
 report must also embed a Chart.js chart (``<canvas`` + ``new Chart(``)
-— see ``_html_has_chart`` — or the check fails.
+— see ``html_has_chart`` in ``analytis_common`` — or the check fails.
 """
 
 from __future__ import annotations
@@ -51,131 +51,19 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from _api import (  # noqa: E402
-    api_key,
-    get_result,
-    load_dotenv,
-    submit,
-    wait_for,
+from _api import load_dotenv  # noqa: E402
+from analytis_common_1 import (  # noqa: E402
+    DEFAULT_API_URL,
+    DEFAULT_OUT_DIR,
+    DEFAULT_POLL_INTERVAL,
+    DEFAULT_TIMEOUT,
+    SELF_TEST_QUESTION,
+    export_checks,
+    resolve_api_key,
+    run_once,
 )
 
-DEFAULT_API_URL = "http://localhost:8000"
-DEFAULT_MISSION = "agent_analytis_mission"
-DEFAULT_OUT_DIR = "analytis-output"
-DEFAULT_POLL_INTERVAL = 5.0
-DEFAULT_TIMEOUT = 600.0
-
-SELF_TEST_QUESTION = (
-    "Nghiên cứu 3 nguồn mới nhất về giá cà phê robusta Việt Nam, "
-    "tóm tắt xu hướng giá và xuất báo cáo HTML (bảng + biểu đồ), "
-    "dữ liệu CSV và tóm tắt Markdown."
-)
-SELF_TEST_EXTENSIONS = (".html", ".csv", ".md")
-
-
-def _die(message: str, code: int = 2) -> "SystemExit":
-    print(f"analytis_chat: {message}", file=sys.stderr)
-    return SystemExit(code)
-
-
-def _resolve_api_key(args: argparse.Namespace) -> None:
-    if args.api_key:
-        os.environ["API_KEY"] = args.api_key
-    if not api_key():
-        raise _die(
-            "chưa có API_KEY. Đặt API_KEY trong repo .env hoặc truyền --api-key <key>.\n"
-            "Mission này chỉ chạy bằng API key (JWT thường bị 404) — xem require_mission_for_role."
-        )
-
-
-def _save_files(result: dict, out_dir: Path, execution_id: str) -> list[Path]:
-    """Write output.files[] under out_dir/<execution_id>/; return the paths."""
-    output = result.get("output") or {}
-    files = output.get("files") or []
-    saved: list[Path] = []
-    run_dir = out_dir / execution_id
-    for entry in files:
-        if not isinstance(entry, dict):
-            continue
-        name = str(entry.get("name") or "").strip()
-        content = entry.get("content")
-        if not name or content is None:
-            continue
-        # name is a basename (export.py); keep it flat under the run dir
-        # and refuse any path escape just in case the payload is odd.
-        target = run_dir / Path(name).name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        text = content if isinstance(content, str) else str(content)
-        target.write_text(text, encoding="utf-8")
-        saved.append(target)
-        print(f"  đã lưu: {target} ({len(text.encode('utf-8'))} bytes)")
-    return saved
-
-
-def _print_answer(result: dict) -> None:
-    output = result.get("output") or {}
-    answer = str(output.get("answer") or "").strip()
-    print(f"analytis> {answer}" if answer else "analytis> (không có câu trả lời)")
-    actions = output.get("actions_taken")
-    if isinstance(actions, list) and actions:
-        print(f"  (đã làm: {', '.join(str(a) for a in actions)})")
-    files = output.get("files") or []
-    if isinstance(files, list):
-        print(f"  (files: {len(files)} — xem --out-dir)")
-
-
-def _run_once(api_url: str, message: str, session_id: str,
-              out_dir: Path, interval: float, timeout: float) -> tuple[dict, dict, list[Path]]:
-    """One message -> (execution, result, saved files). Raises SystemExit on failure."""
-    try:
-        sent = submit(DEFAULT_MISSION, {"message": message}, session_id=session_id)
-    except Exception as exc:  # noqa: BLE001 — connection + HTTP errors surface here
-        hint = " — kiểm tra API_KEY trong .env" if "401" in str(exc) else ""
-        raise _die(
-            f"POST /executions thất bại ({exc}){hint} — kiểm tra API ở {api_url} đã chạy chưa."
-        )
-    execution_id = str(sent.get("execution_id") or "")
-    if not execution_id:
-        raise _die(f"POST /executions không trả execution_id: {sent}")
-    session_id = str(sent.get("session_id") or session_id or "")
-    print(f"... đang chờ (execution {execution_id}, session {session_id})", file=sys.stderr)
-    try:
-        execution, _elapsed = wait_for(execution_id, timeout=timeout, interval=interval)
-    except TimeoutError as exc:
-        raise _die(str(exc), code=1)
-    except Exception as exc:  # noqa: BLE001
-        raise _die(f"poll kết quả thất bại ({exc}).", code=1)
-    status = str(execution.get("status") or "")
-    if status != "SUCCEEDED":
-        print(
-            f"execution {execution_id}: status={status}"
-            f" error={execution.get('error') or '-'}",
-            file=sys.stderr,
-        )
-        raise _die(f"run không thành công (status={status}).", code=1)
-    try:
-        result = get_result(execution_id)
-    except Exception as exc:  # noqa: BLE001
-        raise _die(f"GET result thất bại ({exc}).", code=1)
-    _print_answer(result)
-    saved = _save_files(result, out_dir, execution_id)
-    output = result.get("output") or {}
-    warnings = output.get("export_warnings") or []
-    if warnings:
-        for line in warnings:
-            print(f"  export warning: {line}", file=sys.stderr)
-    if not saved:
-        print("  (không có file nào được xuất — xem lại output/ trong sandbox)", file=sys.stderr)
-        raise _die(
-            "output schema yêu cầu files nhưng không có file nào được export.",
-            code=1,
-        )
-    return execution, result, saved
-
-
-def _html_has_chart(html: str) -> bool:
-    """True when an HTML report embeds a Chart.js chart (canvas + call)."""
-    return "<canvas" in html and "new Chart(" in html
+PREFIX = "analytis_chat"
 
 
 def _self_test(api_url: str, out_dir: Path, interval: float, timeout: float) -> int:
@@ -185,28 +73,18 @@ def _self_test(api_url: str, out_dir: Path, interval: float, timeout: float) -> 
     print(f"self-test: hỏi: {SELF_TEST_QUESTION}")
     checks: list[tuple[str, bool]] = []
     try:
-        _execution, result, _saved = _run_once(
-            api_url, SELF_TEST_QUESTION, session_id, out_dir, interval, timeout
+        _execution, result, _saved = run_once(
+            api_url,
+            SELF_TEST_QUESTION,
+            session_id,
+            out_dir,
+            interval,
+            timeout,
+            prefix=PREFIX,
         )
-        checks.append(("run SUCCEEDED", True))
-        output = result.get("output") or {}
-        answer = str(output.get("answer") or "").strip()
-        checks.append(("answer không rỗng", bool(answer)))
-        files = output.get("files") or []
-        names = [str(f.get("name") or f.get("path") or "") for f in files if isinstance(f, dict)]
-        for ext in SELF_TEST_EXTENSIONS:
-            checks.append((f"files có {ext}", any(n.endswith(ext) for n in names)))
-        checks.append(("files không rỗng (sandbox đã chạy)", bool(files)))
-        html_contents = [
-            str(f.get("content") or "")
-            for f in files
-            if isinstance(f, dict) and str(f.get("name") or "").endswith(".html")
-        ]
-        checks.append(
-            ("báo cáo HTML có biểu đồ Chart.js", any(_html_has_chart(h) for h in html_contents))
-        )
+        checks = export_checks(result, succeeded=True)
     except SystemExit as exc:
-        checks.append((f"run hoàn thành (exit {exc.code})", False))
+        checks = [(f"run hoàn thành (exit {exc.code})", False)]
     failed = [name for name, ok in checks if not ok]
     for name, ok in checks:
         print(f"  [{'PASS' if ok else 'FAIL'}] {name}")
@@ -244,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
         os.environ["API_BASE_URL"] = args.api_url
 
     try:
-        _resolve_api_key(args)
+        resolve_api_key(args)
     except SystemExit as exc:
         return int(exc.code or 2)
 
@@ -257,8 +135,15 @@ def main(argv: list[str] | None = None) -> int:
             session_id = f"sess-analytis-{uuid.uuid4().hex[:12]}"
         print(f"session: {session_id} (file lưu ở {out_dir}/<execution_id>/)")
         if args.message is not None:
-            _run_once(args.api_url, args.message, session_id, out_dir,
-                      args.interval, args.timeout)
+            run_once(
+                args.api_url,
+                args.message,
+                session_id,
+                out_dir,
+                args.interval,
+                args.timeout,
+                prefix=PREFIX,
+            )
             return 0
         print("Chat với agent-analytis (gõ /quit để thoát).")
         while True:
@@ -275,8 +160,15 @@ def main(argv: list[str] | None = None) -> int:
             if message in ("/quit", "/exit"):
                 break
             try:
-                _run_once(args.api_url, message, session_id, out_dir,
-                          args.interval, args.timeout)
+                run_once(
+                    args.api_url,
+                    message,
+                    session_id,
+                    out_dir,
+                    args.interval,
+                    args.timeout,
+                    prefix=PREFIX,
+                )
             except SystemExit as exc:
                 print(f"(lỗi: exit {exc.code})", file=sys.stderr)
                 if exc.code == 2:

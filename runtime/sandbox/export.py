@@ -1,40 +1,15 @@
-"""Export the agent's report files out of its session sandbox.
-
-Direct return (tran 2026-11-19): after a run, the files the agent wrote
-into the sandbox ``output/`` dir are downloaded and inlined into the
-execution result (``result["files"]``) as text, so the user gets them
-through the existing ``GET /executions/{id}/result`` API — no separate
-store, no download endpoint. See docs/sandbox.md.
-
-Rules:
-- Only the ``output/`` dir is exported (the agent is told to write its
-  reports there; see skills/agent-analytis/SKILL.md). Both ``output/``
-  (relative) and ``/output/`` (deepagents absolute paths) are scanned.
-- Only text report formats (.html, .csv, .md, .txt, .json); anything
-  else is skipped with a note.
-- Per-file cap 256 KiB, total cap 1 MiB — a report that big does not
-  belong inlined in a JSON result row. Skipped files are named in the
-  notes, never silently dropped. File size is checked before download.
-- When ``run_marker_path`` is set (touched at run start in the sandbox),
-  only files newer than that marker are exported (``find … -newer``),
-  so prior-turn files in the same session are not re-inlined.
-- Never raises: any failure returns ([], [note]) and the run proceeds.
-  The export runs only when the mission declares ``files`` in its
-  output schema (runtime/mission_graph.py fills it from here).
-"""
+"""Export the agent's report files out of its session sandbox."""
 
 from __future__ import annotations
 
+import logging
 import os
-import re
-import shlex
 
-OUTPUT_DIRS = ("/output", "output")
-RUN_MARKER_DIR = "/tmp"
+OUTPUT_DIR = "/output"
 MAX_FILE_BYTES = 256 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024
 
-_CONTENT_TYPES = {
+REPORT_FILE_CONTENT_TYPES = {
     ".html": "text/html",
     ".csv": "text/csv",
     ".md": "text/markdown",
@@ -43,222 +18,132 @@ _CONTENT_TYPES = {
 }
 
 
-def export_run_marker_path(execution_id: str) -> str:
-    safe = re.sub(r"[^a-zA-Z0-9_.-]", "_", execution_id or "unknown")[:80]
-    return f"{RUN_MARKER_DIR}/.run_export_{safe}"
+def content_type_for_export_filename(filename: str) -> str:
+    """MIME type for a sandbox report filename (export + artifact upload)."""
+    ext = os.path.splitext(filename)[1].lower()
+    return REPORT_FILE_CONTENT_TYPES.get(ext, "application/octet-stream")
+
+logger = logging.getLogger(__name__)
 
 
-def touch_export_run_marker(backend, execution_id: str) -> str | None:
-    """Create an in-sandbox marker file for this run (best-effort)."""
-    execute = getattr(backend, "execute", None)
-    if not execute or not (execution_id or "").strip():
-        return None
-    marker = export_run_marker_path(execution_id)
-    try:
-        resp = execute(f"touch {shlex.quote(marker)}")
-        if int(getattr(resp, "exit_code", 0)) != 0:
-            return None
-        return marker
-    except Exception:  # noqa: BLE001 — marker is best-effort
-        return None
-
-
-def _list_output_dir(backend, directory: str) -> tuple[list[dict], str | None]:
-    try:
-        listing = backend.ls(directory)
-    except Exception as exc:  # noqa: BLE001
-        return [], str(exc)
-    if getattr(listing, "error", None):
-        return [], str(listing.error)
-    return list(getattr(listing, "entries", None) or []), None
-
-
-def _canonical_sandbox_path(backend, path: str) -> str:
-    """Resolve to an absolute path (best-effort), assuming sandbox cwd is ``/``."""
-    normalized = path if path.startswith("/") else f"/{path}"
-    execute = getattr(backend, "execute", None)
-    if not execute:
-        return normalized
-    try:
-        quoted = shlex.quote(path)
-        resp = execute(
-            f"cd / && readlink -f {quoted} 2>/dev/null || realpath {quoted} 2>/dev/null"
-        )
-        lines = [
-            line.strip()
-            for line in (getattr(resp, "output", None) or "").splitlines()
-            if line.strip()
-        ]
-        if lines:
-            return lines[0]
-    except Exception:  # noqa: BLE001
-        pass
-    return normalized
-
-
-def _is_toplevel_output_file(canonical_path: str) -> bool:
-    """True when ``canonical_path`` is a file directly under ``/output/``."""
-    parts = canonical_path.strip("/").split("/")
+def _is_toplevel_output_path(path: str) -> bool:
+    norm = path if path.startswith("/") else f"/{path}"
+    parts = norm.strip("/").split("/")
     return len(parts) == 2 and parts[0] == "output"
 
 
-def _dedupe_output_paths(backend, raw_paths: list[str]) -> list[str]:
-    """Normalize via realpath and keep one path per inode (``/output`` vs ``output``)."""
-    by_canonical: dict[str, str] = {}
-    for path in raw_paths:
-        canonical = _canonical_sandbox_path(backend, path)
-        if not _is_toplevel_output_file(canonical):
-            continue
-        if canonical not in by_canonical:
-            # Prefer the absolute ``/output/...`` form for download/stat.
-            prefer = canonical if canonical.startswith("/output/") else path
-            by_canonical[canonical] = prefer
-    return sorted(by_canonical.values())
-
-
-def _paths_from_ls(backend) -> tuple[list[str], list[str]]:
-    """List output files via ``ls`` (no mtime) — mirrors BaseSandbox.ls entries."""
+def _list_output_via_ls(
+    backend, run_started_at: float | None
+) -> tuple[list[dict], list[str]]:
+    """Fallback when backend has no files API listing."""
     notes: list[str] = []
-    by_norm: dict[str, str] = {}
-    failed_dirs: list[tuple[str, str]] = []
-    succeeded_dirs: list[str] = []
-    for directory in OUTPUT_DIRS:
-        entries, err = _list_output_dir(backend, directory)
-        if err:
-            failed_dirs.append((directory, err))
+    items: list[dict] = []
+    ls = getattr(backend, "ls", None)
+    if not ls:
+        return [], ["Export: sandbox backend cannot list output/"]
+    for directory in (OUTPUT_DIR, "output", "/workspace/output"):
+        try:
+            listing = ls(directory)
+        except Exception as exc:  # noqa: BLE001
+            notes.append(f"Export: could not list '{directory}' ({exc})")
             continue
-        succeeded_dirs.append(directory)
-        for entry in entries:
+        if getattr(listing, "error", None):
+            notes.append(f"Export: could not list '{directory}' ({listing.error})")
+            continue
+        for entry in getattr(listing, "entries", None) or []:
             if entry.get("is_dir"):
                 continue
             path = str(entry.get("path") or "")
-            if not path:
+            if not path or not _is_toplevel_output_path(path):
                 continue
-            canonical = _canonical_sandbox_path(backend, path)
-            if not _is_toplevel_output_file(canonical):
-                continue
-            if canonical in by_norm:
-                continue
-            by_norm[canonical] = canonical if canonical.startswith("/") else path
-    if failed_dirs:
-        if not succeeded_dirs:
-            for directory, err in failed_dirs:
-                notes.append(f"Export: could not list '{directory}' in sandbox ({err})")
-        elif len(failed_dirs) == 1:
-            directory, err = failed_dirs[0]
-            notes.append(
-                f"Export: could not list '{directory}' in sandbox ({err}); "
-                "using files from the other output path"
-            )
-    paths = list(by_norm.values())
-    if not paths and not notes:
+            norm = path if path.startswith("/") else f"/{path}"
+            size = entry.get("size")
+            items.append({"path": norm, "size": size})
+    if run_started_at is not None:
+        notes.append(
+            "Export: run start filter unavailable without OpenSandbox files API; "
+            "listing all top-level output files"
+        )
+    if not items and not notes:
         notes.append("Export: no report files found under output/")
-    return paths, notes
+    return items, notes
 
 
-def has_exportable_files_since_marker(
-    backend, marker: str
+def _list_candidates(
+    backend, run_started_at: float | None, clock_skew: float
+) -> tuple[list[dict], list[str]]:
+    list_fn = getattr(backend, "list_output_files_for_export", None)
+    if list_fn is not None and run_started_at is not None:
+        return list_fn(run_started_at, clock_skew)
+    if list_fn is not None and run_started_at is None:
+        return list_fn(0.0, clock_skew)
+    return _list_output_via_ls(backend, run_started_at)
+
+
+def has_exportable_files_since_run(
+    backend,
+    run_started_at: float,
+    clock_skew: float = 0.0,
 ) -> tuple[bool | None, str | None]:
-    """Whether any allowed report file exists newer than ``marker``.
-
-    Returns ``(True|False, None)`` on success; ``(None, reason)`` when the
-    check cannot run (caller should fail-open and skip the stop nudge).
-    """
+    """Whether any allowed report file exists newer than this run's start."""
+    check = getattr(backend, "has_exportable_files_since_run", None)
+    if check is not None:
+        try:
+            return check(run_started_at, clock_skew)
+        except Exception as exc:  # noqa: BLE001
+            return None, str(exc)
     try:
-        paths, notes = _paths_newer_than_marker(backend, marker)
+        items, notes = _list_candidates(backend, run_started_at, clock_skew)
         for note in notes:
-            lower = note.lower()
-            if "failed" in lower or "cannot apply run marker" in lower:
+            if "could not list" in note.lower():
                 return None, note
-        for path in paths:
-            ext = os.path.splitext(path)[1].lower()
-            if ext in _CONTENT_TYPES:
+        for item in items:
+            ext = os.path.splitext(item["path"])[1].lower()
+            if ext in REPORT_FILE_CONTENT_TYPES:
                 return True, None
         return False, None
-    except Exception as exc:  # noqa: BLE001 — stop hook must fail-open
+    except Exception as exc:  # noqa: BLE001
         return None, str(exc)
 
 
-def _paths_newer_than_marker(backend, marker: str) -> tuple[list[str], list[str]]:
-    notes: list[str] = []
-    execute = getattr(backend, "execute", None)
-    if not execute:
-        return [], [
-            "Export: cannot apply run marker — sandbox backend has no execute"
-        ]
-    cmd = (
-        f"cd / && (find /output -maxdepth 1 -type f -newer {shlex.quote(marker)} "
-        f"2>/dev/null; find output -maxdepth 1 -type f -newer {shlex.quote(marker)} "
-        f"2>/dev/null) | sort -u"
-    )
-    try:
-        resp = execute(cmd)
-        output = (getattr(resp, "output", None) or "").strip()
-    except Exception as exc:  # noqa: BLE001
-        return [], [f"Export: find newer-than-marker failed ({exc})"]
-    raw = [line.strip() for line in output.splitlines() if line.strip()]
-    paths = _dedupe_output_paths(backend, raw)
-    if not raw and not paths:
-        notes.append(
-            "Export: no report files newer than this run's marker under output/"
-        )
-    return paths, notes
-
-
-def _file_size_bytes(backend, path: str) -> int | None:
-    """Return file size without downloading content, or None when unknown."""
-    execute = getattr(backend, "execute", None)
-    if execute is None:
-        return None
-    try:
-        quoted = shlex.quote(path)
-        resp = execute(f"stat -L -c %s {quoted} 2>/dev/null")
-        output = (getattr(resp, "output", None) or "").strip().split()
-        if not output:
-            return None
-        size = int(output[0])
-        return size if size >= 0 else None
-    except (ValueError, Exception):  # noqa: BLE001
-        return None
+# Back-compat alias for tests still naming marker API
+has_exportable_files_since_marker = has_exportable_files_since_run
 
 
 def export_output_files(
     backend,
     *,
     directory: str | None = None,
-    run_marker_path: str | None = None,
-    marker_create_failed: bool = False,
+    run_started_at: float | None = None,
+    clock_skew: float = 0.0,
+    run_marker_path: str | None = None,  # noqa: ARG001 — legacy, unused
+    marker_create_failed: bool = False,  # noqa: ARG001 — legacy
 ):
-    """Download the report files from sandbox ``output`` dirs.
-
-    Returns (files, notes): ``files`` is a list of {"name", "path",
-    "content_type", "content"} dicts with content decoded as UTF-8
-    text; ``notes`` names anything skipped or failed. ``backend`` None
-    (in-memory fallback) yields a clear warning note (not silent success).
-    """
+    """Download report files from sandbox ``output`` (mtime >= run start when known)."""
     _ = directory
     notes: list[str] = []
-    if marker_create_failed:
-        notes.append(
-            "Export: run marker could not be created — listing output without "
-            "per-run file filter (stale session files may be included)"
-        )
     if backend is None:
         return [], notes + [
             "Export: sandbox backend unavailable — no files exported "
             "(in-memory fallback cannot export; enable SANDBOX_* or see notes)"
         ]
-    if run_marker_path:
-        paths, list_notes = _paths_newer_than_marker(backend, run_marker_path)
-    else:
-        paths, list_notes = _paths_from_ls(backend)
+    clock_skew = float(
+        clock_skew
+        if clock_skew
+        else getattr(backend, "_clock_skew", 0.0)
+    )
+    if run_started_at is None:
+        run_started_at = getattr(backend, "_run_started_at", None)
+
+    items, list_notes = _list_candidates(backend, run_started_at, clock_skew)
     notes.extend(list_notes)
-    filtered_paths: list[str] = []
+    filtered: list[dict] = []
     skipped_ext: list[str] = []
-    for path in paths:
+    for item in items:
+        path = item["path"]
         ext = os.path.splitext(path)[1].lower()
-        if ext in _CONTENT_TYPES:
-            filtered_paths.append(path)
+        if ext in REPORT_FILE_CONTENT_TYPES:
+            filtered.append(item)
         else:
             skipped_ext.append(path)
     if skipped_ext:
@@ -266,30 +151,32 @@ def export_output_files(
             "Export: skipped non-text files in 'output/': "
             + ", ".join(sorted(skipped_ext))
         )
-    if not filtered_paths:
+    if not filtered:
         return [], notes
 
     files: list[dict] = []
     total = 0
-    for path in sorted(filtered_paths):
-        canonical = _canonical_sandbox_path(backend, path)
-        download_path = canonical if canonical.startswith("/") else path
-        size = _file_size_bytes(backend, download_path)
+    download = getattr(backend, "download_files", None)
+    if not download:
+        return [], notes + ["Export: sandbox backend cannot download files"]
+    for item in sorted(filtered, key=lambda x: x["path"]):
+        path = item["path"]
+        size = item.get("size")
         if size is None:
             notes.append(f"Export: skipped {path} (could not determine file size)")
             continue
-        if size > MAX_FILE_BYTES:
+        if int(size) > MAX_FILE_BYTES:
             notes.append(
                 f"Export: skipped {path} ({size} bytes > {MAX_FILE_BYTES} cap)"
             )
             continue
-        if total + size > MAX_TOTAL_BYTES:
+        if total + int(size) > MAX_TOTAL_BYTES:
             notes.append(
                 f"Export: skipped {path} (total would exceed {MAX_TOTAL_BYTES} cap)"
             )
             continue
         try:
-            responses = backend.download_files([download_path])
+            responses = download([path])
         except Exception as exc:  # noqa: BLE001
             notes.append(f"Export: could not download {path} ({exc})")
             continue
@@ -317,8 +204,8 @@ def export_output_files(
         files.append(
             {
                 "name": os.path.basename(path),
-                "path": download_path,
-                "content_type": _CONTENT_TYPES[ext],
+                "path": path,
+                "content_type": REPORT_FILE_CONTENT_TYPES[ext],
                 "content": content.decode("utf-8", errors="replace"),
             }
         )
