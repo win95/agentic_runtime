@@ -12,11 +12,15 @@ from __future__ import annotations
 
 import json
 import logging
+from typing import TYPE_CHECKING
 
 from runtime.llm_factory import build_chat_model
 from runtime.observability_resilience import invoke_with_observability_fallback
 from runtime.security import MAX_INPUT_JSON_BYTES, wrap_data
 from runtime.skills.map_plan import SkillMap, compute_plan_trace
+
+if TYPE_CHECKING:
+    from runtime.harness.schema import MissionHarness
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +70,7 @@ def allowed_builtin_tool_names(
     execution_config: dict | None = None,
     *,
     sandbox_enabled: bool = False,
+    harness: MissionHarness | None = None,
 ) -> set[str]:
     """Built-in deepagents tool names that may appear in ``actions_taken``.
 
@@ -73,10 +78,13 @@ def allowed_builtin_tool_names(
     all standard built-ins count as in-policy; ``execute`` is included only
     when the mission opts into a sandbox backend (it is not offered on the
     in-memory backend).
+
+    ``harness`` is the run's already-resolved model when the caller
+    has it; without one the harness is loaded (cached per mission).
     """
     from runtime.harness.registry import mission_denies_builtin_tools
 
-    if mission_denies_builtin_tools(mission_id, execution_config):
+    if mission_denies_builtin_tools(mission_id, execution_config, harness=harness):
         return set()
     names = set(BUILTIN_TOOL_NAMES)
     if not sandbox_enabled:
@@ -87,6 +95,8 @@ def allowed_builtin_tool_names(
 def builtin_tools_exclusion(
     mission_id: str | None,
     execution_config: dict | None = None,
+    *,
+    harness: MissionHarness | None = None,
 ):
     """_ToolExclusionMiddleware hiding the deepagents built-ins, or None
     when the mission keeps them.
@@ -107,7 +117,7 @@ def builtin_tools_exclusion(
     """
     from runtime.harness.registry import mission_denies_builtin_tools
 
-    if not mission_denies_builtin_tools(mission_id, execution_config):
+    if not mission_denies_builtin_tools(mission_id, execution_config, harness=harness):
         return None
     from deepagents.middleware._tool_exclusion import _ToolExclusionMiddleware
 

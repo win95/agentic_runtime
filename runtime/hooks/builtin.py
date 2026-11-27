@@ -420,7 +420,9 @@ def deny_builtin_tools(context: HookContext) -> HookDecision | None:
     )
 
     execution_config = (context.mission or {}).get("execution") or {}
-    if not mission_denies_builtin_tools(context.mission_id, execution_config):
+    if not mission_denies_builtin_tools(
+        context.mission_id, execution_config, harness=context.harness
+    ):
         return None
     if context.tool_name not in _BUILTIN_FILE_TOOLS:
         return None
@@ -428,6 +430,7 @@ def deny_builtin_tools(context: HookContext) -> HookDecision | None:
         context.mission_id,
         context.tool_name,
         execution_config,
+        harness=context.harness,
     )
     if not message:
         return None
@@ -463,7 +466,9 @@ def limit_large_report_write(context: HookContext) -> HookDecision | None:
     from runtime.harness.registry import harness_requires_output_files
 
     execution_config = (context.mission or {}).get("execution") or {}
-    if not harness_requires_output_files(context.mission_id, execution_config):
+    if not harness_requires_output_files(
+        context.mission_id, execution_config, harness=context.harness
+    ):
         return None
     if context.tool_name != "write_file":
         return None

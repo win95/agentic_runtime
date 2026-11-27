@@ -172,6 +172,10 @@ class HookMiddleware(AgentMiddleware):
         tool_budget_max_result_tokens: int = 0,
         tool_budget_max_calls: dict[str, int] | None = None,
         agent=None,
+        # The run's already-resolved harness model (the mission graph
+        # resolves once per run); carried onto every HookContext so
+        # handlers read flags off it instead of re-resolving.
+        harness=None,
     ):
         self.registry = registry
         self.execution_id = execution_id
@@ -179,6 +183,7 @@ class HookMiddleware(AgentMiddleware):
         self.tenant = tenant
         self.agent_id = agent_id
         self.agent = agent
+        self.harness = harness
         self.mission = mission or {}
         self.input_data = input_data or {}
         self.evidence_count = evidence_count
@@ -244,6 +249,7 @@ class HookMiddleware(AgentMiddleware):
             tool_budget_tools=parent.tool_budget_tools,
             tool_budget_max_result_tokens=parent.tool_budget_max_result_tokens,
             tool_budget_max_calls=parent.tool_budget_max_calls,
+            harness=parent.harness,
         )
 
     # -- helpers ------------------------------------------------------
@@ -259,6 +265,7 @@ class HookMiddleware(AgentMiddleware):
             allowed_tools=list(self.allowed_tools),
             capabilities=list(self.capabilities),
             agent=self.agent,
+            harness=self.harness,
         )
 
     def _record(self, event: HookEvent, decisions, **extra) -> None:

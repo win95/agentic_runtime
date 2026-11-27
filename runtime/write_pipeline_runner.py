@@ -223,17 +223,18 @@ def confirm_tool_stub(tool_name: str, description: str) -> StructuredTool:
 def ensure_confirm_tool_registered(tool_name: str, description: str) -> None:
     """Register the confirm stub (idempotent) so ``enforce_layer`` knows it.
 
-    The stub is registered under every guest-output capability from the
-    mission seeds — the same set the old import-time stub used. The
-    per-session tool itself is never registered; only the stub is.
+    The stub is registered under every guest-output capability from
+    the harness (``HARNESS_SOURCE``) — the same set the old
+    import-time stub used. The per-session tool itself is never
+    registered; only the stub is.
     """
-    from runtime.harness.loader import guest_output_capabilities_from_seed_files
+    from runtime.harness.registry import guest_output_capabilities
     from runtime.tools.registry import registry
 
     if registry.get(tool_name) is not None:
         return
     stub = confirm_tool_stub(tool_name, description)
-    for capability in guest_output_capabilities_from_seed_files():
+    for capability in guest_output_capabilities():
         registry.register(stub, capability=capability, read_only=True)
 
 

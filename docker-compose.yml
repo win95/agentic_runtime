@@ -259,8 +259,9 @@ services:
   # (see docs/worker-per-agent.md). Same image/env as the shared worker,
   # except: no MCP_SERVER_URL (only hotel needs MCP; the MCP gate in
   # mission_graph.py also skips the load for lark missions), plus the
-  # agent's own Lark credentials and a harness allowlist so this worker's
-  # log is not flooded by other missions' harness errors.
+  # agent's own Lark credentials; it loads only its own mission's
+  # harness via load_mission_harness, so its log is not flooded by
+  # other missions' harness errors.
   # NOTE: every service here also reads .env via env_file, so if the
   # real .env sets MCP_SERVER_URL / MCP_TOOL_CAPABILITIES, worker-lark
   # still sees them — harmless, the code gate blocks the MCP load.
@@ -294,9 +295,6 @@ services:
       # Same values as the frame's LARK_APP_ID / LARK_APP_SECRET.
       LARK_APP_ID: ${LARK_APP_ID:?}
       LARK_APP_SECRET: ${LARK_APP_SECRET:?}
-      # Harness index filter: this worker only loads the lark mission,
-      # so other missions' harness errors never flood its log.
-      HARNESS_MISSION_ALLOWLIST: agent_lark_me_mission
       NO_PROXY: 127.0.0.1,localhost,host.docker.internal
       no_proxy: 127.0.0.1,localhost,host.docker.internal
     extra_hosts:

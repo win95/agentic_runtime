@@ -22,6 +22,7 @@ import logging
 import re
 import threading
 import time
+from typing import TYPE_CHECKING
 
 from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, StateGraph
@@ -40,6 +41,9 @@ from runtime.observability_resilience import (
 )
 from runtime.security import detect_injection_signals
 from runtime.state import MissionState
+
+if TYPE_CHECKING:
+    from runtime.harness.schema import MissionHarness
 
 logger = logging.getLogger(__name__)
 
@@ -426,11 +430,25 @@ def deep_agent_node(state: MissionState) -> dict:
         # run through this node anymore — the flow branch always won
         # the condition, and the gate returned None for every mission
         # — so they were dead code, not a fallback.
+        from runtime.harness.registry import effective_harness
         from runtime.subgraph.flow import use_flow_subgraph
 
         execution_cfg = mission.get("execution") or {}
+        # Plan B step 2 — parse once per run: resolve the run's
+        # harness here, before the first use, and pass the model down
+        # (use_flow_subgraph, the hook middleware, the budget and
+        # exclusion helpers below) instead of re-resolving it at each
+        # call site. Stored on the context beside the agent object
+        # (same precedent: context["agent"] above) — the context was
+        # already validated, and validate_agent_context only checks
+        # the types of the keys it knows, so an extra key is safe.
+        _run_harness = effective_harness(state.get("mission_id"), execution_cfg)
+        context["harness"] = _run_harness
         use_flow = use_flow_subgraph(
-            state.get("mission_id"), mapped_skills, execution_cfg
+            state.get("mission_id"),
+            mapped_skills,
+            execution_cfg,
+            harness=_run_harness,
         )
         # Human-in-the-loop interrupts (docs/interrupt.md): the mission
         # may gate tools in execution.interrupt_on. Flow mode cannot
@@ -571,9 +589,8 @@ def deep_agent_node(state: MissionState) -> dict:
             effective_history_tokens,
             estimate_tokens,
         )
-        from runtime.harness.registry import effective_harness, harness_requires_output_files
+        from runtime.harness.registry import harness_requires_output_files
 
-        _run_harness = effective_harness(state.get("mission_id"), execution_cfg)
         hook_middleware = HookMiddleware(
             hook_registry,
             execution_id=state.get("execution_id") or "",
@@ -588,9 +605,9 @@ def deep_agent_node(state: MissionState) -> dict:
             allowed_tools=list(context.get("allowed_tools") or []),
             capabilities=list(context.get("capabilities") or []),
             reserved_history_tokens=estimate_tokens(history_block),
-            history_budget_tokens=effective_history_tokens(mission),
+            history_budget_tokens=effective_history_tokens(mission, harness=_run_harness),
             output_files_required=harness_requires_output_files(
-                state.get("mission_id"), execution_cfg
+                state.get("mission_id"), execution_cfg, harness=_run_harness
             ),
             sequential_tool_names=frozenset(_run_harness.tool_calls.sequential),
             tool_budget_tools=frozenset(_run_harness.tool_budget.tools),
@@ -601,6 +618,11 @@ def deep_agent_node(state: MissionState) -> dict:
             # created — guard_destructive_target accepts those as
             # targets). Resolved above, before this middleware.
             agent=context.get("agent"),
+            # The run's resolved harness (see the parse-once resolve
+            # above): hooks read the model off it instead of
+            # re-resolving (deny_builtin_tools,
+            # limit_large_report_write).
+            harness=_run_harness,
         )
         # Part 1 (b): the per-run middleware list. For missions that
         # must not see any built-in tool (hotel only), append the
@@ -611,7 +633,7 @@ def deep_agent_node(state: MissionState) -> dict:
         # runtime/deep_agent.py::builtin_tools_exclusion.
         middleware = [hook_middleware]
         exclusion = builtin_tools_exclusion(
-            state.get("mission_id"), execution_cfg
+            state.get("mission_id"), execution_cfg, harness=_run_harness
         )
         if exclusion is not None:
             middleware.append(exclusion)
@@ -1199,10 +1221,20 @@ def _is_grounded(cause: str, evidence: list) -> bool:
     return not tokens
 
 
-def _allowed_tool_names(mission: dict, *, sandbox_enabled: bool = False) -> set[str] | None:
+def _allowed_tool_names(
+    mission: dict,
+    *,
+    sandbox_enabled: bool = False,
+    harness: MissionHarness | None = None,
+) -> set[str] | None:
     """Tool names this mission's capabilities allow (None = cannot tell,
     e.g. the tool modules failed to import — the trace check is then
-    skipped instead of flagging everything)."""
+    skipped instead of flagging everything).
+
+    ``harness`` is the run's already-resolved model when the caller
+    has it; without one the helper loads it (cached per mission) —
+    the validate node has no resolved model to pass, so it relies on
+    that cached load (0 extra parses in-run)."""
     try:
         import runtime.tools  # noqa: F401 — registers built-in tools
         from runtime.deep_agent import allowed_builtin_tool_names
@@ -1217,6 +1249,7 @@ def _allowed_tool_names(mission: dict, *, sandbox_enabled: bool = False) -> set[
         mission.get("mission_id"),
         mission.get("execution") or {},
         sandbox_enabled=sandbox_enabled,
+        harness=harness,
     )
     return allowed
 

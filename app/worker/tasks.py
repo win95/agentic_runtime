@@ -245,10 +245,22 @@ def run_execution(self, execution_id: str, resume_decision: str | None = None) -
         # Slack notification (scope: failures + admin actions only).
         # Best-effort, after persistence, never blocks the return.
         # The admin-action flag comes from the mission harness, not
-        # from a hardcoded mission id.
+        # from a hardcoded mission id. Resolved ONCE here for both
+        # notifications below (same scope, Plan B step 2) — a lookup
+        # failure falls back to "no flag", so a FAILED run still gets
+        # its Slack failure notice (should_notify sends failures
+        # regardless of the flag) while admin-action / Lark notices
+        # are skipped; previously the same failure skipped both
+        # blocks entirely.
+        _notify_harness = None
+        try:
+            from runtime.harness.registry import effective_harness
+
+            _notify_harness = effective_harness(execution.mission_id)
+        except Exception as exc:  # noqa: BLE001 — notify never blocks
+            logger.warning("Harness lookup failed for %s: %s", execution_id, exc)
         try:
             from app.config import settings
-            from runtime.harness.registry import effective_harness
             from runtime.notifications.slack import notify_execution
 
             notify_execution(
@@ -260,9 +272,11 @@ def run_execution(self, execution_id: str, resume_decision: str | None = None) -
                 error=execution.error,
                 enabled=settings.slack_notifications_enabled,
                 webhook_url=settings.slack_webhook_url,
-                notify_admin_actions=effective_harness(
-                    execution.mission_id
-                ).notifications.notify_admin_actions,
+                notify_admin_actions=(
+                    _notify_harness.notifications.notify_admin_actions
+                    if _notify_harness is not None
+                    else False
+                ),
             )
         except Exception as exc:  # noqa: BLE001 — notify never blocks
             logger.warning("Slack notification failed for %s: %s", execution_id, exc)
@@ -272,16 +286,17 @@ def run_execution(self, execution_id: str, resume_decision: str | None = None) -
         # harness, like the Slack admin-action flag above — not from
         # a hardcoded mission id.
         try:
-            from runtime.harness.registry import effective_harness
             from runtime.integrations.lark_notify import notify_lark_execution_failed
 
             notify_lark_execution_failed(
                 mission_id=execution.mission_id,
                 execution_input=execution.input or {},
                 status=status,
-                lark_failure_notice=effective_harness(
-                    execution.mission_id
-                ).notifications.lark_failure_notice,
+                lark_failure_notice=(
+                    _notify_harness.notifications.lark_failure_notice
+                    if _notify_harness is not None
+                    else False
+                ),
             )
         except Exception as exc:  # noqa: BLE001 — notify never blocks
             logger.warning("Lark failure notice failed for %s: %s", execution_id, exc)

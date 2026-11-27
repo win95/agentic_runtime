@@ -69,6 +69,10 @@ from __future__ import annotations
 
 import json
 import math
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from runtime.harness.schema import MissionHarness
 
 MAX_CONTEXT_TOKENS = 32_000
 SYSTEM_PROMPT_TOKENS = 1_024
@@ -112,7 +116,11 @@ COMPONENT_BUDGETS = {
 CHARS_PER_TOKEN = 4
 
 
-def effective_history_tokens(mission: dict | None) -> int:
+def effective_history_tokens(
+    mission: dict | None,
+    *,
+    harness: MissionHarness | None = None,
+) -> int:
     """History budget for one mission's run (tran 2026-11-19, harness opt-in).
 
     Default: ``HISTORY_TOKENS`` (9,640) for every mission — same as before
@@ -123,12 +131,17 @@ def effective_history_tokens(mission: dict | None) -> int:
     instead (17,664 total history budget). Missions with
     ``execution.retrieval`` keep the default — their retrieval block consumes
     that slice at run time.
+
+    ``harness`` is the run's already-resolved model when the caller
+    has it (the mission graph resolves once per run); without one the
+    harness is loaded (cached per mission).
     """
     from runtime.harness.registry import effective_harness
 
     mission_id = (mission or {}).get("mission_id")
     execution = (mission or {}).get("execution") or {}
-    harness = effective_harness(mission_id, execution)
+    if harness is None:
+        harness = effective_harness(mission_id, execution)
     reclaim = harness.context_budget.reclaim_retrieval_for_history
     if reclaim and not execution.get("retrieval"):
         return HISTORY_TOKENS + RETRIEVAL_TOKENS

@@ -169,11 +169,6 @@ class Settings(BaseSettings):
     harness_source: Literal["db", "seed"] = "db"
     harness_index_ttl_seconds: int = 30
     harness_index_db_timeout_seconds: float = 2.0
-    # Worker-lark only: comma-separated mission ids the harness index
-    # loads (tách worker theo agent — chỉ worker-lark set
-    # "agent_lark_me_mission"). Empty = full index (default).
-    harness_mission_allowlist: str = ""
-
     # Runtime
     checkpoint_enabled: bool = False
     execution_timeout_seconds: int = 3600

@@ -28,9 +28,11 @@ resume lẫn schedule (beat → `create_execution` → `dispatch_execution`)
 `worker-lark` (`docker-compose.yml`): cùng build `.` và env như worker
 chung, **trừ** `MCP_SERVER_URL`, **cộng** `LARK_APP_ID` /
 `LARK_APP_SECRET` (fail-fast `${...:?}` — worker chạy Lark tools +
-failure notifier nên bắt buộc phải có) và
-`HARNESS_MISSION_ALLOWLIST=agent_lark_me_mission` (chỉ load harness của
-mission đó, log không còn flood lỗi của 4 mission khác).
+failure notifier nên bắt buộc phải có). Harness thì không lọc bằng env
+nữa: worker chỉ load harness của mission nó phục vụ, qua
+`load_mission_harness(mission_id)` (per-mission lazy load trong
+`runtime/harness/registry.py`), nên lỗi harness của mission khác không
+còn flood log của nó.
 
 Lưu ý về `env_file`: mọi service đều đọc `.env` qua `env_file`, nên nếu
 `.env` thật có set `MCP_SERVER_URL` / `MCP_TOOL_CAPABILITIES` thì
@@ -46,7 +48,8 @@ vì code graph chung chạm tới chúng; chỉ tách kết nối MCP + key Lark
 
 1. Thêm mission vào `MISSION_QUEUE_MAP` (kèm test map → queue đúng).
 2. Thêm service compose mới (copy `worker-lark`, đổi tên service, `-Q <queue>`,
-   env riêng của agent đó, `HARNESS_MISSION_ALLOWLIST=<mission>`).
+   env riêng của agent đó). Worker mới tự load harness của mission nó
+   qua `load_mission_harness`, không cần cấu hình lọc gì thêm.
 3. Deploy + kiểm tra log riêng của worker mới trước khi coi là xong.
 
 ## Lệnh ops

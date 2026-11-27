@@ -89,6 +89,7 @@ import json
 import logging
 import re
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
@@ -119,6 +120,9 @@ from runtime.write_pipeline_runner import (
     mark_awaiting_confirm,
     pipeline_for_write_node,
 )
+
+if TYPE_CHECKING:
+    from runtime.harness.schema import MissionHarness
 
 logger = logging.getLogger(__name__)
 
@@ -615,11 +619,17 @@ def use_flow_subgraph(
     mission_id: str | None,
     mapped_skills,
     execution_config: dict | None = None,
+    *,
+    harness: MissionHarness | None = None,
 ) -> bool:
-    """True when harness enables the flow subgraph and has a mapped skill."""
+    """True when harness enables the flow subgraph and has a mapped skill.
+
+    ``harness`` is the run's already-resolved model when the caller
+    has it (the mission graph resolves once per run); without one the
+    harness is loaded (cached per mission)."""
     from runtime.harness.registry import use_flow_subgraph_harness
 
-    return use_flow_subgraph_harness(mission_id, mapped_skills, execution_config)
+    return use_flow_subgraph_harness(mission_id, mapped_skills, execution_config, harness=harness)
 
 
 def _tool_names_called(messages: list) -> set[str]:
