@@ -56,6 +56,19 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4o-mini"
     llm_temperature: float = 0.2
 
+    # --- LLM provider switch ---
+    # "litellm" (default): the user's LiteLLM proxy above.
+    # "cloudflare": Cloudflare Workers AI via its OpenAI-compatible
+    # /ai/v1 endpoint — no proxy needed. Needs CLOUDFLARE_ACCOUNT_ID
+    # (not a secret, it appears in dashboard URLs) +
+    # CLOUDFLARE_API_TOKEN (a Workers AI API token). With this provider
+    # LLM_MODEL must be a Workers AI model name, e.g.
+    # @cf/qwen/qwen3.8-27b, and EMBEDDING_MODEL e.g.
+    # @cf/qwen/qwen3-embedding-0.6b. See docs/cloudflare-workers-ai.md.
+    llm_provider: str = "litellm"
+    cloudflare_account_id: str = ""
+    cloudflare_api_token: str = ""
+
     # --- Embeddings via LiteLLM (OpenAI-compatible) ---
     # Empty base/key => reuse the LLM proxy values above.
     embedding_api_base: str = ""
@@ -254,12 +267,46 @@ class Settings(BaseSettings):
 
     # --- Resolved (effective) values ---
     @property
+    def cloudflare_api_base(self) -> str:
+        """Workers AI OpenAI-compatible base URL for this account."""
+        return (
+            "https://api.cloudflare.com/client/v4/accounts/"
+            f"{self.cloudflare_account_id}/ai/v1"
+        )
+
+    @property
+    def resolved_llm_api_base(self) -> str:
+        """Chat base URL for the selected provider."""
+        if self.llm_provider == "cloudflare":
+            return self.cloudflare_api_base
+        return self.llm_api_base
+
+    @property
+    def resolved_llm_api_key(self) -> str:
+        """Chat API key for the selected provider."""
+        if self.llm_provider == "cloudflare":
+            return self.cloudflare_api_token
+        return self.llm_api_key
+
+    @property
     def resolved_embedding_api_base(self) -> str:
-        return self.embedding_api_base or self.llm_api_base
+        # Explicit EMBEDDING_API_BASE wins; otherwise the chat
+        # provider's base (LiteLLM proxy or Workers AI /ai/v1).
+        if self.embedding_api_base:
+            return self.embedding_api_base
+        if self.llm_provider == "cloudflare":
+            return self.cloudflare_api_base
+        return self.llm_api_base
 
     @property
     def resolved_embedding_api_key(self) -> str:
-        return self.embedding_api_key or self.llm_api_key
+        # Explicit EMBEDDING_API_KEY wins; otherwise the chat
+        # provider's key (LiteLLM proxy key or Workers AI token).
+        if self.embedding_api_key:
+            return self.embedding_api_key
+        if self.llm_provider == "cloudflare":
+            return self.cloudflare_api_token
+        return self.llm_api_key
 
     @property
     def resolved_embedding_model_index(self) -> str:
