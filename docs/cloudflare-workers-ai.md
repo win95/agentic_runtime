@@ -43,6 +43,23 @@ returns an empty list) — that is expected, not an error.
   switching the embedding provider to Workers AI does **not** require
   re-indexing, as long as the model stays qwen3-embedding-0.6b.
 
+## Provider quirks
+
+**System message must be first.** Workers AI rejects any request
+whose system message is not the first message (HTTP 400 "System
+message must be at the beginning"). The runtime can legitimately
+produce a second system message mid-list: the `retrieval_context`
+hook injects retrieved context as a SystemMessage after the user
+message, so a hybrid run sends `[system, human, system]` — found
+live 2026-11-27, `fault_analysis` failed exactly this way, while
+the LiteLLM proxy accepts the same request. The factory fixes it
+for every provider: `runtime/llm_factory.py` builds a
+`_SystemFirstChatOpenAI` that merges all system messages into one
+leading message at the generation choke point
+(`merge_system_messages`; string contents joined, content-block
+lists concatenated). The merge is semantics-preserving — the model
+sees the same system text, in one message, first.
+
 ## Measured cost (live, 2026-11-27)
 
 Free tier: 10,000 neurons/day. Measured on this account:
@@ -54,7 +71,13 @@ Free tier: 10,000 neurons/day. Measured on this account:
   **~0.03 neurons**. Embedding is effectively free at this scale.
 
 The 27B model costs ~27x the 8B one per short answer. At ~30
-neurons per agent turn, the free quota covers roughly 300 turns/day.
+neurons per short turn, the free quota covers roughly 300 short
+turns/day — but a full agent run is far more expensive than a short
+turn: every agent call carries the whole system prompt + skills +
+evidence (several thousand tokens), so one 5-mission live run costs
+on the order of a few thousand neurons. On 2026-11-27 the quota was
+exhausted (HTTP 429, error 4006) during the live agent runs — plan
+agent testing accordingly, or use the 8B model for cheap runs.
 
 ## Switching back
 

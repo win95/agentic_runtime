@@ -21,7 +21,110 @@ fallback to a different model.
 
 from __future__ import annotations
 
+from langchain_openai import ChatOpenAI
+
 from app.config import Settings, settings
+
+
+def merge_system_messages(messages: list) -> list:
+    """Merge every system message into one leading system message.
+
+    Cloudflare Workers AI's OpenAI-compatible endpoint rejects any
+    request whose system message is not the first message (HTTP 400
+    "System message must be at the beginning"). The runtime can
+    legitimately produce a second system message mid-list — the
+    ``retrieval_context`` hook injects retrieved context as a
+    SystemMessage after the user message (runtime/hooks/builtin.py),
+    so a hybrid run sends [system, human, system] and 400s on
+    Cloudflare while LiteLLM accepts it (found live 2026-11-27:
+    fault_analysis failed exactly this way). Merging is
+    semantics-preserving: the model sees the same system text, in
+    one message, first. Plain-string contents are joined with a
+    blank line; content-block lists are concatenated (string parts
+    become text blocks). Returns the original list object when no
+    merge is needed (no system message, or exactly one already
+    first) and never mutates its input.
+    """
+    from langchain_core.messages import SystemMessage
+
+    systems = [m for m in messages if isinstance(m, SystemMessage)]
+    if not systems:
+        return messages
+    if len(systems) == 1 and messages and messages[0] is systems[0]:
+        return messages
+    if all(isinstance(m.content, str) for m in systems):
+        merged_content: str | list = "\n\n".join(
+            m.content for m in systems if m.content
+        )
+    else:
+        blocks: list = []
+        for m in systems:
+            content = m.content
+            if isinstance(content, str):
+                if content:
+                    blocks.append({"type": "text", "text": content})
+            elif isinstance(content, list):
+                blocks.extend(content)
+            else:
+                blocks.append({"type": "text", "text": str(content)})
+        merged_content = blocks
+    first = systems[0]
+    merged = SystemMessage(
+        content=merged_content,
+        name=getattr(first, "name", None),
+        additional_kwargs=dict(first.additional_kwargs or {}),
+    )
+    return [merged] + [m for m in messages if not isinstance(m, SystemMessage)]
+
+
+def _normalize_call_args(args: tuple, kwargs: dict) -> tuple[tuple, dict]:
+    """Merge system messages in a (*args, **kwargs) model call.
+
+    The first positional arg (or the ``messages`` kwarg) is the
+    message list for the streaming generation methods, whose
+    signatures are opaque (*args, **kwargs).
+    """
+    if args and isinstance(args[0], list):
+        return (merge_system_messages(args[0]),) + args[1:], kwargs
+    if "messages" in kwargs and isinstance(kwargs["messages"], list):
+        return args, {**kwargs, "messages": merge_system_messages(kwargs["messages"])}
+    return args, kwargs
+
+
+class _SystemFirstChatOpenAI(ChatOpenAI):
+    """ChatOpenAI that merges system messages into one leading message.
+
+    See :func:`merge_system_messages`: Cloudflare rejects a system
+    message anywhere but first, and the runtime can emit one
+    mid-list. The merge happens at the generation choke point so
+    every call path is covered — invoke, ainvoke, batch, stream,
+    and tool-bound variants (``bind_tools`` wraps this same model).
+    """
+
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        return super()._generate(
+            merge_system_messages(messages),
+            stop=stop,
+            run_manager=run_manager,
+            **kwargs,
+        )
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        return await super()._agenerate(
+            merge_system_messages(messages),
+            stop=stop,
+            run_manager=run_manager,
+            **kwargs,
+        )
+
+    def _stream(self, *args, **kwargs):
+        args, kwargs = _normalize_call_args(args, kwargs)
+        return super()._stream(*args, **kwargs)
+
+    async def _astream(self, *args, **kwargs):
+        args, kwargs = _normalize_call_args(args, kwargs)
+        async for chunk in super()._astream(*args, **kwargs):
+            yield chunk
 
 
 def missing_llm_config(cfg: Settings | None = None) -> list[str]:
@@ -116,15 +219,17 @@ def build_chat_model(cfg: Settings | None = None):
 
     ``max_tokens`` is the context budget's output reserve
     (OUTPUT_RESERVE_TOKENS): one response can never eat more than the
-    tokens set aside for the answer.
+    tokens set aside for the answer. The returned model merges
+    system messages into one leading message (see
+    :func:`merge_system_messages`) so providers that require the
+    system message first — Cloudflare Workers AI — accept requests
+    the runtime builds with a mid-list system message.
     """
-    from langchain_openai import ChatOpenAI
-
     from runtime.context_budget import OUTPUT_RESERVE_TOKENS
 
     cfg = cfg or settings
     require_llm_config(cfg)
-    return ChatOpenAI(
+    return _SystemFirstChatOpenAI(
         base_url=cfg.resolved_llm_api_base,
         api_key=cfg.resolved_llm_api_key,
         model=cfg.llm_model,
