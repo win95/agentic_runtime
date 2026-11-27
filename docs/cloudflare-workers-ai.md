@@ -30,10 +30,14 @@ returns an empty list) — that is expected, not an error.
   embeddings, retrieval expansion, and the eval judge. Nothing else
   in the pipeline changes.
 - **Per-agent model pins still apply.** Agents whose YAML says
-  `model: ${LLM_MODEL}` (hotel, lark_me, admin, fault) follow the env
-  value. `agent_analytis` is pinned to `deepseek-v4-flash` in its YAML
-  — that name does not exist on Workers AI, so analytis fails on this
-  provider until its YAML model is changed and re-seeded.
+  `model: ${LLM_MODEL}` (hotel, lark_me, admin, fault, analytis) follow
+  the env value. `agent_analytis` used to be pinned to
+  `deepseek-v4-flash` (2026-11-20 trial); the pin was reverted on
+  2026-11-27 because Workers AI's free plan cannot call the
+  V4.1-Flash replacement (needs Workers Paid) — analytis now follows
+  `${LLM_MODEL}` and runs `@cf/qwen/qwen3.8-27b` on this provider.
+  After any model change, re-seed (`make seed-agent`) — it creates a
+  new AgentVersion.
 - `EMBEDDING_MODEL=@cf/qwen/qwen3-embedding-0.6b` produces 1024-dim
   vectors, the same dimension as the existing Qdrant collections —
   switching the embedding provider to Workers AI does **not** require
