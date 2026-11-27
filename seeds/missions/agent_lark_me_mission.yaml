@@ -36,6 +36,7 @@ input_schema:
       type: string
   required:
     - message
+    - chat_id
 
 execution:
   mode: autonomous
@@ -43,11 +44,11 @@ execution:
   skills:
     - agent-lark
     - session-memory
-  # Sandbox (tran 2026-11-27): file tools + `execute` run in an
-  # OpenSandbox sandbox of the session instead of the in-memory
-  # backend; files under /output are exported. Needs the sandbox
-  # server up — otherwise the run silently falls back to in-memory.
-  sandbox: true
+  # No sandbox (tran 2026-11-28): lark_me only calls the Lark API —
+  # it never runs code. Sandbox was briefly on (2026-11-27) and
+  # turned back off: the mission has no file output, so a sandbox
+  # buys nothing.
+  sandbox: false
 
 capabilities:
   - lark_messaging
@@ -63,19 +64,13 @@ harness:
     enabled: true
   security:
     user_runnable: false
-  # Guest chat (tran 2026-11-27, phương án A): /guest/chat routes to
-  # this mission — it is the only mission exposing public chat.
-  # Guests have no Lark chat_id, so chat_id is optional in
-  # input_schema; the Lark scope refuses every chat-target tool for
-  # a guest run, and the reply channel is reply_to_guest under
-  # capability lark_messaging (restored runtime/tools/
-  # guest_channel_tools.py). user_runnable stays false: plain JWT
-  # users still cannot call this mission via POST /executions.
-  guest_channel:
-    exposes_public_chat: true
-  guest_output:
-    register_reply_tools: true
-    capability: lark_messaging
+  # Guest chat OFF (tran 2026-11-28): /guest/chat no longer routes
+  # here — it was a stopgap after the hotel disable, not a product
+  # decision. With no mission exposing public chat, /guest/chat
+  # answers 503. Re-enable by restoring guest_channel/guest_output
+  # (runtime/tools/guest_channel_tools.py is still in the tree).
+  # user_runnable stays false: plain JWT users still cannot call
+  # this mission via POST /executions.
   # Failure notice (D-LARK-16): a FAILED run sends one short error
   # message into the Lark chat it came from. Opt-in here (default
   # false) — the worker reads it via effective_harness, like the
