@@ -43,8 +43,11 @@ execution:
   skills:
     - agent-lark
     - session-memory
-  # No sandbox: lark_me only calls the Lark API — it never runs code.
-  sandbox: false
+  # Sandbox (tran 2026-11-27): file tools + `execute` run in an
+  # OpenSandbox sandbox of the session instead of the in-memory
+  # backend; files under /output are exported. Needs the sandbox
+  # server up — otherwise the run silently falls back to in-memory.
+  sandbox: true
 
 capabilities:
   - lark_messaging
