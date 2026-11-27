@@ -315,7 +315,9 @@ def resume_execution(
     execution.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
     db.commit()
     try:
-        execution_service.dispatch_resume(execution_id, payload.decision)
+        execution_service.dispatch_resume(
+            execution_id, payload.decision, execution.mission_id
+        )
     except Exception as exc:  # noqa: BLE001 — broker down: keep the pause
         execution.status = "INTERRUPTED"
         execution.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)

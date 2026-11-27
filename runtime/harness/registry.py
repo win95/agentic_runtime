@@ -72,6 +72,17 @@ def _ttl_seconds() -> float:
     return float(_settings().harness_index_ttl_seconds)
 
 
+def _mission_allowlist() -> frozenset[str] | None:
+    """Mission ids from HARNESS_MISSION_ALLOWLIST (comma-separated), or
+    None when unset (no filter — full index). Only a split worker sets
+    this (worker-lark: "agent_lark_me_mission"); the API and the shared
+    worker leave it empty."""
+    raw = (_settings().harness_mission_allowlist or "").strip()
+    if not raw:
+        return None
+    return frozenset(part.strip() for part in raw.split(",") if part.strip())
+
+
 def _seed_by_mission_id() -> dict[str, MissionHarness]:
     return {mid: h for mid, h, _p in iter_seed_mission_harnesses()}
 
@@ -105,7 +116,10 @@ def _derive_guest_routing(index: HarnessIndex) -> None:
 
 def _load_index_from_seeds_only() -> HarnessIndex:
     index = HarnessIndex()
+    allowlist = _mission_allowlist()
     for mission_id, harness, _path in iter_seed_mission_harnesses():
+        if allowlist is not None and mission_id not in allowlist:
+            continue
         index.by_mission[mission_id] = harness
     _derive_guest_routing(index)
     return index
@@ -120,6 +134,7 @@ def _load_index_from_db() -> HarnessIndex:
 
     timeout = _settings().harness_index_db_timeout_seconds
     seed_fallback = _seed_by_mission_id()
+    allowlist = _mission_allowlist()
     index = HarnessIndex()
     db = SessionLocal()
     try:
@@ -132,6 +147,8 @@ def _load_index_from_db() -> HarnessIndex:
         stmt = select(models.Mission.id, models.Mission.execution_config)
         rows = db.execute(stmt).all()
         for mission_id, execution_config in rows:
+            if allowlist is not None and str(mission_id) not in allowlist:
+                continue
             ec = execution_config or {}
             raw = ec.get("harness")
             if isinstance(raw, dict):

@@ -282,7 +282,7 @@ def deep_agent_node(state: MissionState) -> dict:
             select_hooks,
         )
         from runtime.middleware import TokenAuditCallbackHandler
-        from runtime.tools.mcp_adapter import load_mcp_tools
+        from runtime.tools.mcp_adapter import load_mcp_tools, mission_uses_mcp_tools
         from runtime.tools.registry import registry
 
         # Hooks: one registry per run (built-ins, narrowed to the
@@ -377,7 +377,12 @@ def deep_agent_node(state: MissionState) -> dict:
         # get_langchain_tools() then filters everything — built-in and
         # MCP — by the mission's capabilities. Previously MCP tools were
         # appended unfiltered (audit finding, now closed).
-        load_mcp_tools()
+        # Gate (tách worker theo agent): only connect to the MCP server
+        # when the mission declares a capability an MCP tool maps to.
+        # Missions that never use MCP skip the round-trip entirely, so
+        # a dead MCP server logs nothing on their runs.
+        if mission_uses_mcp_tools(mission.get("capabilities")):
+            load_mcp_tools()
         tools = registry.get_langchain_tools(context)
         # Middleware: one handler instance per run, carrying this run's
         # execution context — it logs token usage + tool calls to the DB
