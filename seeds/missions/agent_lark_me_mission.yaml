@@ -36,7 +36,6 @@ input_schema:
       type: string
   required:
     - message
-    - chat_id
 
 execution:
   mode: autonomous
@@ -61,6 +60,19 @@ harness:
     enabled: true
   security:
     user_runnable: false
+  # Guest chat (tran 2026-11-27, phương án A): /guest/chat routes to
+  # this mission — it is the only mission exposing public chat.
+  # Guests have no Lark chat_id, so chat_id is optional in
+  # input_schema; the Lark scope refuses every chat-target tool for
+  # a guest run, and the reply channel is reply_to_guest under
+  # capability lark_messaging (restored runtime/tools/
+  # guest_channel_tools.py). user_runnable stays false: plain JWT
+  # users still cannot call this mission via POST /executions.
+  guest_channel:
+    exposes_public_chat: true
+  guest_output:
+    register_reply_tools: true
+    capability: lark_messaging
   # Failure notice (D-LARK-16): a FAILED run sends one short error
   # message into the Lark chat it came from. Opt-in here (default
   # false) — the worker reads it via effective_harness, like the

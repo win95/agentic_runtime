@@ -55,6 +55,16 @@ class Settings(BaseSettings):
     # (e.g. gpt-4o-mini). The proxy routes by this name.
     llm_model: str = "gpt-4o-mini"
     llm_temperature: float = 0.2
+    # Reasoning (thinking) toggle for Qwen3-style chat models served
+    # behind the proxy. When true, the factory sends
+    # chat_template_kwargs {"enable_thinking": true} with every chat
+    # call. Verified live 2026-11-27 against the LiteLLM proxy:
+    # qwen3-8b thinks by default and this is the parameter form the
+    # backend actually honors — extra_body.enable_thinking and
+    # reasoning_effort are silently ignored there. Off by default:
+    # no extra parameter is sent, so other providers/models behave
+    # exactly as before.
+    llm_enable_thinking: bool = False
 
     # --- LLM provider switch ---
     # "litellm" (default): the user's LiteLLM proxy above.

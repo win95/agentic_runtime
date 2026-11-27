@@ -94,7 +94,7 @@ DEFAULT_STOP_MAX_CONTINUES = 3
 # Pre-retrieval defaults (see retrieval_context): which stores to pull
 # when a mission declares `retrieval:` without listing sources, and
 # the char budget for the injected block — derived from the context
-# budget (RETRIEVAL_TOKENS = 8,024 tokens x ~4 chars).
+# budget (RETRIEVAL_TOKENS = 4,096 tokens x ~4 chars).
 DEFAULT_RETRIEVAL_SOURCES = ["faults", "documents", "relations"]
 DEFAULT_RETRIEVAL_MAX_CHARS = retrieval_max_chars()
 # One shared default with infra/qdrant_client.search_documents and

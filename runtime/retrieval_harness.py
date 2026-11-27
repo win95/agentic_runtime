@@ -39,7 +39,12 @@ from runtime.retrieval_metrics import (
 logger = logging.getLogger(__name__)
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_GOLDEN_SET_PATH = ROOT / "scripts" / "golden_set_fault_analysis.json"
+# The fault retrieval golden set moved with the archived fault agent
+# (2026-11-27); the eval still reads it from here by default.
+DEFAULT_GOLDEN_SET_PATH = (
+    ROOT / "archive" / "agents" / "fault_investigator" / "scripts"
+    / "golden_set_fault_analysis.json"
+)
 EXPERIMENT = "agentic-runtime-retrieval"
 QUERY_TYPES = ("lookup", "multi-hop", "aggregate", "comparison", "unanswerable")
 

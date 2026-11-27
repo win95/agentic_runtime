@@ -34,10 +34,10 @@ of the rendered block names the limit that was applied, so the agent
 can see why history was cut.
 
 Budget accounting: the history block is charged to the HISTORY slice
-of the context budget (9,640 tokens in
-``runtime/context_budget.py``) — ``SESSION_HISTORY_TOKENS`` (4,096)
-plus the long-term-memory block (1,024, see
-``runtime/long_term_memory.py``) leaves 4,520 tokens of that slice
+of the context budget (4,096 tokens in
+``runtime/context_budget.py``) — ``SESSION_HISTORY_TOKENS`` (2,048)
+plus the long-term-memory block (512, see
+``runtime/long_term_memory.py``) leaves 1,536 tokens of that slice
 for the current run's own conversation + tool output. It is NOT
 charged to the system-prompt bucket: ``deep_agent_node`` measures
 the fixed prefix without the history block (see the
@@ -60,7 +60,7 @@ logger = logging.getLogger(__name__)
 
 # --- Caps ---
 MAX_SESSION_TURNS = 10
-SESSION_HISTORY_TOKENS = 4_096
+SESSION_HISTORY_TOKENS = 2_048
 MAX_TURN_INPUT_CHARS = 1_000
 MAX_TURN_ANSWER_CHARS = 1_500
 MAX_TURN_CAUSES = 5

@@ -27,7 +27,6 @@ from typing import TYPE_CHECKING
 from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, StateGraph
 
-import runtime.capabilities.fault_analysis  # noqa: F401 — self-registers the fault_analysis capability on import
 from app.config import settings
 from infra.mlflow_setup import setup_mlflow_tracing
 from runtime.agents.registry import (

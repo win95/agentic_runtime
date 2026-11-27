@@ -72,15 +72,21 @@ def reset_precondition_catalog_for_tests() -> None:
 
 
 def _booking_exists_for_session(booking_id: str, session_id: str) -> str | None:
-    """Legacy shim — the policy lives in ``HotelReceptionistAgent``.
+    """Legacy shim — the policy used to live in ``HotelReceptionistAgent``.
 
-    Kept so callers without an agent (and existing tests patching this
-    name) keep working; new callers pass the agent to
-    :func:`check_write_preconditions` instead.
+    The hotel agent was archived 2026-11-27 (see
+    ``archive/agents/hotel_receptionist/``), so there is no booking
+    store left to verify ownership against. Fail closed: without an
+    agent object the booking cannot be verified, so every booking
+    write through this path is refused. Kept so callers without an
+    agent (and existing tests patching this name) keep working; new
+    callers pass the agent to :func:`check_write_preconditions`
+    instead. Restoring the hotel agent restores the import below.
     """
-    from runtime.agents.hotel import HotelReceptionistAgent
-
-    return HotelReceptionistAgent.booking_exists_for_session(booking_id, session_id)
+    return (
+        "booking ownership cannot be verified: "
+        "the hotel agent is archived"
+    )
 
 
 def check_write_preconditions(

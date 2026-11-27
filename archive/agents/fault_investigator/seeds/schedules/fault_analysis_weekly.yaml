@@ -1,0 +1,17 @@
+# Weekly fault analysis for the demo asset O21 (October 2026 data).
+# Seeded DISABLED — enable it via the API when ready, so nothing runs
+# unexpectedly on a fresh machine.
+#
+# Cron times are naive UTC (like every other datetime in this codebase):
+# 06:00 UTC Monday is 13:00 in Asia/Saigon.
+# The input dates are the demo October 2026 range; edit them (or the
+# schedule's input via the API) before enabling for a live asset.
+id: sched_fault_analysis_weekly
+mission_id: fault_analysis
+cron: "0 6 * * 1"
+input_data:
+  asset_id: "O21"
+  start_date: "2026-10-01"
+  end_date: "2026-10-31"
+enabled: false
+tenant: default

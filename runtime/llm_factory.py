@@ -224,11 +224,21 @@ def build_chat_model(cfg: Settings | None = None):
     :func:`merge_system_messages`) so providers that require the
     system message first — Cloudflare Workers AI — accept requests
     the runtime builds with a mid-list system message.
+
+    When ``cfg.llm_enable_thinking`` is true, the model also sends
+    ``chat_template_kwargs`` ``{"enable_thinking": true}`` — the
+    Qwen3 thinking switch, verified live 2026-11-27 against the
+    LiteLLM proxy (the parameter form that backend honors).
     """
     from runtime.context_budget import OUTPUT_RESERVE_TOKENS
 
     cfg = cfg or settings
     require_llm_config(cfg)
+    extra: dict = {}
+    if cfg.llm_enable_thinking:
+        extra["model_kwargs"] = {
+            "chat_template_kwargs": {"enable_thinking": True}
+        }
     return _SystemFirstChatOpenAI(
         base_url=cfg.resolved_llm_api_base,
         api_key=cfg.resolved_llm_api_key,
@@ -237,6 +247,7 @@ def build_chat_model(cfg: Settings | None = None):
         max_tokens=OUTPUT_RESERVE_TOKENS,
         timeout=cfg.llm_request_timeout_seconds,
         max_retries=cfg.llm_request_max_retries,
+        **extra,
     )
 
 
