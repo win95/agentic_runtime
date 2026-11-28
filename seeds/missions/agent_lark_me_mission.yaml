@@ -34,9 +34,29 @@ input_schema:
       type: string
     root_id:
       type: string
-  required:
-    - message
-    - chat_id
+    # Scheduled form (harness loop input): mode is the constant that
+    # marks a run as a task reminder. The other mode fields are
+    # optional — the skill reads them from the input each run and
+    # falls back to its defaults when absent. recipients may be the
+    # string "task_assignees" or a {type: fixed_user|fixed_chat, ...}
+    # object (see the loops design doc §3.5).
+    mode:
+      type: string
+      const: remind_tasks
+    recipients:
+      type: [string, object]
+    task_filter:
+      type: object
+    scope:
+      type: string
+  # Two accepted input forms (Layer-1 validator enforces anyOf +
+  # const — runtime/security.py::validate_execution_input_data):
+  # interactive (message + chat_id) or scheduled (mode only). Neither
+  # form weakens the other: dropping message/chat_id from the
+  # interactive branch would let a chat-less run past Layer 1.
+  anyOf:
+    - required: [message, chat_id]
+    - required: [mode]
 
 execution:
   mode: autonomous
@@ -52,6 +72,7 @@ execution:
 
 capabilities:
   - lark_messaging
+  - lark_tasks
 
 # Harness: security.user_runnable: false (chỉ admin / API key chạy được
 # mission này — frame gọi bằng service API key; xem D-LARK-10),
@@ -64,6 +85,24 @@ harness:
     enabled: true
   security:
     user_runnable: false
+  # First harness loop (P1 — loops design doc §3.1/§4): remind users
+  # of their unfinished tasks each weekday morning. Seeded DISABLED —
+  # enable via the API only after a manual run with this exact input
+  # has been checked. Seed never deletes: removing this loop from the
+  # YAML does NOT delete its Schedule row — disable/delete it via the
+  # schedules API instead.
+  loops:
+    - id: loop_lark_me_remind_weekday
+      cron: "0 2 * * 1-5"
+      input:
+        mode: remind_tasks
+        recipients: task_assignees
+        task_filter:
+          status: todo
+          due: overdue_or_today
+        scope: all_tasklists
+      enabled: false
+      description: "Nhắc task đang làm dở mỗi sáng"
   # Guest chat OFF (tran 2026-11-28): /guest/chat no longer routes
   # here — it was a stopgap after the hotel disable, not a product
   # decision. With no mission exposing public chat, /guest/chat
@@ -84,6 +123,13 @@ harness:
       - lark_create_group
       - lark_add_members
       - lark_update_group
+      # P2 task reminder (2026-11-28): read-only Task API tools. Their
+      # results count toward max_result_tokens, but no max_calls cap —
+      # reads are uncapped in max_calls today (see the build notes,
+      # §3.7 open question on the 5-send cap for team-sized runs).
+      - lark_list_tasklists
+      - lark_list_tasks
+      - lark_get_task
     max_result_tokens: 6000
     max_calls:
       lark_send_message: 5

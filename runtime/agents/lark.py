@@ -21,6 +21,22 @@ check against that input:
 - ``lark_reply_message`` may only reply in a thread this run takes
   part in: the input message / root, or a message this run sent.
 
+Remind mode (``input["mode"] == "remind_tasks"``, §3.5 of the
+harness-loops design): the run has no input chat — its recipients
+come from ``input["recipients"]`` instead:
+
+- ``"task_assignees"`` — ``lark_send_message`` to a user is allowed
+  only for ids this run itself read from the Task API (assignees of
+  todo tasks returned by ``lark_list_tasks`` / ``lark_get_task``).
+  The recipient set grows by the SAME post-tool result-feedback
+  mechanism as ``lark_create_group`` grows the allowed chats: the
+  task-tool wrapper invokes the tool, then harvests member ids from
+  the successful result into ``_lark_reminder_recipients``.
+- ``{"type": "fixed_user", "open_id": ...}`` — that one user is
+  seeded into the reminder set at init, like the sender is.
+- ``{"type": "fixed_chat", "chat_id": ...}`` — that one chat is
+  seeded into the allowed chats at init, like the input chat is.
+
 The wrapper is a copy — the registered tool itself is never mutated
 (same pattern as the asset scope in ``runtime/tools/registry.py``).
 No ``guest_reply_tool`` override: replies go through the
@@ -51,6 +67,53 @@ _CHAT_TARGET_TOOLS = frozenset(
     {"lark_get_group", "lark_add_members", "lark_get_history"}
 )
 
+# Task-reading tools (capability ``lark_tasks``, built by the P2
+# tools work — see the task-remind flow in skills/agent-lark).
+# Read-only: no chat target, so the wrapper passes them through and
+# — in remind mode only — harvests assignee ids from their results
+# into _lark_reminder_recipients (same post-tool result-feedback
+# mechanism as lark_create_group, below).
+LARK_TASK_TOOLS = frozenset(
+    {"lark_list_tasklists", "lark_list_tasks", "lark_get_task"}
+)
+
+# Member-id keys accepted when harvesting assignees from a task
+# result. The Task API v2 task shape carries members as objects with
+# an ``id`` (an open_id) and may also surface open_id / user_id /
+# union_id directly; accept all of them, never the task's own guid.
+_TASK_MEMBER_ID_KEYS = ("open_id", "user_id", "union_id", "id", "member_id")
+
+
+def _tasks_from_result(result) -> list:
+    """Extract the task dicts from a task-tool result, any shape.
+
+    Accepts a list of tasks, a single task dict, or a dict wrapping
+    the tasks under ``tasks`` / ``items`` / ``task`` / ``data``
+    (nested one level). An error result yields no tasks.
+    """
+    if isinstance(result, list):
+        return [t for t in result if isinstance(t, dict)]
+    if not isinstance(result, dict) or "error" in result:
+        return []
+    for key in ("tasks", "items"):
+        value = result.get(key)
+        if isinstance(value, list):
+            return [t for t in value if isinstance(t, dict)]
+    for key in ("task", "data"):
+        value = result.get(key)
+        if isinstance(value, dict):
+            nested = _tasks_from_result(value)
+            if nested:
+                return nested
+            if key == "task":
+                return [value]
+            return []
+        if isinstance(value, list):
+            return [t for t in value if isinstance(t, dict)]
+    if "members" in result or "summary" in result or "guid" in result:
+        return [result]
+    return []
+
 
 class LarkAgent(BaseAgent):
     """The Lark bot — one chat per run, groups only it creates."""
@@ -66,6 +129,10 @@ class LarkAgent(BaseAgent):
         self._lark_own_message_ids: set[str] = set()
         self._lark_sender_ids: set[str] = set()
         self._lark_input_message_ids: set[str] = set()
+        # Remind mode only: user ids this run may DM as task
+        # assignees — seeded from fixed_user input, or grown in-run
+        # from Task API results (see _harvest_task_assignees).
+        self._lark_reminder_recipients: set[str] = set()
 
     def _seed_lark_scope(self) -> None:
         """Seed the allowed set from this run's input (once per run)."""
@@ -86,6 +153,79 @@ class LarkAgent(BaseAgent):
             value = inp.get(key)
             if isinstance(value, str) and value:
                 self._lark_input_message_ids.add(value)
+        if self._is_remind_tasks():
+            recipients = inp.get("recipients")
+            if isinstance(recipients, dict):
+                rtype = recipients.get("type")
+                if rtype == "fixed_chat" or (
+                    rtype is None and "chat_id" in recipients
+                ):
+                    chat_id = recipients.get("chat_id")
+                    if isinstance(chat_id, str) and chat_id:
+                        self._lark_allowed_chats.add(chat_id)
+                if rtype == "fixed_user" or (
+                    rtype is None
+                    and ("open_id" in recipients or "user_id" in recipients)
+                ):
+                    for key in ("open_id", "user_id", "union_id"):
+                        value = recipients.get(key)
+                        if isinstance(value, str) and value:
+                            self._lark_reminder_recipients.add(value)
+                # "task_assignees" seeds nothing: the set grows
+                # in-run from Task API results (see scope_tool).
+
+    def _is_remind_tasks(self) -> bool:
+        """True when this run is a scheduled task reminder."""
+        return (self.execution_input or {}).get("mode") == "remind_tasks"
+
+    def _remind_is_task_assignees(self) -> bool:
+        """True when remind recipients are the tasks' own assignees.
+
+        ``recipients`` absent defaults to ``"task_assignees"`` (the
+        §7(a) default for the first loop — the skill reads the same
+        default, so scope and skill agree).
+        """
+        if not self._is_remind_tasks():
+            return False
+        recipients = (self.execution_input or {}).get("recipients")
+        return recipients is None or recipients == "task_assignees"
+
+    def _harvest_task_assignees(self, result) -> None:
+        """Add assignees of todo tasks in a task-tool result.
+
+        Only called in remind mode with recipients == task_assignees.
+        The result shape is the task tools' contract (task fields
+        guid/summary/due/completed_at/status/members/url): a task
+        list under ``tasks`` / ``items`` / ``data``, or a single task
+        under ``task`` / ``data`` / at the top level. Member entries
+        may be plain id strings or dicts. Only members of tasks whose
+        status is todo (or absent — the tool already filtered) are
+        admitted, so a done or future task never authorizes a DM.
+        A result carrying ``"error"`` harvests nothing.
+        """
+        tasks = _tasks_from_result(result)
+        for task in tasks:
+            if not isinstance(task, dict):
+                continue
+            status = task.get("status")
+            if status is not None and str(status).lower() != "todo":
+                continue
+            members = task.get("members")
+            if members is None:
+                members = task.get("assignees") or task.get("assignee")
+            if isinstance(members, (str, dict)):
+                members = [members]
+            if not isinstance(members, list):
+                continue
+            for member in members:
+                if isinstance(member, str):
+                    if member:
+                        self._lark_reminder_recipients.add(member)
+                elif isinstance(member, dict):
+                    for key in _TASK_MEMBER_ID_KEYS:
+                        value = member.get(key)
+                        if isinstance(value, str) and value:
+                            self._lark_reminder_recipients.add(value)
 
     def _refuse(self, tool_name: str, detail: str) -> dict:
         return {
@@ -98,14 +238,27 @@ class LarkAgent(BaseAgent):
     def scope_tool(self, tool, session_id: str, mission_id: str = ""):
         """Wrap a Lark tool with this run's chat scope.
 
-        Tools outside ``LARK_TOOLS`` pass through unchanged.
+        Tools outside ``LARK_TOOLS`` and ``LARK_TASK_TOOLS`` pass
+        through unchanged.
         """
         name = getattr(tool, "name", "") or ""
-        if name not in LARK_TOOLS:
+        if name not in LARK_TOOLS and name not in LARK_TASK_TOOLS:
             return tool
         self._seed_lark_scope()
 
         def _guarded(**kwargs):
+            # Task reads have no chat target — allowed in any mode
+            # (read-only). In remind mode with task_assignees
+            # recipients, the successful result grows the reminder
+            # set: the same post-tool result-feedback mechanism
+            # lark_create_group uses below to grow the allowed
+            # chats (invoke, then read chat_id / member ids out of
+            # the result and add them to run state).
+            if name in LARK_TASK_TOOLS:
+                result = tool.invoke(kwargs)
+                if self._remind_is_task_assignees():
+                    self._harvest_task_assignees(result)
+                return result
             # Reads / member adds target a chat_id argument.
             if name in _CHAT_TARGET_TOOLS:
                 target = kwargs.get("chat_id")
@@ -147,9 +300,9 @@ class LarkAgent(BaseAgent):
                             name, f"chat_id '{receive_id}' is outside this run's chat"
                         )
                 elif receive_type in ("user_id", "open_id"):
-                    if (
-                        not isinstance(receive_id, str)
-                        or receive_id not in self._lark_sender_ids
+                    if not isinstance(receive_id, str) or (
+                        receive_id not in self._lark_sender_ids
+                        and receive_id not in self._lark_reminder_recipients
                     ):
                         return self._refuse(
                             name,

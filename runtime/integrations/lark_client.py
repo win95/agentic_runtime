@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import uuid
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -468,3 +469,255 @@ def list_messages(
         # expect oldest-first.
         messages.reverse()
     return {"messages": messages, "count": len(messages), "truncated": has_more}
+
+
+# -- Lark Tasks (Task API v2, lark-oapi 1.9.0) ---------------------------
+# Read-only tools for the task-reminder flow (design doc §3.6):
+# tasklists -> tasks, "in-process" = status todo (+ due filter, done
+# by the skill flow, not here). All three calls pass
+# user_id_type="open_id" so Member.id is an open_id — the id the
+# reminder DM needs (lark_send_message receive_id_type="open_id").
+# Verified SDK shapes (lark_oapi/api/task/v2/model/):
+# - Task: guid, summary, description, due (Due), reminders, creator
+#   (Member), members (List[Member]), completed_at (int, ms),
+#   tasklists (List[TaskInTasklistInfo]), status ("todo"/"done"),
+#   url, created_at/updated_at (int, ms), ...
+# - Member: ONLY {id, type, role, name} — there is NO open_id /
+#   user_id / union_id field; which id Member.id holds is decided by
+#   the user_id_type query param.
+# - Due: {timestamp (int, ms since epoch), is_all_day (bool)}.
+# - TaskInTasklistInfo: {tasklist_guid, section_guid}.
+# - ListTaskRequest params: page_size, page_token, completed (bool),
+#   type, user_id_type. List responses carry items / page_token /
+#   has_more; GetTaskResponseBody carries a single task.
+# Due serialization: BOTH forms are returned — "due" is the UTC ISO
+# 8601 string (human/LLM-readable, e.g. "2026-11-28T02:00:00+00:00")
+# and "due_ms" is the raw millisecond timestamp (exact, for the
+# skill's overdue/today comparison). Either may be None (no due date).
+
+_MAX_TASKS = 100  # same cap spirit as list_messages (D-LARK-20)
+
+
+def _serialize_member(member) -> dict:
+    """One Member -> {id, type, role, name} (id is an open_id here)."""
+    if member is None:
+        return {"id": None, "type": None, "role": None, "name": None}
+    return {
+        "id": getattr(member, "id", None),
+        "type": getattr(member, "type", None),
+        "role": getattr(member, "role", None),
+        "name": getattr(member, "name", None),
+    }
+
+
+def _serialize_due(due) -> tuple[str | None, int | None, bool | None]:
+    """Due -> (ISO-8601 UTC string, ms timestamp, is_all_day)."""
+    if due is None:
+        return None, None, None
+    ts_ms = getattr(due, "timestamp", None)
+    iso = None
+    if isinstance(ts_ms, int):
+        iso = datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).isoformat()
+    return iso, ts_ms, getattr(due, "is_all_day", None)
+
+
+def _serialize_task(task) -> dict:
+    """One Task -> the small JSON dict the reminder flow needs.
+
+    Description / attachments / custom fields are deliberately left
+    out — a reminder needs summary + due + url + members, and a long
+    description would eat the run's context budget.
+    """
+    due_iso, due_ms, due_all_day = _serialize_due(getattr(task, "due", None))
+    return {
+        "guid": getattr(task, "guid", None),
+        "summary": getattr(task, "summary", None),
+        "due": due_iso,
+        "due_ms": due_ms,
+        "due_is_all_day": due_all_day,
+        "status": getattr(task, "status", None),
+        "completed_at": getattr(task, "completed_at", None),
+        "members": [_serialize_member(m) for m in (getattr(task, "members", None) or [])],
+        "creator": _serialize_member(getattr(task, "creator", None)),
+        "url": getattr(task, "url", None),
+        "tasklists": [
+            {
+                "tasklist_guid": getattr(t, "tasklist_guid", None),
+                "section_guid": getattr(t, "section_guid", None),
+            }
+            for t in (getattr(task, "tasklists", None) or [])
+        ],
+        "created_at": getattr(task, "created_at", None),
+        "updated_at": getattr(task, "updated_at", None),
+    }
+
+
+def _serialize_tasklist(tasklist) -> dict:
+    """One Tasklist -> {guid, name, creator, owner, members, url, ...}."""
+    return {
+        "guid": getattr(tasklist, "guid", None),
+        "name": getattr(tasklist, "name", None),
+        "creator": _serialize_member(getattr(tasklist, "creator", None)),
+        "owner": _serialize_member(getattr(tasklist, "owner", None)),
+        "members": [
+            _serialize_member(m) for m in (getattr(tasklist, "members", None) or [])
+        ],
+        "url": getattr(tasklist, "url", None),
+        "created_at": getattr(tasklist, "created_at", None),
+        "updated_at": getattr(tasklist, "updated_at", None),
+    }
+
+
+def _task_model():
+    """The task/v2 SDK model module, or a RuntimeError to surface."""
+    try:
+        client = get_client()
+        from lark_oapi.api.task.v2 import model
+    except RuntimeError as exc:
+        raise exc
+    return client, model
+
+
+def list_tasklists(
+    *,
+    page_size: int = 50,
+    page_token: str | None = None,
+    limit: int = _MAX_TASKS,
+) -> dict:
+    """GET /open-apis/task/v2/tasklists — tasklists the app can read.
+
+    Follows ``page_token`` until ``limit`` tasklists are collected
+    (capped at 100, same spirit as ``list_messages``) or the pages
+    end. Returns ``{"tasklists": [...], "count": n,
+    "truncated": bool}``, or ``{"error": ...}`` (e.g. Lark 99991679
+    when the app lacks the ``task:tasklist:read`` scope).
+    """
+    capped = max(1, min(int(limit), _MAX_TASKS))
+    try:
+        client, model = _task_model()
+    except RuntimeError as exc:
+        return {"error": str(exc)}
+    tasklists: list[dict] = []
+    token = page_token
+    has_more = False
+    while len(tasklists) < capped:
+        builder = (
+            model.ListTasklistRequest.builder()
+            .page_size(min(50, capped - len(tasklists)))
+            .user_id_type("open_id")
+        )
+        if token:
+            builder.page_token(token)
+        try:
+            resp = client.task.v2.tasklist.list(builder.build())
+        except Exception as exc:  # noqa: BLE001 — provider failure is data
+            logger.warning("Lark list_tasklists raised: %s", exc)
+            return {"error": f"lark list_tasklists raised: {exc}"[:500]}
+        err = _check(resp, what="list_tasklists")
+        if err is not None:
+            return err
+        data = resp.data
+        for item in getattr(data, "items", None) or []:
+            if len(tasklists) >= capped:
+                break
+            tasklists.append(_serialize_tasklist(item))
+        has_more = bool(getattr(data, "has_more", False))
+        if not has_more:
+            break
+        token = getattr(data, "page_token", None)
+        if not token:
+            break
+    return {"tasklists": tasklists, "count": len(tasklists), "truncated": has_more}
+
+
+def list_tasks(
+    *,
+    completed: bool = False,
+    page_size: int = 50,
+    page_token: str | None = None,
+    limit: int = _MAX_TASKS,
+) -> dict:
+    """GET /open-apis/task/v2/tasks — tasks, paginated to a cap.
+
+    ``completed=False`` (the default) returns only unfinished tasks —
+    the reminder flow's "in-process" set is ``status == "todo"`` among
+    these, with the due filter applied by the skill flow. Follows
+    ``page_token`` until ``limit`` tasks are collected (capped at 100,
+    same spirit as ``list_messages``) or the pages end. Returns
+    ``{"tasks": [...], "count": n, "truncated": bool,
+    "completed": bool}``, or ``{"error": ...}`` (e.g. Lark 99991679
+    when the app lacks the ``task:task:read`` scope).
+    """
+    capped = max(1, min(int(limit), _MAX_TASKS))
+    try:
+        client, model = _task_model()
+    except RuntimeError as exc:
+        return {"error": str(exc)}
+    tasks: list[dict] = []
+    token = page_token
+    has_more = False
+    while len(tasks) < capped:
+        builder = (
+            model.ListTaskRequest.builder()
+            .page_size(min(50, capped - len(tasks)))
+            .completed(bool(completed))
+            .user_id_type("open_id")
+        )
+        if token:
+            builder.page_token(token)
+        try:
+            resp = client.task.v2.task.list(builder.build())
+        except Exception as exc:  # noqa: BLE001 — provider failure is data
+            logger.warning("Lark list_tasks raised: %s", exc)
+            return {"error": f"lark list_tasks raised: {exc}"[:500]}
+        err = _check(resp, what="list_tasks")
+        if err is not None:
+            return err
+        data = resp.data
+        for item in getattr(data, "items", None) or []:
+            if len(tasks) >= capped:
+                break
+            tasks.append(_serialize_task(item))
+        has_more = bool(getattr(data, "has_more", False))
+        if not has_more:
+            break
+        token = getattr(data, "page_token", None)
+        if not token:
+            break
+    return {
+        "tasks": tasks,
+        "count": len(tasks),
+        "truncated": has_more,
+        "completed": bool(completed),
+    }
+
+
+def get_task(*, task_guid: str) -> dict:
+    """GET /open-apis/task/v2/tasks/:task_guid — one task by guid.
+
+    Returns ``{"task": {...}}`` on success, or ``{"error": ...}``.
+    """
+    if not task_guid or not task_guid.strip():
+        return {"error": "task_guid must not be empty"}
+    try:
+        client, model = _task_model()
+    except RuntimeError as exc:
+        return {"error": str(exc)}
+    req = (
+        model.GetTaskRequest.builder()
+        .task_guid(task_guid.strip())
+        .user_id_type("open_id")
+        .build()
+    )
+    try:
+        resp = client.task.v2.task.get(req)
+    except Exception as exc:  # noqa: BLE001 — provider failure is data
+        logger.warning("Lark get_task raised: %s", exc)
+        return {"error": f"lark get_task raised: {exc}"[:500]}
+    err = _check(resp, what="get_task")
+    if err is not None:
+        return err
+    task = getattr(resp.data, "task", None)
+    if task is None:
+        return {"error": f"lark get_task returned no task for guid {task_guid.strip()}"}
+    return {"task": _serialize_task(task)}

@@ -175,6 +175,25 @@ class OutputArtifactsHarness(BaseModel):
     inline_fallback: StrictBool = True
 
 
+class LoopHarness(BaseModel):
+    """One recurring activation of a mission, declared in its harness.
+
+    Each loop materializes into one ``Schedule`` row at seed time
+    (``id`` becomes ``Schedule.id``). The harness only declares WHEN
+    and WITH WHAT INPUT a mission re-runs; the loop's ``input`` is
+    what the agent reads at run time (``execution_input``) — the
+    harness itself is invisible to the agent.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str
+    cron: str
+    input: dict = Field(default_factory=dict)
+    enabled: StrictBool = False
+    description: str | None = None
+
+
 class MissionHarness(BaseModel):
     """Effective harness for one mission (merged with defaults).
 
@@ -207,6 +226,20 @@ class MissionHarness(BaseModel):
     tool_calls: ToolCallsHarness = Field(default_factory=ToolCallsHarness)
     tool_budget: ToolBudgetHarness = Field(default_factory=ToolBudgetHarness)
     sandbox: SandboxHarness = Field(default_factory=SandboxHarness)
+    loops: list[LoopHarness] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_loops(self) -> MissionHarness:
+        seen: set[str] = set()
+        for loop in self.loops:
+            if not loop.id.strip():
+                raise ValueError("harness.loops[].id must be non-empty")
+            if loop.id in seen:
+                raise ValueError(
+                    f"duplicate loop id {loop.id!r} in harness.loops"
+                )
+            seen.add(loop.id)
+        return self
 
 
 class AgentHarness(BaseModel):

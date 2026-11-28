@@ -103,13 +103,19 @@ def _check_harness_version(
 
 def _submodel_of(annotation: Any) -> type[BaseModel] | None:
     """The BaseModel subclass behind an annotation, if any (unwraps
-    Annotated / Union / Optional). Used to recurse the strip only into
-    real sub-models — ``dict[str, int]`` fields (e.g.
+    Annotated / Union / Optional / list-of-model). Used to recurse the
+    strip only into real sub-models — ``dict[str, int]`` fields (e.g.
     ``tool_budget.max_calls``) keep their arbitrary keys."""
     origin = typing.get_origin(annotation)
     if origin is typing.Annotated:
         return _submodel_of(typing.get_args(annotation)[0])
     if origin is typing.Union or origin is types.UnionType:
+        for arg in typing.get_args(annotation):
+            found = _submodel_of(arg)
+            if found is not None:
+                return found
+        return None
+    if origin in (list, set, frozenset):
         for arg in typing.get_args(annotation):
             found = _submodel_of(arg)
             if found is not None:
@@ -142,6 +148,18 @@ def _strip_unknown_fields(
             pruned[key] = _strip_unknown_fields(
                 value, submodel, path=field_path, unknown=unknown
             )
+        elif submodel is not None and isinstance(value, list):
+            # list[SubModel] (e.g. harness.loops): strip unknown keys
+            # inside each item the same way — a newer loop field must
+            # warn-and-drop on old code, not fail the lenient parse.
+            pruned[key] = [
+                _strip_unknown_fields(
+                    item, submodel, path=field_path, unknown=unknown
+                )
+                if isinstance(item, dict)
+                else item
+                for item in value
+            ]
         else:
             pruned[key] = value
     return pruned

@@ -3,7 +3,8 @@
 Shared by the defense layers so each one is a thin call site:
 
 - Layer 1 — execution-input validation (size, field length, ``asset_id``
-  allowlist, date shape, control characters).
+  allowlist, date shape, ``anyOf`` input forms, ``const`` values,
+  control characters).
 - Layer 2 — ``<data>`` delimiters that separate untrusted data from
   instructions in the agent prompt.
 - Layer 3 — truncation + whitespace normalization of tool-output text.
@@ -83,11 +84,18 @@ def validate_execution_input_data(mission: dict, input_data: dict) -> list[str]:
     Checks, in order: required fields present, total JSON size,
     per-field string length, then the per-field rules the mission's
     ``input_schema.properties`` declares — ``pattern`` (regex, e.g.
-    the fault mission's ``asset_id`` allowlist) and ``format: date``
+    the fault mission's ``asset_id`` allowlist), ``const`` (a present
+    field must equal the declared value), and ``format: date``
     (valid date; ordering when both ``start_date`` and ``end_date``
     are declared date fields). A field with no declared rule is only
     length-checked: the validator names no field of its own. Callers
     sanitize control characters first (see ``sanitize_input_value``).
+
+    ``anyOf``: when the schema declares it, the input must satisfy
+    the ``required`` list of at least one branch, in addition to any
+    top-level ``required``. That is how a mission accepts two input
+    forms — e.g. interactive ``{message, chat_id}`` or scheduled
+    ``{mode}`` — without dropping the required fields of either form.
     """
     problems: list[str] = []
     input_schema = (mission or {}).get("input_schema") or {}
@@ -96,6 +104,23 @@ def validate_execution_input_data(mission: dict, input_data: dict) -> list[str]:
     missing = [f for f in required if f not in input_data]
     if missing:
         problems.append(f"Missing required input fields: {missing}")
+    alternatives = input_schema.get("anyOf") or []
+    if alternatives:
+        branch_missing: list[list[str]] = []
+        for branch in alternatives:
+            if not isinstance(branch, dict):
+                continue
+            missing_branch = [
+                f for f in (branch.get("required") or []) if f not in input_data
+            ]
+            if not missing_branch:
+                break
+            branch_missing.append(missing_branch)
+        else:
+            problems.append(
+                "Input must satisfy one of the input_schema anyOf "
+                f"alternatives; missing per alternative: {branch_missing}"
+            )
     try:
         size = len(json.dumps(input_data, ensure_ascii=False))
     except (TypeError, ValueError):
@@ -105,6 +130,9 @@ def validate_execution_input_data(mission: dict, input_data: dict) -> list[str]:
             f"input too large: {size} bytes (max {MAX_INPUT_JSON_BYTES})"
         )
     for key, value in input_data.items():
+        prop = properties.get(key) or {}
+        if "const" in prop and value != prop["const"]:
+            problems.append(f"field '{key}' must be {prop['const']!r}")
         if not isinstance(value, str):
             continue
         if len(value) > MAX_STRING_FIELD_CHARS:
@@ -112,7 +140,6 @@ def validate_execution_input_data(mission: dict, input_data: dict) -> list[str]:
                 f"field '{key}' too long: {len(value)} chars "
                 f"(max {MAX_STRING_FIELD_CHARS})"
             )
-        prop = properties.get(key) or {}
         pattern = prop.get("pattern")
         if pattern:
             try:

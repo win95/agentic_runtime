@@ -138,22 +138,170 @@ def load_schedule_file(path: pathlib.Path) -> dict:
     }
 
 
-def seed_schedules(db) -> tuple:
+def _collect_file_schedule_ids() -> set[str]:
+    """Ids claimed by seeds/schedules/*.yaml.
+
+    Loops share one id namespace with file schedules (§3.2 of the
+    loops design): a loop id colliding with a file schedule id must
+    fail the seed loudly, never silently overwrite. A broken file is
+    skipped here — seed_schedules reports it loudly on its own pass.
+    """
+    ids: set[str] = set()
+    schedules_dir = BASE / "schedules"
+    if not schedules_dir.is_dir():
+        return ids
+    for path in sorted(schedules_dir.glob("*.yaml")):
+        try:
+            ids.add(load_schedule_file(path)["id"])
+        except Exception as exc:  # noqa: BLE001 — reported by seed_schedules
+            logger.warning("Skipping schedule file for id scan %s: %s", path, exc)
+    return ids
+
+
+def _collect_loop_ids() -> set[str]:
+    """Loop ids declared in seeds/missions/*.yaml harness blocks.
+
+    The other half of the shared id namespace: a file schedule id
+    colliding with a loop id must fail the seed loudly. A broken
+    mission file is skipped here — its mission seed fails loudly on
+    its own pass.
+    """
+    from runtime.harness.loader import parse_mission_harness
+
+    ids: set[str] = set()
+    missions_dir = BASE / "missions"
+    if not missions_dir.is_dir():
+        return ids
+    for path in sorted(missions_dir.glob("*.yaml")):
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                continue
+            harness = parse_mission_harness(data.get("harness"), source=str(path))
+            ids.update(loop.id for loop in harness.loops)
+        except Exception as exc:  # noqa: BLE001 — reported by the mission pass
+            logger.warning("Skipping mission file for loop scan %s: %s", path, exc)
+    return ids
+
+
+def seed_mission_loops(
+    db,
+    mission_row,
+    harness_dict,
+    *,
+    file_schedule_ids: frozenset[str] | set[str],
+    source: str,
+) -> tuple:
+    """Materialize one mission's harness loops into Schedule rows.
+
+    Each loop becomes one row: ``id`` = loop id, ``mission_id``,
+    ``cron``, ``input_data`` = loop input, ``enabled`` (stored value
+    wins on re-seed, same rule as ``seed_schedules``), ``tenant``
+    ``default`` (missions carry no tenant). ``next_run_at`` is
+    recomputed only when the cron changes — ``upsert_schedule`` owns
+    that rule, it is not reimplemented here.
+
+    Per-loop isolation like ``seed_schedules`` per file: a loop that
+    fails (bad cron, input failing the mission's input validation,
+    id collision) is recorded and skipped; the mission's other loops
+    still seed. Returns (seeded_count, [(source, error), ...]).
+    """
+    from app.services import execution_service
+    from runtime.harness.schema import MissionHarness
+    from runtime.security import sanitize_input_value
+
+    failures: list = []
+    seeded = 0
+    try:
+        harness = MissionHarness.model_validate(harness_dict or {})
+    except Exception as exc:  # noqa: BLE001 — seed already validated it
+        failures.append((source, f"invalid harness loops: {exc}"))
+        return seeded, failures
+    for loop in harness.loops:
+        loop_source = f"{source} loop {loop.id}"
+        try:
+            if loop.id in file_schedule_ids:
+                raise ValueError(
+                    f"loop id {loop.id!r} collides with a file schedule id "
+                    "in seeds/schedules/*.yaml (shared id namespace)"
+                )
+            schedule_service.validate_cron(loop.cron)
+            # Same validator create_execution uses, on the sanitized
+            # input exactly as create_execution sees it — a loop whose
+            # input would fail must fail the seed, not every beat tick.
+            problems = execution_service.validate_execution_input(
+                mission_row, sanitize_input_value(loop.input)
+            )
+            if problems:
+                raise ValueError(
+                    f"loop {loop.id!r} input fails mission input "
+                    f"validation: {problems}"
+                )
+            existing = schedule_service.get_schedule(db, loop.id)
+            if existing is not None and existing.mission_id != mission_row.id:
+                raise ValueError(
+                    f"loop id {loop.id!r} collides with existing schedule "
+                    f"for mission {existing.mission_id!r}"
+                )
+            data = {
+                "id": loop.id,
+                "mission_id": mission_row.id,
+                "cron": loop.cron,
+                "input_data": loop.input,
+                "enabled": loop.enabled,
+                "tenant": "default",
+            }
+            if existing is not None:
+                # Stored enabled wins (same rule as seed_schedules):
+                # a loop enabled via the API stays enabled on re-seed.
+                data["enabled"] = existing.enabled
+            schedule = schedule_service.upsert_schedule(db, data)
+            seeded += 1
+            logger.info(
+                "Seeded loop schedule %s (mission=%s, cron=%s, enabled=%s)",
+                schedule.id,
+                schedule.mission_id,
+                schedule.cron,
+                schedule.enabled,
+            )
+            print(
+                f"Seeded loop schedule {schedule.id} "
+                f"(mission={schedule.mission_id}, cron={schedule.cron}, "
+                f"enabled={schedule.enabled})"
+            )
+        except Exception as exc:  # noqa: BLE001 — one bad loop skips itself
+            db.rollback()
+            failures.append((loop_source, str(exc)))
+            logger.warning("Skipping harness loop %s: %s", loop.id, exc)
+            print(f"FAILED loop {loop.id}: {exc}")
+    return seeded, failures
+
+
+def seed_schedules(db, loop_ids: frozenset[str] | None = None) -> tuple:
     """Upsert schedules from seeds/schedules/*.yaml.
 
     A re-seed never flips a schedule the user enabled: the stored
     ``enabled`` value wins over the YAML one. Per-file isolation like
-    ``main()``: a broken file is skipped. Returns
-    (seeded_count, [(path, error), ...]).
+    ``main()``: a broken file is skipped. A file schedule id that
+    collides with a harness loop id fails loudly (shared id namespace
+    — a loop and a file schedule must never silently overwrite each
+    other). Returns (seeded_count, [(path, error), ...]).
     """
     failures: list = []
     seeded = 0
+    if loop_ids is None:
+        loop_ids = frozenset(_collect_loop_ids())
     schedules_dir = BASE / "schedules"
     if not schedules_dir.is_dir():
         return seeded, failures
     for path in sorted(schedules_dir.glob("*.yaml")):
         try:
             data = load_schedule_file(path)
+            if data["id"] in loop_ids:
+                raise ValueError(
+                    f"schedule id {data['id']!r} collides with a harness "
+                    "loop id (shared id namespace — rename one of them)"
+                )
             existing = schedule_service.get_schedule(db, data["id"])
             if existing is not None:
                 data["enabled"] = existing.enabled
@@ -236,16 +384,35 @@ def main(agent: str | None = None, mission: str | None = None) -> list:
     counts = {"missions": 0, "agents": 0, "schedules": 0}
     try:
         validate_all_mission_harness_policies()
+        # Shared id namespace (loops vs file schedules): collected once
+        # so both seed passes fail loudly on a collision instead of
+        # silently overwriting each other's rows.
+        file_schedule_ids = _collect_file_schedule_ids()
+        loop_ids = _collect_loop_ids()
         both_filters = agent is not None and mission is not None
         seed_missions = agent is None or both_filters
         seed_agents = mission is None or both_filters
         if seed_missions:
             for path in _select_files(BASE / "missions", mission, "mission"):
                 try:
-                    row = upsert_mission(db, load_mission_file(path))
+                    data = load_mission_file(path)
+                    row = upsert_mission(db, data)
                     counts["missions"] += 1
                     logger.info("Seeded mission %s (v%s)", row.id, row.version)
                     print(f"Seeded mission {row.id} (v{row.version})")
+                    # Harness loops materialize into Schedule rows right
+                    # after their mission is upserted — including
+                    # filtered runs (make seed-agent ... MISSION=...),
+                    # since the loop belongs to the mission just seeded.
+                    seeded_loops, loop_failures = seed_mission_loops(
+                        db,
+                        row,
+                        data["execution_config"].get("harness"),
+                        file_schedule_ids=file_schedule_ids,
+                        source=str(path),
+                    )
+                    counts["schedules"] += seeded_loops
+                    failures.extend(loop_failures)
                 except Exception as exc:  # noqa: BLE001 — one bad file skips itself
                     db.rollback()
                     failures.append((str(path), str(exc)))
@@ -285,7 +452,9 @@ def main(agent: str | None = None, mission: str | None = None) -> list:
                         logger.warning("Skipping agent file %s: %s", path, exc)
                         print(f"FAILED agent {path.name}: {exc}")
         if agent is None and mission is None:
-            seeded_schedules, schedule_failures = seed_schedules(db)
+            seeded_schedules, schedule_failures = seed_schedules(
+                db, loop_ids=frozenset(loop_ids)
+            )
             counts["schedules"] += seeded_schedules
             failures.extend(schedule_failures)
     finally:
