@@ -243,6 +243,30 @@ def seed_mission_loops(
                     f"loop id {loop.id!r} collides with existing schedule "
                     f"for mission {existing.mission_id!r}"
                 )
+            # Provenance guard (Feature B, design §3.3): a loop must
+            # never silently overwrite a row seeded from a file
+            # schedule. Same-mission reuse of a loop id is fine
+            # (re-seeding your own loop); a legacy row with unknown
+            # provenance (source NULL) is overwritten with a warning.
+            if existing is not None and existing.source == "file":
+                raise ValueError(
+                    f"loop id {loop.id!r} would overwrite a file-schedule "
+                    "row (provenance source='file'); rename the loop or "
+                    "delete the file schedule via the API first"
+                )
+            if existing is not None and existing.source is None:
+                logger.warning(
+                    "Loop %s overwrites legacy schedule row with unknown "
+                    "provenance (source NULL); taking ownership as source='loop'",
+                    loop.id,
+                )
+            elif existing is not None and existing.source not in ("loop", "file", None):
+                logger.warning(
+                    "Loop %s overwrites schedule row with unexpected "
+                    "source %r; taking ownership as source='loop'",
+                    loop.id,
+                    existing.source,
+                )
             data = {
                 "id": loop.id,
                 "mission_id": mission_row.id,
@@ -250,6 +274,7 @@ def seed_mission_loops(
                 "input_data": loop.input,
                 "enabled": loop.enabled,
                 "tenant": "default",
+                "source": "loop",
             }
             if existing is not None:
                 # Stored enabled wins (same rule as seed_schedules):
@@ -297,6 +322,7 @@ def seed_schedules(db, loop_ids: frozenset[str] | None = None) -> tuple:
     for path in sorted(schedules_dir.glob("*.yaml")):
         try:
             data = load_schedule_file(path)
+            data["source"] = "file"
             if data["id"] in loop_ids:
                 raise ValueError(
                     f"schedule id {data['id']!r} collides with a harness "
@@ -304,6 +330,33 @@ def seed_schedules(db, loop_ids: frozenset[str] | None = None) -> tuple:
                 )
             existing = schedule_service.get_schedule(db, data["id"])
             if existing is not None:
+                # Provenance guard (Feature B, design §3.3): a file
+                # schedule must never silently overwrite a row
+                # materialized from a harness loop. A legacy row with
+                # unknown provenance (source NULL) is overwritten
+                # with a warning.
+                if existing.source == "loop":
+                    raise ValueError(
+                        f"schedule id {data['id']!r} would overwrite a "
+                        "loop schedule row (provenance source='loop'); "
+                        "rename the file schedule or delete the loop "
+                        "via the API first"
+                    )
+                if existing.source is None:
+                    logger.warning(
+                        "Schedule %s overwrites legacy schedule row with "
+                        "unknown provenance (source NULL); taking "
+                        "ownership as source='file'",
+                        data["id"],
+                    )
+                elif existing.source not in ("loop", "file", None):
+                    logger.warning(
+                        "Schedule %s overwrites schedule row with "
+                        "unexpected source %r; taking ownership as "
+                        "source='file'",
+                        data["id"],
+                        existing.source,
+                    )
                 data["enabled"] = existing.enabled
             schedule = schedule_service.upsert_schedule(db, data)
             seeded += 1

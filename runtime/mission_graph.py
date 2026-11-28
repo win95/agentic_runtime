@@ -74,6 +74,46 @@ def _substantive_evidence_count(evidence: list | None) -> int:
     )
 
 
+# Tokens one lark_send_message costs the run's own-turns budget
+# (tool-call JSON + result JSON, measured with estimate_tokens,
+# ceil(chars / 4): 125 tok for a 1-task DM, 198 for a typical 3-task
+# DM, 434 for a long 8-task DM — 256 covers the typical send with
+# margin; a very long DM costs more, the history trim still guards
+# the run).
+TOKENS_PER_SEND = 256
+
+
+def _effective_tool_budget_max_calls(
+    harness: MissionHarness,
+    input_data: dict | None,
+    history_budget_tokens: int,
+    reserved_history_tokens: int,
+) -> dict[str, int]:
+    """Mission tool_budget.max_calls, with a context-derived send cap.
+
+    Only remind runs (input mode == "remind_tasks") get the derived
+    cap: the run's own-turns budget (history budget minus the reserved
+    history block) divided by TOKENS_PER_SEND, floored at 1 send — a
+    batch reminder may use the context it has, no more. All other
+    runs keep the mission's fixed caps (the anti-spam guard for
+    chat). On any unexpected input the harness default is returned
+    and the run never crashes on the cap computation.
+    """
+    merged = dict(harness.tool_budget.max_calls or {})
+    try:
+        if not isinstance(input_data, dict):
+            return merged
+        if input_data.get("mode") != "remind_tasks":
+            return merged
+        if "lark_send_message" not in set(harness.tool_budget.tools or []):
+            return merged
+        available = int(history_budget_tokens) - int(reserved_history_tokens)
+        merged["lark_send_message"] = max(1, available // TOKENS_PER_SEND)
+    except Exception:  # noqa: BLE001 — fall back to the harness default
+        logger.warning("Falling back to harness max_calls for the remind send cap")
+    return merged
+
+
 # --- Nodes ---
 def understand_mission(state: MissionState) -> dict:
     """Validate the execution input and sketch the plan from the mission."""
@@ -590,6 +630,12 @@ def deep_agent_node(state: MissionState) -> dict:
         )
         from runtime.harness.registry import harness_requires_output_files
 
+        # The run's own-turns budget (history budget minus the reserved
+        # history block) — bound once so the middleware args and the
+        # remind send-cap derivation below read the same numbers.
+        _history_budget_tokens = effective_history_tokens(mission, harness=_run_harness)
+        _reserved_history_tokens = estimate_tokens(history_block)
+
         hook_middleware = HookMiddleware(
             hook_registry,
             execution_id=state.get("execution_id") or "",
@@ -603,15 +649,20 @@ def deep_agent_node(state: MissionState) -> dict:
             session_id=state.get("session_id") or "",
             allowed_tools=list(context.get("allowed_tools") or []),
             capabilities=list(context.get("capabilities") or []),
-            reserved_history_tokens=estimate_tokens(history_block),
-            history_budget_tokens=effective_history_tokens(mission, harness=_run_harness),
+            reserved_history_tokens=_reserved_history_tokens,
+            history_budget_tokens=_history_budget_tokens,
             output_files_required=harness_requires_output_files(
                 state.get("mission_id"), execution_cfg, harness=_run_harness
             ),
             sequential_tool_names=frozenset(_run_harness.tool_calls.sequential),
             tool_budget_tools=frozenset(_run_harness.tool_budget.tools),
             tool_budget_max_result_tokens=_run_harness.tool_budget.max_result_tokens,
-            tool_budget_max_calls=dict(_run_harness.tool_budget.max_calls),
+            tool_budget_max_calls=_effective_tool_budget_max_calls(
+                _run_harness,
+                input_data,
+                _history_budget_tokens,
+                _reserved_history_tokens,
+            ),
             # The run's agent object, so hooks can read per-run agent
             # state (e.g. the Lark agent's set of groups this run
             # created — guard_destructive_target accepts those as

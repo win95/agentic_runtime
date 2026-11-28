@@ -89,6 +89,13 @@ hard-code giá trị nào trong skill:
 | `task_filter.due` | `overdue_or_today` |
 | `scope` | `all_tasklists` |
 
+Cap gửi tin của lần chạy nhắc việc suy ra từ context của chính lần
+chạy đó (`max(1, (history_budget - reserved_history) // 256)` — xem
+§3.7 của thiết kế loop): session mới nhắc được 16 tin, session cũ
+có history giữ chỗ thì ít hơn; chạm cap thì agent báo đã nhắc ai /
+còn ai chưa nhắc. Loop không khai gì thêm. Lần chạy tương tác giữ
+cap cố định 5 của mission.
+
 1. **Đọc tasklists** mà app đọc được bằng `lark_list_tasklists`
    (phạm vi theo `scope` trong input; default `all_tasklists` — quét
    tasklist, không cần roster).
