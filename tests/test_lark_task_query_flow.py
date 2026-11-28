@@ -12,7 +12,7 @@ def test_agent_lark_skill_map_has_task_query_flow():
     assert node.terminal is True
     assert set(node.tools) == {
         "lark_list_tasklists",
-        "lark_list_tasks",
+        "lark_list_tasklist_tasks",
         "lark_get_task",
         "lark_reply_message",
     }
@@ -30,4 +30,7 @@ def test_agent_lark_skill_map_has_task_query_flow():
     assert "task-remind" in by_id
     remind_tools = {t for n in by_id["task-remind"].nodes for t in n.tools}
     assert "lark_send_message" in remind_tools
+    assert "lark_list_tasklist_tasks" in remind_tools
     assert "lark_reply_message" not in remind_tools
+
+    assert skill_map.reply_tools == ["lark_reply_message", "lark_send_message"]

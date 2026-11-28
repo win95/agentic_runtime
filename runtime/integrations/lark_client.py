@@ -497,6 +497,26 @@ def list_messages(
 
 _MAX_TASKS = 100  # same cap spirit as list_messages (D-LARK-20)
 
+# Shown when list_tasklists / list_tasks return zero items — the Task API
+# uses the app's tenant identity and only returns tasklists shared with
+# the app and tasks the app created (see lark_me plan, verified root cause).
+TASK_EMPTY_VISIBILITY_NOTE = (
+    "The bot uses the Lark app's tenant identity (tenant_access_token). "
+    "It only sees tasklists that include the app as a member or viewer "
+    "(share the tasklist with the bot in Lark Tasks) and tasks the app "
+    "created. An empty list usually means missing access, not that Lark "
+    "has no tasks for the user."
+)
+
+
+def _with_task_visibility_note(result: dict, *, items_key: str) -> dict:
+    """Attach ``visibility_note`` when a task list response has zero items."""
+    if "error" in result:
+        return result
+    if int(result.get("count") or 0) == 0 and not (result.get(items_key) or []):
+        return {**result, "visibility_note": TASK_EMPTY_VISIBILITY_NOTE}
+    return result
+
 
 def _serialize_member(member) -> dict:
     """One Member -> {id, type, role, name} (id is an open_id here)."""
@@ -627,7 +647,81 @@ def list_tasklists(
         token = getattr(data, "page_token", None)
         if not token:
             break
-    return {"tasklists": tasklists, "count": len(tasklists), "truncated": has_more}
+    return _with_task_visibility_note(
+        {"tasklists": tasklists, "count": len(tasklists), "truncated": has_more},
+        items_key="tasklists",
+    )
+
+
+def list_tasklist_tasks(
+    *,
+    tasklist_guid: str,
+    completed: bool | None = False,
+    page_size: int = 50,
+    page_token: str | None = None,
+    limit: int = _MAX_TASKS,
+) -> dict:
+    """GET /open-apis/task/v2/tasklists/:guid/tasks — tasks in one tasklist.
+
+    Follows ``page_token`` until ``limit`` tasks are collected (capped at
+    100) or the pages end. Each task includes summary, guid, due,
+    completed (derived from status / completed_at), and assignees (same
+    member objects as ``list_tasks``). Returns ``{"tasks": [...],
+    "count": n, "truncated": bool, "tasklist_guid": str,
+    "completed": bool|None}``, or ``{"error": ...}``.
+    """
+    guid = (tasklist_guid or "").strip()
+    if not guid:
+        return {"error": "tasklist_guid is required"}
+    capped = max(1, min(int(limit), _MAX_TASKS))
+    try:
+        client, model = _task_model()
+    except RuntimeError as exc:
+        return {"error": str(exc)}
+    tasks: list[dict] = []
+    token = page_token
+    has_more = False
+    while len(tasks) < capped:
+        builder = (
+            model.TasksTasklistRequest.builder()
+            .tasklist_guid(guid)
+            .page_size(min(50, capped - len(tasks)))
+            .user_id_type("open_id")
+        )
+        if completed is not None:
+            builder.completed(bool(completed))
+        if token:
+            builder.page_token(token)
+        try:
+            resp = client.task.v2.tasklist.tasks(builder.build())
+        except Exception as exc:  # noqa: BLE001 — provider failure is data
+            logger.warning("Lark list_tasklist_tasks raised: %s", exc)
+            return {"error": f"lark list_tasklist_tasks raised: {exc}"[:500]}
+        err = _check(resp, what="list_tasklist_tasks")
+        if err is not None:
+            return err
+        data = resp.data
+        for item in getattr(data, "items", None) or []:
+            if len(tasks) >= capped:
+                break
+            row = _serialize_task(item)
+            status = (row.get("status") or "").lower() if row.get("status") else ""
+            row["completed"] = status == "done" or bool(row.get("completed_at"))
+            row["assignees"] = list(row.get("members") or [])
+            tasks.append(row)
+        has_more = bool(getattr(data, "has_more", False))
+        if not has_more:
+            break
+        token = getattr(data, "page_token", None)
+        if not token:
+            break
+    return {
+        "tasks": tasks,
+        "count": len(tasks),
+        "truncated": has_more,
+        "tasklist_guid": guid,
+        "completed": completed,
+    }
 
 
 def list_tasks(
@@ -684,12 +778,15 @@ def list_tasks(
         token = getattr(data, "page_token", None)
         if not token:
             break
-    return {
-        "tasks": tasks,
-        "count": len(tasks),
-        "truncated": has_more,
-        "completed": bool(completed),
-    }
+    return _with_task_visibility_note(
+        {
+            "tasks": tasks,
+            "count": len(tasks),
+            "truncated": has_more,
+            "completed": bool(completed),
+        },
+        items_key="tasks",
+    )
 
 
 def get_task(*, task_guid: str) -> dict:

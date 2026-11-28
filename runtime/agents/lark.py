@@ -74,8 +74,17 @@ _CHAT_TARGET_TOOLS = frozenset(
 # into _lark_reminder_recipients (same post-tool result-feedback
 # mechanism as lark_create_group, below).
 LARK_TASK_TOOLS = frozenset(
-    {"lark_list_tasklists", "lark_list_tasks", "lark_get_task"}
+    {
+        "lark_list_tasklists",
+        "lark_list_tasklist_tasks",
+        "lark_list_tasks",
+        "lark_get_task",
+    }
 )
+
+# Tools that name a tasklist_guid argument — scope widens from
+# lark_list_tasklists results in this run (same pattern as chats).
+_TASKLIST_GUID_TOOLS = frozenset({"lark_list_tasklist_tasks"})
 
 # Member-id keys accepted when harvesting assignees from a task
 # result. The Task API v2 task shape carries members as objects with
@@ -133,6 +142,7 @@ class LarkAgent(BaseAgent):
         # assignees — seeded from fixed_user input, or grown in-run
         # from Task API results (see _harvest_task_assignees).
         self._lark_reminder_recipients: set[str] = set()
+        self._lark_allowed_tasklist_guids: set[str] = set()
 
     def _seed_lark_scope(self) -> None:
         """Seed the allowed set from this run's input (once per run)."""
@@ -189,6 +199,21 @@ class LarkAgent(BaseAgent):
             return False
         recipients = (self.execution_input or {}).get("recipients")
         return recipients is None or recipients == "task_assignees"
+
+    def _harvest_tasklist_guids(self, result) -> None:
+        """Add tasklist guids from a successful lark_list_tasklists result."""
+        if not isinstance(result, dict) or "error" in result:
+            return
+        for key in ("tasklists", "items"):
+            items = result.get(key)
+            if not isinstance(items, list):
+                continue
+            for row in items:
+                if not isinstance(row, dict):
+                    continue
+                guid = row.get("guid")
+                if isinstance(guid, str) and guid:
+                    self._lark_allowed_tasklist_guids.add(guid)
 
     def _harvest_task_assignees(self, result) -> None:
         """Add assignees of todo tasks in a task-tool result.
@@ -255,7 +280,19 @@ class LarkAgent(BaseAgent):
             # chats (invoke, then read chat_id / member ids out of
             # the result and add them to run state).
             if name in LARK_TASK_TOOLS:
+                if name in _TASKLIST_GUID_TOOLS:
+                    target = kwargs.get("tasklist_guid")
+                    if not isinstance(target, str) or target not in (
+                        self._lark_allowed_tasklist_guids
+                    ):
+                        return self._refuse(
+                            name,
+                            f"tasklist_guid '{target}' was not returned by "
+                            "lark_list_tasklists in this run",
+                        )
                 result = tool.invoke(kwargs)
+                if name == "lark_list_tasklists":
+                    self._harvest_tasklist_guids(result)
                 if self._remind_is_task_assignees():
                     self._harvest_task_assignees(result)
                 return result

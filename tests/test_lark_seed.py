@@ -22,6 +22,10 @@ def test_lark_yaml_files_parse():
         "lark_reply_message",
         "lark_get_history",
         "lark_update_group",
+        "lark_list_tasklists",
+        "lark_list_tasklist_tasks",
+        "lark_list_tasks",
+        "lark_get_task",
     ]
     assert agent["model"] == settings.llm_model  # ${LLM_MODEL} default
 
@@ -32,7 +36,7 @@ def test_lark_yaml_files_parse():
     assert mission["agent_id"] == "agent_lark_me"
     assert mission["execution_config"]["sandbox"] is False
     assert mission["execution_config"]["skills"] == ["agent-lark", "session-memory"]
-    assert mission["capabilities"] == ["lark_messaging"]
+    assert set(mission["capabilities"]) == {"lark_messaging", "lark_tasks"}
     assert mission["input_schema"]["required"] == ["message", "chat_id"]
 
 

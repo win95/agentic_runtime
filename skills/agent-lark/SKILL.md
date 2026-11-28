@@ -4,6 +4,7 @@ description: Bot Lark — hỏi–đáp trong chat đúng thread, cảnh báo s�
 keywords: lark bot chat group alert card retrospective cảnh báo nhóm
 map:
   start: route
+  reply_tools: [lark_reply_message, lark_send_message]
   nodes:
     - id: route
       goal: "Một lần mỗi lượt — chọn đúng một flow: alert khi user ra lệnh báo sự cố; task-query khi user hỏi trong chat về task/tasklist; answer khi user hỏi/chat chung; resolve khi user ra lệnh đã xử lý xong hoặc bấm nút Đã xử lý trên card; task-remind khi input có mode == remind_tasks (lần chạy định kỳ nhắc task, không phải lệnh trong chat). Không gọi tool ở bước này."
@@ -29,8 +30,8 @@ map:
       requires: [lark_create_group]
       terminal: true
     - id: task-query
-      goal: "User hỏi trong chat về task/tasklist: đọc tasklists bằng lark_list_tasklists, tasks bằng lark_list_tasks, chi tiết một task bằng lark_get_task nếu cần — chỉ đọc, không gửi DM nhắc. Trả lời tóm tắt trong thread bằng lark_reply_message (message_id của tin user, reply_in_thread true). Không @all."
-      tools: [lark_list_tasklists, lark_list_tasks, lark_get_task, lark_reply_message]
+      goal: "User hỏi trong chat về task/tasklist: đọc tasklists bằng lark_list_tasklists, tasks trong từng tasklist bằng lark_list_tasklist_tasks (guid từ kết quả list tasklists), chi tiết một task bằng lark_get_task nếu cần — chỉ đọc, không gửi DM nhắc. Khi list tasklists hoặc lark_list_tasks trả count=0, relay visibility_note cho user. Trả lời tóm tắt trong thread bằng lark_reply_message (message_id của tin user, reply_in_thread true). Không @all."
+      tools: [lark_list_tasklists, lark_list_tasklist_tasks, lark_get_task, lark_reply_message]
       terminal: true
     - id: answer
       goal: "Trả lời đúng thread bằng lark_reply_message (message_id của tin user gửi, reply_in_thread true). Trả lời ngắn; câu hỏi mơ hồ thì hỏi lại 1 câu rồi dừng. Không @all."
@@ -41,8 +42,8 @@ map:
       tools: [lark_get_history, lark_send_message, lark_update_group]
       terminal: true
     - id: task-remind
-      goal: "Nhắc task đang làm dở theo input của lần chạy (execution_input — đọc mới mỗi lần chạy, không hard-code): recipients / task_filter / scope, thiếu thì dùng default (xem flow task-remind dưới). Đọc tasklists → đọc tasks → lọc → gom theo người nhận → một DM mỗi chủ task (hoặc một bản tóm tắt cho đích cố định)."
-      tools: [lark_list_tasklists, lark_list_tasks, lark_get_task, lark_send_message]
+      goal: "Nhắc task đang làm dở theo input của lần chạy (execution_input — đọc mới mỗi lần chạy, không hard-code): recipients / task_filter / scope, thiếu thì dùng default (xem flow task-remind dưới). Đọc tasklists → lark_list_tasklist_tasks từng tasklist → lọc → gom theo người nhận → một DM mỗi chủ task (hoặc một bản tóm tắt cho đích cố định)."
+      tools: [lark_list_tasklists, lark_list_tasklist_tasks, lark_get_task, lark_send_message]
       terminal: true
 ---
 
@@ -72,9 +73,10 @@ Khi yêu cầu tới từ Lark (DM hoặc group) và cần **trả lời trong c
    của tin user gửi (`reply_in_thread: true`) — trả lời đúng thread.
    Trả lời ngắn; không @all.
 3b. **Hỏi task trong chat (task-query).** Khi user hỏi về task/tasklist
-   (không phải lần chạy `mode == remind_tasks`): đọc bằng
-   `lark_list_tasklists` / `lark_list_tasks` / `lark_get_task`, rồi
-   tóm tắt trong thread bằng `lark_reply_message` — không gửi DM nhắc.
+   (không phải lần chạy `mode == remind_tasks`): `lark_list_tasklists` →
+   `lark_list_tasklist_tasks` (mỗi `guid`) → `lark_get_task` nếu cần;
+   nếu `count=0` và có `visibility_note` thì nói rõ cho user. Tóm tắt
+   trong thread bằng `lark_reply_message` — không gửi DM nhắc.
 4. **Xong việc (resolve).** Input lấy `chat_id` + `incident_ref` từ
    card action hoặc lệnh trong chat — không dựa vào session memory.
    Đọc history bằng `lark_get_history` (limit 100), tóm tắt diễn biến
@@ -109,9 +111,10 @@ cap cố định 5 của mission.
 1. **Đọc tasklists** mà app đọc được bằng `lark_list_tasklists`
    (phạm vi theo `scope` trong input; default `all_tasklists` — quét
    tasklist, không cần roster).
-2. **Đọc tasks** của mỗi tasklist bằng `lark_list_tasks`
-   (`completed=false`). Cần chi tiết một task thì đọc thêm bằng
-   `lark_get_task`.
+2. **Đọc tasks** trong mỗi tasklist bằng `lark_list_tasklist_tasks`
+   (`tasklist_guid` từ bước 1, `completed=false`). Cần chi tiết một
+   task thì đọc thêm bằng `lark_get_task`. Bước 1 trống thì relay
+   `visibility_note`.
 3. **Lọc** theo `task_filter` trong input (default: `status == todo`
    và quá hạn hoặc đến hạn hôm nay). "Đang làm" = todo chưa xong;
    nếu tran dùng custom field / section riêng để đánh dấu đang làm
@@ -173,8 +176,9 @@ hỏi lại user, không đoán open_id.
 - Không dùng session memory để lấy context vụ việc khi resolve — đọc
   history bằng `lark_get_history`.
 - Không gọi tool Lark ngoài 11 tool đã đăng ký (8 tool nhắn tin /
-  group + 3 tool đọc task `lark_list_tasklists`, `lark_list_tasks`,
-  `lark_get_task`); không tìm web, không chạy code, không xuất file
+  group + 4 tool đọc task `lark_list_tasklists`, `lark_list_tasklist_tasks`,
+  `lark_list_tasks`, `lark_get_task`); không tìm web, không chạy code,
+  không xuất file
   (không có sandbox).
 - Nhắc task: không hard-code người nhận, bộ lọc hay phạm vi — đọc
   `recipients` / `task_filter` / `scope` từ `execution_input` mỗi lần
