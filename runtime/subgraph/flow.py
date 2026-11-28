@@ -95,7 +95,11 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
-from runtime.context_budget import ROUTE_INSTRUCTION_TOKENS, estimate_tokens
+from runtime.context_budget import (
+    ROUTE_INSTRUCTION_TOKENS,
+    estimate_tokens,
+    trim_text_to_token_budget,
+)
 from runtime.deep_agent import MAX_INPUT_JSON_BYTES, build_deep_agent, outcome_from_messages
 from runtime.guest_output import GUEST_REPLY_TOOL_NAME, extract_flow_guest_reply
 from runtime.guest_result import apply_guest_result_to_state
@@ -493,19 +497,21 @@ def build_route_instruction(
     *,
     max_tokens: int = ROUTE_INSTRUCTION_TOKENS,
 ) -> str:
-    """Human prompt for the route model (catalog budget enforced)."""
+    """Human prompt for the route model (catalog budget enforced).
+
+    The flow catalog (ids + branch ``when`` text) is sized first; session
+    history is trimmed to fit whatever remains so routing stays stable when
+    history is long.
+    """
     input_json = json.dumps(state.get("input_data") or {}, ensure_ascii=False)[
         :MAX_INPUT_JSON_BYTES
     ]
-    prefix = [
+    prefix_lead = [
         "Route the guest's request to ONE flow. Read the conversation: "
         "what flows already did this turn is in their replies — route "
         "only what is still unhandled.",
         f"Execution input:\n{wrap_data('execution_input', input_json)}",
     ]
-    history_block = state.get("history_block") or ""
-    if history_block:
-        prefix.append(f"Session history (prior turns):\n{history_block}")
     visited = state.get("visited") or []
     suffix = [
         "Already visited this turn: "
@@ -518,7 +524,6 @@ def build_route_instruction(
             "FLOW: <id> or FLOW: END or FLOW: WAIT."
         ),
     ]
-    fixed = "\n\n".join(prefix + ["Flows (choose one):\n{CATALOG}", *suffix])
     catalog_when = dict(when_by_entry)
     for flow in flows:
         if flow.id not in catalog_when and flow.resume_gated:
@@ -526,9 +531,59 @@ def build_route_instruction(
                 "the guest confirmed a booking in a previous turn "
                 "(only when the session has prior turns)"
             )
-    catalog_budget = max(48, max_tokens - estimate_tokens(fixed.replace("{CATALOG}", "")))
+
+    core_fixed = "\n\n".join(
+        prefix_lead + ["Flows (choose one):\n{CATALOG}", *suffix]
+    )
+    catalog_budget = max(
+        48, max_tokens - estimate_tokens(core_fixed.replace("{CATALOG}", ""))
+    )
     catalog = build_compact_flow_catalog(flows, catalog_when, catalog_budget)
-    return fixed.replace("{CATALOG}", catalog)
+
+    assembled_no_history = "\n\n".join(
+        prefix_lead + [f"Flows (choose one):\n{catalog}", *suffix]
+    )
+    tokens_no_history = estimate_tokens(assembled_no_history)
+
+    history_block = (state.get("history_block") or "").strip()
+    history_intro = "Session history (prior turns):\n"
+    intro_tokens = estimate_tokens(history_intro)
+    history_token_budget = max(0, max_tokens - tokens_no_history - intro_tokens)
+
+    def _assemble(cat: str, hist: str | None) -> str:
+        block = list(prefix_lead)
+        if hist is not None:
+            block.append(f"{history_intro}{hist}")
+        block.append(f"Flows (choose one):\n{cat}")
+        block.extend(suffix)
+        return "\n\n".join(block)
+
+    trimmed_history: str | None = None
+    if history_block:
+        if history_token_budget > 0:
+            trimmed_history = trim_text_to_token_budget(
+                history_block, history_token_budget
+            )
+        else:
+            trimmed_history = "(session history omitted to preserve the flow catalog)"
+
+    text = _assemble(catalog, trimmed_history)
+    while estimate_tokens(text) > max_tokens and catalog_budget > 48:
+        catalog_budget = max(48, catalog_budget // 2)
+        catalog = build_compact_flow_catalog(flows, catalog_when, catalog_budget)
+        assembled_no_history = _assemble(catalog, None)
+        tokens_no_history = estimate_tokens(assembled_no_history)
+        history_token_budget = max(
+            0, max_tokens - tokens_no_history - intro_tokens
+        )
+        if history_block and history_token_budget > 0:
+            trimmed_history = trim_text_to_token_budget(
+                history_block, history_token_budget
+            )
+        elif history_block:
+            trimmed_history = "(session history omitted to preserve the flow catalog)"
+        text = _assemble(catalog, trimmed_history)
+    return text
 
 
 def route_instruction_token_count(
