@@ -237,9 +237,13 @@ def handle_routed_message(
     """
     cfg = state.config
     open_id = (msg.sender_id or {}).get("open_id") or ""
+    union_id = (msg.sender_id or {}).get("union_id") or ""
     try:
         synced = platform_io.sync_user(
-            cfg.platform_base_url, cfg.platform_api_key, open_id=open_id
+            cfg.platform_base_url,
+            cfg.platform_api_key,
+            open_id=open_id,
+            union_id=union_id,
         )
         user_id = synced.get("user_id")
         platform_io.enqueue(
@@ -382,6 +386,7 @@ def handle_card_action(state: FrameState, payload: dict) -> None:
     operator = payload.get("operator") or {}
     operator_id = operator.get("operator_id") or {}
     open_id = operator_id.get("open_id") or ""
+    union_id = operator_id.get("union_id") or ""
     if not open_id:
         logger.warning("Card action has no operator open_id")
         return
@@ -433,7 +438,10 @@ def handle_card_action(state: FrameState, payload: dict) -> None:
         return
     try:
         synced = platform_io.sync_user(
-            cfg.platform_base_url, cfg.platform_api_key, open_id=open_id
+            cfg.platform_base_url,
+            cfg.platform_api_key,
+            open_id=open_id,
+            union_id=union_id,
         )
         user_id = synced.get("user_id")
         if action_name == "resolve":

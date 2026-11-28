@@ -122,6 +122,11 @@ class LarkUserSyncCreate(BaseModel):
     provider: str = "lark"
     # The Lark open_id of the user chatting with the bot.
     external_id: str = Field(min_length=1, max_length=255)
+    # The tenant-stable union_id (same human across Lark apps of the
+    # tenant). The open_id changes per app; the union_id is what keeps
+    # one platform user across an app switch. Optional — without it
+    # sync is exactly the old open_id-only flow.
+    union_id: str | None = None
     # Email for a new user. Omitted -> the synthetic address
     # lark-<open_id>@lark.local (D-LARK-12 default).
     email: str | None = None

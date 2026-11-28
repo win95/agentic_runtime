@@ -60,3 +60,16 @@ class AdminUserCreate(BaseModel):
     provider: str = Field(max_length=32)
     external_id: str = Field(max_length=255)
     role: str = "user"
+
+
+class AdminIdentityCreate(BaseModel):
+    """Link one more external identity to an existing user.
+
+    Service-to-service only (POST /admin/users/{user_id}/identities,
+    X-Service-Key) — the platform's Lark sync uses it to attach a
+    second identity (e.g. the ``union:<union_id>`` identity) to the
+    user a first identity already resolved to.
+    """
+
+    provider: str = Field(max_length=32)
+    external_id: str = Field(max_length=255)

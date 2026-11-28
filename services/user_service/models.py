@@ -44,10 +44,12 @@ class UserIdentity(Base):
     """One external login linked to a user (agent_lark_me, D-LARK-11).
 
     ``provider`` is ``"lark"`` for now; ``external_id`` is the Lark
-    ``open_id``. One (provider, external_id) pair maps to exactly one
-    user — the pair is unique, so a sync for the same Lark user always
-    returns the same user id. A user may hold several identities (a
-    Lark link + a password login, ...).
+    ``open_id`` — or ``"union:<union_id>"`` for the tenant-stable
+    union identity (same human, any Lark app of the tenant). One
+    (provider, external_id) pair maps to exactly one user — the pair
+    is unique, so a sync for the same Lark user always returns the
+    same user id. A user may hold several identities (a Lark link +
+    a password login, ...).
     """
 
     __tablename__ = "user_identities"

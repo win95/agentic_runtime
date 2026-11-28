@@ -191,3 +191,76 @@ def get_user_by_identity(
         raise HTTPException(status_code=500, detail="Identity has no user")
     _require_active(user)
     return user
+
+
+@router.post(
+    "/admin/users/{user_id}/identities",
+    response_model=schemas.UserRead,
+    status_code=201,
+    dependencies=[Depends(require_service_key)],
+)
+def link_identity_to_user(
+    user_id: str,
+    payload: schemas.AdminIdentityCreate,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    """Link one more external identity to an existing user.
+
+    Called by the platform's Lark sync (agent_lark_me): after a user
+    is resolved by one identity (open_id or union_id), the other
+    identity is attached here so the next sync from the other Lark
+    app resolves to the same user. Idempotent — linking an identity
+    the user already holds returns the user (200). A 409 means the
+    identity belongs to a different user: the caller must NOT merge
+    the two accounts silently.
+    """
+    user = db.get(User, user_id)
+    if user is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    _require_active(user)
+    provider = payload.provider.strip()
+    external_id = payload.external_id.strip()
+    if not provider or not external_id:
+        raise HTTPException(
+            status_code=422, detail="provider and external_id must not be empty"
+        )
+    existing = (
+        db.query(UserIdentity)
+        .filter(
+            UserIdentity.provider == provider,
+            UserIdentity.external_id == external_id,
+        )
+        .first()
+    )
+    if existing is not None:
+        if existing.user_id != user.id:
+            raise HTTPException(
+                status_code=409, detail="Identity already linked to another user"
+            )
+        response.status_code = 200
+        return user
+    db.add(UserIdentity(provider=provider, external_id=external_id, user_id=user.id))
+    try:
+        db.commit()
+    except IntegrityError:
+        # Lost a race with a concurrent link for the same identity.
+        db.rollback()
+        existing = (
+            db.query(UserIdentity)
+            .filter(
+                UserIdentity.provider == provider,
+                UserIdentity.external_id == external_id,
+            )
+            .first()
+        )
+        if existing is None:
+            raise
+        if existing.user_id != user.id:
+            raise HTTPException(
+                status_code=409, detail="Identity already linked to another user"
+            )
+        response.status_code = 200
+        return user
+    db.refresh(user)
+    return user

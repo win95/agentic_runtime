@@ -71,12 +71,26 @@ def _get_json(url: str, headers: dict, timeout: float) -> tuple[int, dict]:
 
 
 def sync_user(
-    base_url: str, api_key: str, *, open_id: str, timeout: float = _TIMEOUT_SECONDS
+    base_url: str,
+    api_key: str,
+    *,
+    open_id: str,
+    union_id: str = "",
+    timeout: float = _TIMEOUT_SECONDS,
 ) -> dict:
-    """POST /lark/users/sync — resolve a Lark sender to a platform user."""
+    """POST /lark/users/sync — resolve a Lark sender to a platform user.
+
+    ``union_id`` is the tenant-stable identity (same human, any Lark
+    app of the tenant); it is sent when the event carries it, so the
+    platform can keep one user across an app switch. Empty means the
+    event had none — sync is then exactly the old open_id-only flow.
+    """
+    payload: dict = {"provider": "lark", "external_id": open_id}
+    if union_id:
+        payload["union_id"] = union_id
     status, body = _post_json(
         f"{base_url.rstrip('/')}/lark/users/sync",
-        {"provider": "lark", "external_id": open_id},
+        payload,
         {"X-API-Key": api_key},
         timeout,
     )
