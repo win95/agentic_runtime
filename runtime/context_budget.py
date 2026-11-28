@@ -216,6 +216,38 @@ def _turns(messages: list) -> list[list]:
     return group_turns(messages)
 
 
+def trim_text_to_token_budget(text: str, max_tokens: int) -> str:
+    """Drop whole lines from the start until ``text`` fits ``max_tokens``.
+
+    Used when a fixed block (e.g. the flow catalog) must stay intact and
+    a variable block (e.g. session history) yields. Preserves the most
+    recent lines at the end of the text.
+    """
+    if not text or max_tokens < 1:
+        return ""
+    if estimate_tokens(text) <= max_tokens:
+        return text
+    marker = "... (earlier session history omitted to fit route budget)"
+    marker_tok = estimate_tokens(marker)
+    lines = text.split("\n")
+    original_count = len(lines)
+    while (
+        lines
+        and estimate_tokens("\n".join(lines)) + marker_tok + (1 if lines else 0)
+        > max_tokens
+    ):
+        lines.pop(0)
+    if not lines:
+        return marker if marker_tok <= max_tokens else marker[: max(0, max_tokens * CHARS_PER_TOKEN)]
+    body = "\n".join(lines)
+    if len(lines) < original_count:
+        combined = f"{marker}\n{body}"
+        if estimate_tokens(combined) <= max_tokens:
+            return combined
+        return trim_text_to_token_budget(body, max_tokens)
+    return body
+
+
 def trim_history(messages: list, budget_tokens: int = HISTORY_TOKENS) -> list:
     """Messages to remove so the turn total fits ``budget_tokens``.
 

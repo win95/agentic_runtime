@@ -6,7 +6,7 @@ map:
   start: route
   nodes:
     - id: route
-      goal: "Một lần mỗi lượt — chọn đúng một flow: alert khi user ra lệnh báo sự cố; answer khi user hỏi/chat; resolve khi user ra lệnh đã xử lý xong hoặc bấm nút Đã xử lý trên card; task-remind khi input có mode == remind_tasks (lần chạy định kỳ nhắc task, không phải lệnh trong chat). Không gọi tool ở bước này."
+      goal: "Một lần mỗi lượt — chọn đúng một flow: alert khi user ra lệnh báo sự cố; task-query khi user hỏi trong chat về task/tasklist; answer khi user hỏi/chat chung; resolve khi user ra lệnh đã xử lý xong hoặc bấm nút Đã xử lý trên card; task-remind khi input có mode == remind_tasks (lần chạy định kỳ nhắc task, không phải lệnh trong chat). Không gọi tool ở bước này."
       tools: []
       terminal: true
       branches:
@@ -14,6 +14,8 @@ map:
           goto: task-remind
         - when: "user ra lệnh báo sự cố (vd 'báo sự cố ... cho <team>')"
           goto: alert-create
+        - when: "user hỏi trong chat về task hoặc tasklist của họ (liệt kê, trạng thái, chi tiết) — không phải lần chạy nhắc định kỳ"
+          goto: task-query
         - when: "user hỏi hoặc chat — cần trả lời trong thread"
           goto: answer
         - when: "user ra lệnh đã xử lý xong / bấm nút Đã xử lý — cần retrospective + đổi tên group"
@@ -25,6 +27,10 @@ map:
       goal: "Gửi card cảnh báo vào group mới bằng lark_send_message (msg_type interactive, content là JSON card đã dựng bằng CardKit — không viết tay). Card có nút resolve/assign/escalate, mỗi nút có value {action, chat_id, incident_ref}."
       tools: [lark_send_message]
       requires: [lark_create_group]
+      terminal: true
+    - id: task-query
+      goal: "User hỏi trong chat về task/tasklist: đọc tasklists bằng lark_list_tasklists, tasks bằng lark_list_tasks, chi tiết một task bằng lark_get_task nếu cần — chỉ đọc, không gửi DM nhắc. Trả lời tóm tắt trong thread bằng lark_reply_message (message_id của tin user, reply_in_thread true). Không @all."
+      tools: [lark_list_tasklists, lark_list_tasks, lark_get_task, lark_reply_message]
       terminal: true
     - id: answer
       goal: "Trả lời đúng thread bằng lark_reply_message (message_id của tin user gửi, reply_in_thread true). Trả lời ngắn; câu hỏi mơ hồ thì hỏi lại 1 câu rồi dừng. Không @all."
@@ -65,6 +71,10 @@ Khi yêu cầu tới từ Lark (DM hoặc group) và cần **trả lời trong c
 3. **Trả lời trong chat.** Dùng `lark_reply_message` với `message_id`
    của tin user gửi (`reply_in_thread: true`) — trả lời đúng thread.
    Trả lời ngắn; không @all.
+3b. **Hỏi task trong chat (task-query).** Khi user hỏi về task/tasklist
+   (không phải lần chạy `mode == remind_tasks`): đọc bằng
+   `lark_list_tasklists` / `lark_list_tasks` / `lark_get_task`, rồi
+   tóm tắt trong thread bằng `lark_reply_message` — không gửi DM nhắc.
 4. **Xong việc (resolve).** Input lấy `chat_id` + `incident_ref` từ
    card action hoặc lệnh trong chat — không dựa vào session memory.
    Đọc history bằng `lark_get_history` (limit 100), tóm tắt diễn biến

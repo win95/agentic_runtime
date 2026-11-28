@@ -287,3 +287,33 @@ def test_build_route_instruction_compact_lines():
     assert "select_flow" in text
     assert "- check:" in text or "- check\n" in text or "- check:" in text
     assert json.dumps(when)[:20] not in text  # not dumping raw map JSON
+
+
+def test_build_route_instruction_keeps_full_catalog_when_history_is_long():
+    """Catalog ``when`` lines must not collapse to ~24 chars under long history."""
+    from runtime.subgraph.flow import derive_flows
+    from runtime.skills import load_skills
+
+    skill_map = {s.name: s for s in load_skills()}["agent-lark"].map
+    flows = derive_flows(skill_map)
+    when = {b.goto: b.when for b in skill_map.node_by_id("route").branches}
+    long_when = when.get("task-query") or ""
+    assert len(long_when) > 60, "fixture: task-query when text should be descriptive"
+
+    history_block = "\n".join(
+        f"Turn {i}: user asked about something; assistant replied at length."
+        for i in range(80)
+    )
+    state = {
+        "input_data": {"message": "liệt kê tasklist của tôi", "chat_id": "oc_1"},
+        "visited": [],
+        "history_block": history_block,
+    }
+    text = build_route_instruction(state, flows, when)
+    assert (
+        route_instruction_token_count(state, flows, when)
+        <= ROUTE_INSTRUCTION_TOKENS
+    )
+    assert "task-query:" in text
+    assert long_when[:40] in text, "catalog must keep full task-query when text"
+    assert "...task-query: input có mode == remi" not in text
