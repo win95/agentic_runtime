@@ -7,10 +7,19 @@
 # host-run dev flow where the platform (uvicorn :8000) stays outside
 # Docker.
 #
-# Prerequisites on the host before `up`:
+# Prerequisites on the host before `up` (start order matters):
+#   - Postgres on :5432 and MinIO on :9000 must be UP before `up` —
+#     they are host services, so they CANNOT be a compose depends_on;
+#     the order is documented here, not wired. MinIO must be reachable
+#     before `up` because minio-setup creates the mlflow artifact
+#     bucket against it on first start.
 #   - platform API running on :8000 (uvicorn app.main:app)
 #   - Postgres on :5432 with a `user_service` database
 #     (`createdb user_service`, then `make migrate-users` from the host)
+#     AND the mlflow backend database `${POSTGRES_DB:-agentic_runtime}`
+#     (`createdb ${POSTGRES_DB:-agentic_runtime}` — mlflow refuses to
+#     start without it; the main compose creates it via POSTGRES_DB,
+#     but here Postgres is host-run so the DB must exist already)
 #   - Redis on :6379, MinIO on :9000 (mlflow's artifact store)
 #   - repo-root .env with API_KEY, JWT_SECRET, USER_SERVICE_API_KEY,
 #     LARK_APP_ID, LARK_APP_SECRET, LARK_ALLOWLIST
@@ -18,11 +27,19 @@
 #     POSTGRES_USER / POSTGRES_PASSWORD in .env (defaults below are the
 #     main compose's dev defaults)
 #
+# Start order: host Postgres + MinIO first, then `up` below. mlflow
+# itself waits for minio-setup (depends_on service_completed_successfully)
+# so the artifact bucket exists before the server starts.
+#
 #   docker compose -f docker-compose.dev.yml up -d --build
 #   curl localhost:8002/healthz   # frame health (WS mode, own port)
 #   curl localhost:8001/health    # user service health
 #   curl localhost:8002/readyz    # 503 until the platform answers :8000
 #   curl localhost:5000/health    # mlflow health
+#   open http://localhost:5000    # mlflow UI — an experiment should
+#                                 # appear once the host platform logs a run
+#   # host platform/worker must point at this server:
+#   # MLFLOW_TRACKING_URI=http://localhost:5000 in .env (see .env.example)
 #
 # Do NOT run the main compose's user-service at the same time — both
 # publish host port 8001. Code changes: user-service reloads live
@@ -94,6 +111,23 @@ services:
       timeout: 5s
       retries: 10
 
+  # Creates the mlflow artifact bucket on the HOST MinIO once, before
+  # mlflow starts (same pattern as the main compose's minio-setup, but
+  # against http://host.docker.internal:9000 and only the one bucket
+  # this dev flow needs — artifacts silently never land without it).
+  # No depends_on: the host MinIO is not a compose service, so it must
+  # already be up before `up` (see header prerequisites).
+  minio-setup:
+    image: bitnamilegacy/minio-client:latest
+    entrypoint: >
+      /bin/sh -c "
+      sleep 5;
+      mc alias set local http://host.docker.internal:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin};
+      mc mb --ignore-existing local/${MINIO_BUCKET:-agentic-runtime};
+      "
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
   # MLflow 3.x tracking server (GenAI tracing/eval). Same image as the
   # main compose's `mlflow` service (profile `observability`), but the
   # backend + artifact store point at the HOST Postgres (:5432) and
@@ -120,6 +154,9 @@ services:
       - "5000:5000"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      minio-setup:
+        condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
       interval: 10s

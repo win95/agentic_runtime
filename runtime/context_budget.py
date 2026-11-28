@@ -238,7 +238,11 @@ def trim_text_to_token_budget(text: str, max_tokens: int) -> str:
     ):
         lines.pop(0)
     if not lines:
-        return marker if marker_tok <= max_tokens else marker[: max(0, max_tokens * CHARS_PER_TOKEN)]
+        return (
+            marker
+            if marker_tok <= max_tokens
+            else marker[: max(0, max_tokens * CHARS_PER_TOKEN)]
+        )
     body = "\n".join(lines)
     if len(lines) < original_count:
         combined = f"{marker}\n{body}"

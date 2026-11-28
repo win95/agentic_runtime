@@ -1,4 +1,4 @@
-.PHONY: install install-requirements run-api run-worker run-beat migrate migrate-users run-user-service seed-admin test lint docker-up docker-down seed seed-dry-run seed-edge new-agent seed-agent ingest ingest-dry-run demo eval eval-real eval-genai eval-genai-real langgraph-dev gen-synthetic-data eval-tool-use eval-retrieval train-embedding train-llm mlflow-report eval-retrieval-live
+.PHONY: install install-requirements run-api run-worker run-beat migrate migrate-users run-user-service seed-admin test lint docker-up docker-down seed seed-dry-run seed-edge new-agent seed-agent ingest ingest-dry-run demo eval eval-real eval-genai eval-genai-real langgraph-dev gen-synthetic-data eval-tool-use eval-retrieval train-embedding train-llm mlflow-report agent-check eval-retrieval-live
 
 # Prefer the project venv when it exists (this checkout), else system python.
 # Absolute when the venv exists: migrate-users cds into
@@ -121,6 +121,13 @@ eval-genai:
 # GenAI eval with real predictions (needs the 4 LiteLLM vars).
 eval-genai-real:
 	$(PYTHON) scripts/eval_mission.py --real --genai
+
+# On-demand live-agent check (real LLM, MLflow experiment `agent-check`).
+# Runs ONLY when invoked — no cron, hook, CI or other target calls it.
+#   make agent-check [MISSIONS=system_admin] [TRACKING_URI=sqlite:////tmp/mlruns-agent-check/mlflow.db]
+# See docs/agent-check-pipeline.md.
+agent-check:
+	$(PYTHON) scripts/manual/agent_check.py $(if $(MISSIONS),--missions $(MISSIONS)) $(if $(TRACKING_URI),--tracking-uri $(TRACKING_URI))
 
 # Rebuild the MLflow report for the manual hotel runs (read-only; needs
 # the MLflow server only). Outputs under reports/ (git-ignored).
