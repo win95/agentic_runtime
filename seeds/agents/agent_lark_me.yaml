@@ -20,7 +20,8 @@ system_prompt: >-
   việc thì đọc history bằng lark_get_history, tóm tắt, rồi đổi tên group
   bằng lark_update_group; (3) nhắc task định kỳ khi input có
   mode == remind_tasks — đọc tasklists/tasks bằng lark_list_tasklists,
-  lark_list_tasks, lark_get_task rồi gửi một DM mỗi chủ task (hoặc một
+  lark_list_tasklist_tasks, lark_get_task rồi gửi một DM mỗi chủ task
+  (hoặc một
   bản tóm tắt cho đích cố định trong input).
 
 
@@ -58,5 +59,6 @@ allowed_tools:
   - lark_get_history
   - lark_update_group
   - lark_list_tasklists
+  - lark_list_tasklist_tasks
   - lark_list_tasks
   - lark_get_task

@@ -6,7 +6,7 @@ wrapped by ``runtime/integrations/lark_client.py`` — same lazy-client
 never fails when the SDK or credentials are missing; the agent gets a
 structured error dict instead.
 
-Capability: ``lark_tasks``. All three tools are read-only. The tools
+Capability: ``lark_tasks``. All task tools are read-only. The tools
 are only visible to missions that declare the ``lark_tasks``
 capability (registry ``check``); read tools are not gated by the
 agent's ``allowed_tools`` (Layer 1 read-open — see
@@ -81,6 +81,31 @@ def lark_list_tasks(completed: bool = False, limit: int = 100) -> dict:
 
 
 @tool
+def lark_list_tasklist_tasks(
+    tasklist_guid: str,
+    completed: bool | None = False,
+    limit: int = 100,
+) -> dict:
+    """List tasks inside one Lark tasklist (paginated).
+
+    Read-only. ``tasklist_guid`` must come from ``lark_list_tasklists``
+    (``tasklists[].guid``). ``completed=False`` (default) returns
+    unfinished tasks only; pass ``completed=True`` for finished tasks or
+    ``None`` to omit the filter. Returns {"tasks": [...], "count": n,
+    "truncated": bool, "tasklist_guid": str}; each task includes
+    guid, summary, due, completed, and assignees (member open_ids).
+    """
+    result = lark_client.list_tasklist_tasks(
+        tasklist_guid=tasklist_guid,
+        completed=completed,
+        limit=limit,
+    )
+    if "error" in result:
+        return _err("lark_list_tasklist_tasks", result)
+    return {**result, "stub": False, "provenance": "lark:list_tasklist_tasks"}
+
+
+@tool
 def lark_get_task(task_guid: str) -> dict:
     """Read one Lark task by guid.
 
@@ -95,7 +120,7 @@ def lark_get_task(task_guid: str) -> dict:
     return {**result, "stub": False, "provenance": "lark:get_task"}
 
 
-# Register the 3 tools under the lark_tasks capability.
+# Register task tools under the lark_tasks capability.
 # All read-only (permission lark:read); no destructive targets, no
 # approval gate — reads are the Layer 1 read-open set.
 registry.register(
@@ -104,6 +129,10 @@ registry.register(
 )
 registry.register(
     lark_list_tasks, capability="lark_tasks", permission="lark:read",
+    timeout_seconds=60, read_only=True,
+)
+registry.register(
+    lark_list_tasklist_tasks, capability="lark_tasks", permission="lark:read",
     timeout_seconds=60, read_only=True,
 )
 registry.register(

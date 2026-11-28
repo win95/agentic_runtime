@@ -215,6 +215,11 @@ class Flow:
     tool_requires: dict[str, frozenset[str]] = field(default_factory=dict)
 
     @property
+    def ends_turn(self) -> bool:
+        """True when the flow's last map node is marked terminal."""
+        return bool(self.nodes) and bool(self.nodes[-1].terminal)
+
+    @property
     def tools(self) -> list[str]:
         """Union of the steps' tools, order-preserving, deduplicated."""
         seen: list[str] = []
@@ -687,6 +692,37 @@ def use_flow_subgraph(
     return use_flow_subgraph_harness(mission_id, mapped_skills, execution_config, harness=harness)
 
 
+def _tool_result_is_success(content) -> bool:
+    """True when a tool result dict (or JSON) has no error field."""
+    if isinstance(content, dict):
+        return "error" not in content
+    if isinstance(content, str):
+        text = content.strip()
+        if not text:
+            return False
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            return True
+        return isinstance(parsed, dict) and "error" not in parsed
+    return bool(content)
+
+
+def flow_delivered_reply(messages: list, reply_tools: frozenset[str]) -> bool:
+    """True when a reply tool succeeded in this flow's messages."""
+    if not reply_tools:
+        return False
+    for message in messages or []:
+        if not isinstance(message, ToolMessage):
+            continue
+        name = getattr(message, "name", "") or ""
+        if name not in reply_tools:
+            continue
+        if _tool_result_is_success(getattr(message, "content", None)):
+            return True
+    return False
+
+
 def _tool_names_called(messages: list) -> set[str]:
     names: set[str] = set()
     for message in messages or []:
@@ -771,6 +807,7 @@ class FlowState(TypedDict, total=False):
     flow_trace: list[dict]
     flow_answers: list[str]
     execution_id: str
+    turn_complete: bool
 
 
 def build_flow_subgraph(
@@ -827,6 +864,7 @@ def build_flow_subgraph(
     """
     flows = derive_flows(skill_map, resume_nodes=resume_nodes)
     pipelines = list(skill_map.pipelines or [])
+    reply_tools = frozenset(getattr(skill_map, "reply_tools", None) or [])
     by_id = {flow.id: flow for flow in flows}
     tools_by_name = {getattr(t, "name", ""): t for t in tools}
     if pipeline_agent is None:
@@ -1103,6 +1141,7 @@ def build_flow_subgraph(
                         ],
                         "flow_answers": prior_answers
                         + ([auto_answer] if auto_answer else []),
+                        "turn_complete": False,
                     }
             if flow_executor is not None:
                 new_messages = flow_executor(flow, state, isolated)
@@ -1199,6 +1238,9 @@ def build_flow_subgraph(
                         mark_awaiting_confirm(session_id, pipe)
             if steps >= max_steps:
                 errors.append(f"Plan step cap ({max_steps} nodes) reached at flow '{flow.id}'")
+            turn_complete = flow.ends_turn and flow_delivered_reply(
+                new_messages, reply_tools
+            )
             return {
                 "messages": history + [instruction] + added,
                 "current": flow.id,
@@ -1212,6 +1254,7 @@ def build_flow_subgraph(
                 "flow_trace": list(state.get("flow_trace") or [])
                 + [_trace_flow(flow, new_messages, answer)],
                 "flow_answers": prior_answers + ([answer] if answer else []),
+                "turn_complete": turn_complete,
             }
 
         return _run_flow
@@ -1225,7 +1268,11 @@ def build_flow_subgraph(
     def _after_flow(state: dict) -> str:
         # At the step cap there is no point running the router again
         # for one more model call — end the turn.
-        return "END" if int(state.get("steps") or 0) >= max_steps else "route"
+        if int(state.get("steps") or 0) >= max_steps:
+            return "END"
+        if state.get("turn_complete"):
+            return "END"
+        return "route"
 
     graph = StateGraph(FlowState)
     graph.add_node("route", make_route_fn())
@@ -1287,6 +1334,7 @@ def run_flow_subgraph(
         "flow_messages": [],
         "flow_trace": [],
         "flow_answers": [],
+        "turn_complete": False,
     }
     config: dict = {}
     if callbacks:
