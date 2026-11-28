@@ -73,6 +73,7 @@ execution:
 capabilities:
   - lark_messaging
   - lark_tasks
+  - lark_calendar
 
 # Harness: security.user_runnable: false (chỉ admin / API key chạy được
 # mission này — frame gọi bằng service API key; xem D-LARK-10),
@@ -130,6 +131,7 @@ harness:
       - lark_list_tasklists
       - lark_list_tasks
       - lark_get_task
+      - lark_calendar_freebusy
     max_result_tokens: 6000
     max_calls:
       lark_send_message: 5

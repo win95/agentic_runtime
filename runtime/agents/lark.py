@@ -77,6 +77,9 @@ LARK_TASK_TOOLS = frozenset(
     {"lark_list_tasklists", "lark_list_tasks", "lark_get_task"}
 )
 
+# Calendar free/busy (capability ``lark_calendar``) — sender calendar only.
+LARK_CALENDAR_TOOLS = frozenset({"lark_calendar_freebusy"})
+
 # Member-id keys accepted when harvesting assignees from a task
 # result. The Task API v2 task shape carries members as objects with
 # an ``id`` (an open_id) and may also surface open_id / user_id /
@@ -242,11 +245,40 @@ class LarkAgent(BaseAgent):
         through unchanged.
         """
         name = getattr(tool, "name", "") or ""
-        if name not in LARK_TOOLS and name not in LARK_TASK_TOOLS:
+        if (
+            name not in LARK_TOOLS
+            and name not in LARK_TASK_TOOLS
+            and name not in LARK_CALENDAR_TOOLS
+        ):
             return tool
         self._seed_lark_scope()
 
         def _guarded(**kwargs):
+            if name in LARK_CALENDAR_TOOLS:
+                open_id = next(
+                    (
+                        sid
+                        for sid in self._lark_sender_ids
+                        if isinstance(sid, str) and sid.startswith("ou_")
+                    ),
+                    next(iter(self._lark_sender_ids), None),
+                )
+                if not isinstance(open_id, str) or not open_id:
+                    return self._refuse(
+                        name,
+                        "no sender open_id in this run's input — only the "
+                        "chatting user's calendar may be queried",
+                    )
+                kwargs.pop("user_open_id", None)
+                from runtime.tools import lark_calendar_tools
+
+                return lark_calendar_tools.run_lark_calendar_freebusy(
+                    user_open_id=open_id,
+                    range_name=kwargs.get("range", "today"),
+                    start=kwargs.get("start"),
+                    end=kwargs.get("end"),
+                    timezone=kwargs.get("timezone", "Asia/Saigon"),
+                )
             # Task reads have no chat target — allowed in any mode
             # (read-only). In remind mode with task_assignees
             # recipients, the successful result grows the reminder

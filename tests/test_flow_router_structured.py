@@ -298,7 +298,9 @@ def test_build_route_instruction_keeps_full_catalog_when_history_is_long():
     flows = derive_flows(skill_map)
     when = {b.goto: b.when for b in skill_map.node_by_id("route").branches}
     long_when = when.get("task-query") or ""
+    cal_when = when.get("calendar-query") or ""
     assert len(long_when) > 60, "fixture: task-query when text should be descriptive"
+    assert len(cal_when) > 40, "fixture: calendar-query when text should be descriptive"
 
     history_block = "\n".join(
         f"Turn {i}: user asked about something; assistant replied at length."
@@ -315,5 +317,7 @@ def test_build_route_instruction_keeps_full_catalog_when_history_is_long():
         <= ROUTE_INSTRUCTION_TOKENS
     )
     assert "task-query:" in text
+    assert "calendar-query:" in text
     assert long_when[:40] in text, "catalog must keep full task-query when text"
+    assert cal_when[:30] in text, "catalog must keep calendar-query when text"
     assert "...task-query: input có mode == remi" not in text

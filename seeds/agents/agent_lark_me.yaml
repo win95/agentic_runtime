@@ -60,3 +60,4 @@ allowed_tools:
   - lark_list_tasklists
   - lark_list_tasks
   - lark_get_task
+  - lark_calendar_freebusy

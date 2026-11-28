@@ -6,6 +6,7 @@ Importing this package registers the built-in tools in the Tool Registry.
 from runtime.tools import (  # noqa: F401
     admin_tools,
     guest_channel_tools,
+    lark_calendar_tools,
     lark_task_tools,
     lark_tools,
     tavily_tools,
@@ -19,4 +20,5 @@ __all__ = [
     "tavily_tools",
     "lark_tools",
     "lark_task_tools",
+    "lark_calendar_tools",
 ]

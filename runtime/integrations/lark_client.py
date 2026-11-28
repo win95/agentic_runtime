@@ -23,7 +23,7 @@ import json
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -721,3 +721,104 @@ def get_task(*, task_guid: str) -> dict:
     if task is None:
         return {"error": f"lark get_task returned no task for guid {task_guid.strip()}"}
     return {"task": _serialize_task(task)}
+
+
+_MAX_FREEBUSY_RANGE = timedelta(days=90)
+_MISSING_FREEBUSY_SCOPE = 99991672
+
+
+def _calendar_model():
+    """The calendar/v4 SDK model module, or a RuntimeError to surface."""
+    try:
+        client = get_client()
+        from lark_oapi.api.calendar.v4 import model
+    except RuntimeError as exc:
+        raise exc
+    return client, model
+
+
+def _parse_rfc3339(value: str) -> datetime | None:
+    if not value or not isinstance(value, str):
+        return None
+    text = value.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        return datetime.fromisoformat(text)
+    except ValueError:
+        return None
+
+
+def get_freebusy(
+    *,
+    user_open_id: str,
+    time_min: str,
+    time_max: str,
+) -> dict:
+    """POST /open-apis/calendar/v4/freebusy/list — busy intervals only.
+
+    ``user_id_type`` is ``open_id``. Body carries ``time_min``,
+    ``time_max`` (RFC3339) and ``user_id``. Returns
+    ``{"busy_intervals": [{"start_time", "end_time"}, ...], "count": n}``
+    on success, or ``{"error": ...}``. The requested span must not exceed
+    90 days (Lark API limit). Error 99991672 is turned into an operator
+    hint to enable ``calendar:calendar.free_busy:read`` or
+    ``calendar:calendar:readonly``.
+    """
+    if not user_open_id or not str(user_open_id).strip():
+        return {"error": "user_open_id must not be empty"}
+    if not time_min or not time_max:
+        return {"error": "time_min and time_max are required (RFC3339)"}
+    start = _parse_rfc3339(time_min)
+    end = _parse_rfc3339(time_max)
+    if start is None or end is None:
+        return {"error": "time_min and time_max must be valid RFC3339 datetimes"}
+    if end <= start:
+        return {"error": "time_max must be after time_min"}
+    if end - start > _MAX_FREEBUSY_RANGE:
+        return {"error": "freebusy query range must not exceed 90 days"}
+    try:
+        client, model = _calendar_model()
+    except RuntimeError as exc:
+        return {"error": str(exc)}
+    req = (
+        model.ListFreebusyRequest.builder()
+        .user_id_type("open_id")
+        .request_body(
+            model.ListFreebusyRequestBody.builder()
+            .time_min(time_min.strip())
+            .time_max(time_max.strip())
+            .user_id(str(user_open_id).strip())
+            .build()
+        )
+        .build()
+    )
+    try:
+        resp = client.calendar.v4.freebusy.list(req)
+    except Exception as exc:  # noqa: BLE001 — provider failure is data
+        logger.warning("Lark get_freebusy raised: %s", exc)
+        return {"error": f"lark get_freebusy raised: {exc}"[:500]}
+    code = getattr(resp, "code", None)
+    if code == _MISSING_FREEBUSY_SCOPE:
+        msg = str(getattr(resp, "msg", "") or "")[:200]
+        logger.warning("Lark get_freebusy missing scope: code=%s msg=%s", code, msg)
+        return {
+            "error": (
+                "lark get_freebusy failed (code 99991672): missing calendar scope — "
+                "enable calendar:calendar.free_busy:read or calendar:calendar:readonly "
+                "on the Lark Custom App"
+            )
+        }
+    err = _check(resp, what="get_freebusy")
+    if err is not None:
+        return err
+    data = resp.data
+    intervals: list[dict] = []
+    for item in getattr(data, "freebusy_list", None) or []:
+        intervals.append(
+            {
+                "start_time": getattr(item, "start_time", None),
+                "end_time": getattr(item, "end_time", None),
+            }
+        )
+    return {"busy_intervals": intervals, "count": len(intervals)}

@@ -52,6 +52,17 @@ vì code graph chung chạm tới chúng; chỉ tách kết nối MCP + key Lark
    qua `load_mission_harness`, không cần cấu hình lọc gì thêm.
 3. Deploy + kiểm tra log riêng của worker mới trước khi coi là xong.
 
+## Lark app scopes (`worker-lark`)
+
+Ngoài IM/group scopes, mission `agent_lark_me_mission` dùng:
+
+| Capability | Tool | Lark scope (ít nhất một) |
+|---|---|---|
+| `lark_tasks` | `lark_list_*` / `lark_get_task` | `task:tasklist:read`, `task:task:read` |
+| `lark_calendar` | `lark_calendar_freebusy` | `calendar:calendar.free_busy:read` hoặc `calendar:calendar:readonly` |
+
+Free/busy chỉ trả khung bận/rảnh — không có tiêu đề sự kiện.
+
 ## Lệnh ops
 
 ```bash

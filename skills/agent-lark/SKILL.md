@@ -6,7 +6,7 @@ map:
   start: route
   nodes:
     - id: route
-      goal: "Một lần mỗi lượt — chọn đúng một flow: alert khi user ra lệnh báo sự cố; task-query khi user hỏi trong chat về task/tasklist; answer khi user hỏi/chat chung; resolve khi user ra lệnh đã xử lý xong hoặc bấm nút Đã xử lý trên card; task-remind khi input có mode == remind_tasks (lần chạy định kỳ nhắc task, không phải lệnh trong chat). Không gọi tool ở bước này."
+      goal: "Một lần mỗi lượt — chọn đúng một flow: alert khi user ra lệnh báo sự cố; task-query khi user hỏi trong chat về task/tasklist; calendar-query khi user hỏi trong chat về lịch/rảnh/bận/có họp không; answer khi user hỏi/chat chung; resolve khi user ra lệnh đã xử lý xong hoặc bấm nút Đã xử lý trên card; task-remind khi input có mode == remind_tasks (lần chạy định kỳ nhắc task, không phải lệnh trong chat). Không gọi tool ở bước này."
       tools: []
       terminal: true
       branches:
@@ -16,6 +16,8 @@ map:
           goto: alert-create
         - when: "user hỏi trong chat về task hoặc tasklist của họ (liệt kê, trạng thái, chi tiết) — không phải lần chạy nhắc định kỳ"
           goto: task-query
+        - when: "user hỏi trong chat về lịch của họ (hôm nay/ngày mai/tuần này rảnh hay bận, có họp không, khung giờ trống) — không phải lần chạy nhắc định kỳ"
+          goto: calendar-query
         - when: "user hỏi hoặc chat — cần trả lời trong thread"
           goto: answer
         - when: "user ra lệnh đã xử lý xong / bấm nút Đã xử lý — cần retrospective + đổi tên group"
@@ -31,6 +33,10 @@ map:
     - id: task-query
       goal: "User hỏi trong chat về task/tasklist: đọc tasklists bằng lark_list_tasklists, tasks bằng lark_list_tasks, chi tiết một task bằng lark_get_task nếu cần — chỉ đọc, không gửi DM nhắc. Trả lời tóm tắt trong thread bằng lark_reply_message (message_id của tin user, reply_in_thread true). Không @all."
       tools: [lark_list_tasklists, lark_list_tasks, lark_get_task, lark_reply_message]
+      terminal: true
+    - id: calendar-query
+      goal: "User hỏi lịch rảnh/bận: gọi lark_calendar_freebusy (range today|tomorrow|this_week|next_7_days|custom; timezone Asia/Saigon trừ khi user nói múi giờ khác — không tự tính ngày). Tool chỉ trả khung bận/rảnh, không có tên sự kiện; nếu user hỏi chi tiết meeting thì trả lời rõ API không cung cấp tiêu đề. Tóm tắt trong thread bằng lark_reply_message. Không @all."
+      tools: [lark_calendar_freebusy, lark_reply_message]
       terminal: true
     - id: answer
       goal: "Trả lời đúng thread bằng lark_reply_message (message_id của tin user gửi, reply_in_thread true). Trả lời ngắn; câu hỏi mơ hồ thì hỏi lại 1 câu rồi dừng. Không @all."
@@ -75,6 +81,10 @@ Khi yêu cầu tới từ Lark (DM hoặc group) và cần **trả lời trong c
    (không phải lần chạy `mode == remind_tasks`): đọc bằng
    `lark_list_tasklists` / `lark_list_tasks` / `lark_get_task`, rồi
    tóm tắt trong thread bằng `lark_reply_message` — không gửi DM nhắc.
+3c. **Hỏi lịch trong chat (calendar-query).** Khi user hỏi rảnh/bận:
+   `lark_calendar_freebusy` (để tool chọn cửa sổ — không tự đổi ngày),
+   trả lời khung rảnh/bận trong thread bằng `lark_reply_message`. API
+   không trả tên sự kiện — nếu user hỏi «họp gì» thì nói rõ giới hạn đó.
 4. **Xong việc (resolve).** Input lấy `chat_id` + `incident_ref` từ
    card action hoặc lệnh trong chat — không dựa vào session memory.
    Đọc history bằng `lark_get_history` (limit 100), tóm tắt diễn biến
@@ -172,10 +182,10 @@ hỏi lại user, không đoán open_id.
 - Không gửi tin vào chat khác chat của run này (scope_tool chặn).
 - Không dùng session memory để lấy context vụ việc khi resolve — đọc
   history bằng `lark_get_history`.
-- Không gọi tool Lark ngoài 11 tool đã đăng ký (8 tool nhắn tin /
-  group + 3 tool đọc task `lark_list_tasklists`, `lark_list_tasks`,
-  `lark_get_task`); không tìm web, không chạy code, không xuất file
-  (không có sandbox).
+- Không gọi tool Lark ngoài tool đã đăng ký (nhắn tin/group, đọc task,
+  đọc lịch free/busy `lark_calendar_freebusy`); không bịa tiêu đề sự
+  kiện — free/busy chỉ cho khung bận/rảnh; không tìm web, không chạy
+  code, không xuất file (không có sandbox).
 - Nhắc task: không hard-code người nhận, bộ lọc hay phạm vi — đọc
   `recipients` / `task_filter` / `scope` từ `execution_input` mỗi lần
   chạy (thiếu thì default: `task_assignees`, `status: todo`,

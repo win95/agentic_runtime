@@ -13,16 +13,8 @@ BASE = pathlib.Path(load_missions.__file__).resolve().parent
 def test_lark_yaml_files_parse():
     agent = load_missions.load_agent_file(BASE / "agents" / "agent_lark_me.yaml")
     assert agent["id"] == "agent_lark_me"
-    assert agent["allowed_tools"] == [
-        "lark_create_group",
-        "lark_send_message",
-        "lark_get_group",
-        "lark_upload_image",
-        "lark_add_members",
-        "lark_reply_message",
-        "lark_get_history",
-        "lark_update_group",
-    ]
+    assert "lark_calendar_freebusy" in agent["allowed_tools"]
+    assert "lark_list_tasks" in agent["allowed_tools"]
     assert agent["model"] == settings.llm_model  # ${LLM_MODEL} default
 
     mission = load_missions.load_mission_file(
@@ -32,8 +24,14 @@ def test_lark_yaml_files_parse():
     assert mission["agent_id"] == "agent_lark_me"
     assert mission["execution_config"]["sandbox"] is False
     assert mission["execution_config"]["skills"] == ["agent-lark", "session-memory"]
-    assert mission["capabilities"] == ["lark_messaging"]
-    assert mission["input_schema"]["required"] == ["message", "chat_id"]
+    assert mission["capabilities"] == [
+        "lark_messaging",
+        "lark_tasks",
+        "lark_calendar",
+    ]
+    tools = mission["execution_config"]["harness"]["tool_budget"]["tools"]
+    assert "lark_calendar_freebusy" in tools
+    assert "anyOf" in mission["input_schema"]
 
 
 def test_lark_agent_and_mission_seed(db_session):

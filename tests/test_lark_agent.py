@@ -8,6 +8,7 @@ not a crash.
 
 import pytest
 
+import runtime.tools.lark_calendar_tools  # noqa: F401
 import runtime.tools.lark_tools  # noqa: F401 — registers the tools
 from runtime.agents.registry import resolve_agent
 from runtime.integrations import lark_client
@@ -133,6 +134,35 @@ def test_reply_only_in_own_threads(agent, stub_client):
     assert out["message_id"] == "om_reply"
     out = reply.invoke({"message_id": "om_other", "text": "hi"})
     assert "error" in out
+
+
+def test_calendar_freebusy_uses_sender_only(agent, monkeypatch):
+    monkeypatch.setattr(
+        lark_client,
+        "get_freebusy",
+        lambda **kw: {
+            "busy_intervals": [],
+            "count": 0,
+            "user_open_id": kw["user_open_id"],
+        },
+    )
+    entry = registry.get("lark_calendar_freebusy")
+    tool = agent.scope_tool(entry.tool, "lark-abc", "agent_lark_me_mission")
+    out = tool.invoke({"range": "today"})
+    assert out["count"] == 0
+
+    bare = registry.get("lark_calendar_freebusy").tool
+    out = bare.invoke({"range": "today"})
+    assert "error" in out
+
+
+def test_calendar_freebusy_refused_without_sender(stub_client):
+    obj = resolve_agent("agent_lark_me", {})
+    obj.execution_input = {"chat_id": "oc_home"}
+    entry = registry.get("lark_calendar_freebusy")
+    tool = obj.scope_tool(entry.tool, "lark-abc")
+    out = tool.invoke({"range": "today"})
+    assert "error" in out and "open_id" in out["error"]
 
 
 def test_empty_input_is_fail_closed(stub_client):
