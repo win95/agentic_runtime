@@ -206,32 +206,36 @@ JUDGE_NAME = "evidence_grounding"
 
 
 def _proxy_base_url() -> str:
-    """OpenAI-compatible base URL of the LiteLLM proxy (with /v1)."""
+    """OpenAI-compatible base URL of the selected LLM provider (with /v1).
+
+    Resolved per LLM_PROVIDER: the LiteLLM proxy by default, or the
+    Cloudflare Workers AI /ai/v1 endpoint when provider=cloudflare.
+    """
     from app.config import settings
 
-    base = settings.llm_api_base.rstrip("/")
+    base = settings.resolved_llm_api_base.rstrip("/")
     return base if base.endswith("/v1") else base + "/v1"
 
 
 def run_genai_eval(cases: list[dict], mock_llm: bool, tracking_uri: str) -> int | None:
-    """Run mlflow.genai.evaluate with a judge routed through the LiteLLM proxy.
+    """Run mlflow.genai.evaluate with a judge routed through the LLM provider.
 
     Returns 0 on success, 1 on failure, or None when skipped because the
-    judge cannot be routed (LiteLLM proxy not configured) — the classic
+    judge cannot be routed (LLM provider not configured) — the classic
     eval results are unaffected in that case.
     """
     from app.config import settings
 
-    if not settings.llm_api_key or not settings.llm_api_base:
-        print("SKIPPED: genai eval needs judge routing through the LiteLLM proxy "
-              "(LLM_API_BASE/LLM_API_KEY not configured); classic eval results "
-              "above are unaffected.")
+    if not settings.resolved_llm_api_key or not settings.resolved_llm_api_base:
+        print("SKIPPED: genai eval needs judge routing through the LLM provider "
+              "(LLM provider not configured — see LLM_PROVIDER in .env); "
+              "classic eval results above are unaffected.")
         return None
-    # The judge's OpenAI-compatible client needs the proxy key + base URL.
+    # The judge's OpenAI-compatible client needs the provider key + base URL.
     # No cost estimation is done here (see docs: LiteLLM price-table lookup
     # is deliberately skipped — the user owns the LiteLLM/vLLM setup).
     proxy_base = _proxy_base_url()
-    os.environ.setdefault("OPENAI_API_KEY", settings.llm_api_key)
+    os.environ.setdefault("OPENAI_API_KEY", settings.resolved_llm_api_key)
     os.environ.setdefault("OPENAI_API_BASE", proxy_base)
     try:
         import mlflow

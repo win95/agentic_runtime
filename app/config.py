@@ -28,6 +28,16 @@ class Settings(BaseSettings):
     # values MUST match wherever both services run.
     jwt_secret: str = ""
 
+    # User service (services/user_service) — for the Lark user sync
+    # (POST /lark/users/sync, agent_lark_me D-LARK-11). The platform
+    # calls the service's admin identity endpoints with a shared
+    # service key (X-Service-Key), NOT a minted admin JWT: the user
+    # service requires a JWT sub to be an existing User row, and the
+    # platform cannot know an admin's id. The key must match
+    # USER_SERVICE_API_KEY in the user service's env.
+    user_service_url: str = "http://localhost:8001"
+    user_service_api_key: str = ""
+
     # PostgreSQL (missions, agents, tools, executions, results)
     database_url: str = "postgresql+psycopg://postgres:postgres@localhost:5432/agentic_runtime"
 
@@ -45,6 +55,29 @@ class Settings(BaseSettings):
     # (e.g. gpt-4o-mini). The proxy routes by this name.
     llm_model: str = "gpt-4o-mini"
     llm_temperature: float = 0.2
+    # Reasoning (thinking) toggle for Qwen3-style chat models served
+    # behind the proxy. When true, the factory sends
+    # chat_template_kwargs {"enable_thinking": true} with every chat
+    # call. Verified live 2026-11-27 against the LiteLLM proxy:
+    # qwen3-8b thinks by default and this is the parameter form the
+    # backend actually honors — extra_body.enable_thinking and
+    # reasoning_effort are silently ignored there. Off by default:
+    # no extra parameter is sent, so other providers/models behave
+    # exactly as before.
+    llm_enable_thinking: bool = False
+
+    # --- LLM provider switch ---
+    # "litellm" (default): the user's LiteLLM proxy above.
+    # "cloudflare": Cloudflare Workers AI via its OpenAI-compatible
+    # /ai/v1 endpoint — no proxy needed. Needs CLOUDFLARE_ACCOUNT_ID
+    # (not a secret, it appears in dashboard URLs) +
+    # CLOUDFLARE_API_TOKEN (a Workers AI API token). With this provider
+    # LLM_MODEL must be a Workers AI model name, e.g.
+    # @cf/qwen/qwen3.8-27b, and EMBEDDING_MODEL e.g.
+    # @cf/qwen/qwen3-embedding-0.6b. See docs/cloudflare-workers-ai.md.
+    llm_provider: str = "litellm"
+    cloudflare_account_id: str = ""
+    cloudflare_api_token: str = ""
 
     # --- Embeddings via LiteLLM (OpenAI-compatible) ---
     # Empty base/key => reuse the LLM proxy values above.
@@ -159,7 +192,6 @@ class Settings(BaseSettings):
     harness_source: Literal["db", "seed"] = "db"
     harness_index_ttl_seconds: int = 30
     harness_index_db_timeout_seconds: float = 2.0
-
     # Runtime
     checkpoint_enabled: bool = False
     execution_timeout_seconds: int = 3600
@@ -245,12 +277,46 @@ class Settings(BaseSettings):
 
     # --- Resolved (effective) values ---
     @property
+    def cloudflare_api_base(self) -> str:
+        """Workers AI OpenAI-compatible base URL for this account."""
+        return (
+            "https://api.cloudflare.com/client/v4/accounts/"
+            f"{self.cloudflare_account_id}/ai/v1"
+        )
+
+    @property
+    def resolved_llm_api_base(self) -> str:
+        """Chat base URL for the selected provider."""
+        if self.llm_provider == "cloudflare":
+            return self.cloudflare_api_base
+        return self.llm_api_base
+
+    @property
+    def resolved_llm_api_key(self) -> str:
+        """Chat API key for the selected provider."""
+        if self.llm_provider == "cloudflare":
+            return self.cloudflare_api_token
+        return self.llm_api_key
+
+    @property
     def resolved_embedding_api_base(self) -> str:
-        return self.embedding_api_base or self.llm_api_base
+        # Explicit EMBEDDING_API_BASE wins; otherwise the chat
+        # provider's base (LiteLLM proxy or Workers AI /ai/v1).
+        if self.embedding_api_base:
+            return self.embedding_api_base
+        if self.llm_provider == "cloudflare":
+            return self.cloudflare_api_base
+        return self.llm_api_base
 
     @property
     def resolved_embedding_api_key(self) -> str:
-        return self.embedding_api_key or self.llm_api_key
+        # Explicit EMBEDDING_API_KEY wins; otherwise the chat
+        # provider's key (LiteLLM proxy key or Workers AI token).
+        if self.embedding_api_key:
+            return self.embedding_api_key
+        if self.llm_provider == "cloudflare":
+            return self.cloudflare_api_token
+        return self.llm_api_key
 
     @property
     def resolved_embedding_model_index(self) -> str:

@@ -9,6 +9,8 @@ from runtime.context_budget import (
     effective_history_tokens,
     message_tokens,
     trim_history,
+    estimate_tokens,
+    trim_text_to_token_budget,
 )
 
 
@@ -118,6 +120,16 @@ def test_trim_history_removes_whole_turn_pairs():
                 and m.tool_call_id in {c["id"] for c in message.tool_calls}
             ]
             assert tools and all(m in removed for m in tools)
+
+
+def test_trim_text_to_token_budget_drops_oldest_lines_first():
+    lines = [f"line {i}: " + ("x" * 200) for i in range(50)]
+    text = "\n".join(lines)
+    trimmed = trim_text_to_token_budget(text, 400)
+    assert estimate_tokens(trimmed) <= 400
+    assert "line 49:" in trimmed
+    assert "line 0:" not in trimmed
+    assert "earlier session history omitted" in trimmed
 
 
 # --- Prefix check ------------------------------------------------------

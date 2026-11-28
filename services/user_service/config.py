@@ -8,6 +8,7 @@ API verifies them. Keep the two values identical wherever both run.
 
 from __future__ import annotations
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,6 +29,16 @@ class Settings(BaseSettings):
     jwt_secret: str = ""
     jwt_algorithm: str = "HS256"
     jwt_expire_hours: int = 24
+
+    # Service-to-service key shared with the platform API
+    # (app/config.py: user_service_api_key). The platform calls the
+    # admin identity endpoints with it (X-Service-Key). Empty = every
+    # service-key call fails closed. Must match in both services' env,
+    # like JWT_SECRET.
+    service_api_key: str = Field(
+        default="",
+        validation_alias=AliasChoices("USER_SERVICE_API_KEY", "SERVICE_API_KEY"),
+    )
 
     # Redis for rate limiting (login/register) — db 2, separate from
     # the platform's Celery broker (db 0) and result backend (db 1).

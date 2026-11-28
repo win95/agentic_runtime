@@ -14,7 +14,7 @@ One write function, one read function, one assembly function:
 - READ: at the start of an execution (``deep_agent_node``), the
   current input is keyword-matched against the session's stored
   turns (``retrieve_long_term_memory``). Matches fill a block of at
-  most ``LTM_TOKENS`` (1,024) in the system prompt, charged to the
+  most ``LTM_TOKENS`` (512) in the system prompt, charged to the
   history slice of the context budget — never more, never
   re-retrieved mid-run.
 - ASSEMBLY: ``past_context_block`` joins the rendered session

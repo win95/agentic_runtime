@@ -488,7 +488,13 @@ class Schedule(Base):
     in this codebase. ``next_run_at`` is always set by the service (never
     left NULL by normal writes); a NULL there means the schedule is never
     due. ``last_error`` records the latest dispatch failure so a broken
-    schedule is visible instead of silently skipped.
+    schedule is visible instead of silently skipped. ``source`` records
+    provenance: ``"loop"`` (materialized from a harness loop at seed
+    time), ``"file"`` (seeded from ``seeds/schedules/*.yaml``), or NULL
+    for legacy / API-created rows of unknown provenance. The seed
+    guards refuse cross-provenance overwrites (loop-over-file and
+    file-over-loop fail loudly); a NULL row is overwritten with a
+    warning and takes on the new source.
     """
 
     __tablename__ = "schedules"
@@ -501,6 +507,7 @@ class Schedule(Base):
     input_data: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
     enabled: Mapped[bool] = mapped_column(default=True)
     tenant: Mapped[str] = mapped_column(String(128), nullable=False, default="default")
+    source: Mapped[str | None] = mapped_column(String(64), nullable=True)
     next_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)

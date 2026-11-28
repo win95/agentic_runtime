@@ -82,6 +82,7 @@ def schedule_to_dict(schedule: models.Schedule) -> dict:
         "input_data": schedule.input_data or {},
         "enabled": schedule.enabled,
         "tenant": schedule.tenant,
+        "source": schedule.source,
         "next_run_at": schedule.next_run_at,
         "last_run_at": schedule.last_run_at,
         "last_error": schedule.last_error,
@@ -111,6 +112,7 @@ def create_schedule(db: Session, data: dict) -> models.Schedule:
         input_data=data.get("input_data") or {},
         enabled=data.get("enabled", True),
         tenant=data.get("tenant", "default"),
+        source=data.get("source"),
         next_run_at=compute_next_run(data["cron"], now),
     )
     db.add(schedule)

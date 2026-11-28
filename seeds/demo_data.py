@@ -503,14 +503,13 @@ def seed_tools_demo(db) -> dict:
     """Mirror the code registry into the `tools` table (idempotent).
 
     The registry stays the permission source of truth — the DB rows only
-    make GET /tools/db return the same 17 tools the runtime sees. The
+    make GET /tools/db return the same tools the runtime sees. The
     input schema is the langchain args JSON schema when obtainable,
     otherwise {} (the registry's ``args`` dict holds pydantic field
     objects, which are not JSON-serializable).
     """
     # Lazy import: importing the tool modules registers them.
     import runtime.tools.admin_tools  # noqa: F401
-    import runtime.tools.fault_tools  # noqa: F401
     from app.models import Tool
     from runtime.tools.registry import registry
 
@@ -555,7 +554,6 @@ def seed_policies_demo(db) -> dict:
     enforces it.
     """
     import runtime.tools.admin_tools  # noqa: F401
-    import runtime.tools.fault_tools  # noqa: F401
     from app.models import Policy
     from runtime.tools.registry import registry
 
@@ -669,12 +667,13 @@ def validate() -> dict:
 
 
 def seed_executions_demo(db) -> dict:
-    """Seed 3 finished executions (idempotent by fixed ids).
+    """Seed 1 finished execution (idempotent by fixed id).
 
-    One SUCCEEDED fault_analysis (O21), one FAILED fault_analysis
-    (O22, store outage), one SUCCEEDED system_admin. Each has a
-    matching ExecutionResult row — the Execution table has no result
-    column, so the output/evidence live there, as in real runs.
+    One SUCCEEDED system_admin. It has a matching ExecutionResult
+    row — the Execution table has no result column, so the
+    output/evidence live there, as in real runs. (The two
+    fault_analysis demo executions were removed when that agent was
+    archived, 2026-11-27 — see archive/agents/fault_investigator/.)
 
     These rows do NOT trigger Slack notifications: the notifier only
     runs inside real ``run_execution`` (app/worker/tasks.py), never on
@@ -683,39 +682,6 @@ def seed_executions_demo(db) -> dict:
     from app.models import Execution, ExecutionResult
 
     executions = [
-        Execution(
-            id="exec-seed-fa-001",
-            mission_id="fault_analysis",
-            mission_version=1,
-            agent_id="fault_investigator",
-            agent_version=None,
-            input={
-                "asset_id": "O21",
-                "start_date": "2026-10-01",
-                "end_date": "2026-10-31",
-            },
-            status="SUCCEEDED",
-            created_at=datetime(2026, 10, 28, 9, 0),
-            started_at=datetime(2026, 10, 28, 9, 0, 5),
-            finished_at=datetime(2026, 10, 28, 9, 2, 40),
-        ),
-        Execution(
-            id="exec-seed-fa-002",
-            mission_id="fault_analysis",
-            mission_version=1,
-            agent_id="fault_investigator",
-            agent_version=None,
-            input={
-                "asset_id": "O22",
-                "start_date": "2026-10-01",
-                "end_date": "2026-10-31",
-            },
-            status="FAILED",
-            error="Neo4j unavailable during projection drain; graph evidence missing.",
-            created_at=datetime(2026, 10, 29, 10, 0),
-            started_at=datetime(2026, 10, 29, 10, 0, 4),
-            finished_at=datetime(2026, 10, 29, 10, 1, 12),
-        ),
         Execution(
             id="exec-seed-sa-001",
             mission_id="system_admin",
@@ -730,34 +696,6 @@ def seed_executions_demo(db) -> dict:
         ),
     ]
     results = [
-        ExecutionResult(
-            id="res-seed-fa-001",
-            execution_id="exec-seed-fa-001",
-            output={
-                "root_causes": [
-                    "Traction motor overheating (F-204): clogged cooling fan, 92C on 2026-10-07.",
-                    "Motor vibration (F-205): sheave imbalance, 6.8 mm/s on 2026-10-19.",
-                ],
-                "recommendations": [
-                    "Clean cooling fan and vents monthly during peak season.",
-                    "Rebalance traction sheave after any vibration above 4.5 mm/s.",
-                ],
-                "answer": "Root causes for O21 (October 2026): motor overheating and vibration.",
-            },
-            evidence=[
-                {"kind": "fault", "asset_id": "O21", "code": "F-204"},
-                {"kind": "fault", "asset_id": "O21", "code": "F-205"},
-                {"kind": "sensor", "asset_id": "O21", "metric": "motor_temperature_c"},
-            ],
-        ),
-        ExecutionResult(
-            id="res-seed-fa-002",
-            execution_id="exec-seed-fa-002",
-            output={
-                "errors": ["Neo4j unavailable during projection drain; graph evidence missing."],
-            },
-            evidence=[],
-        ),
         ExecutionResult(
             id="res-seed-sa-001",
             execution_id="exec-seed-sa-001",

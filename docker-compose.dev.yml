@@ -1,0 +1,164 @@
+# Agentic Runtime — DEV compose for the Lark frame + user service.
+#
+# Standalone file (not an override of docker-compose.yml): it runs the
+# Lark frame, the user service and the MLflow server in containers,
+# against the platform API, Postgres, Redis and MinIO that already run
+# on the host. The main compose is the full stack; this file is for the
+# host-run dev flow where the platform (uvicorn :8000) stays outside
+# Docker.
+#
+# Prerequisites on the host before `up` (start order matters):
+#   - Postgres on :5432 and MinIO on :9000 must be UP before `up` —
+#     they are host services, so they CANNOT be a compose depends_on;
+#     the order is documented here, not wired. MinIO must be reachable
+#     before `up` because minio-setup creates the mlflow artifact
+#     bucket against it on first start.
+#   - platform API running on :8000 (uvicorn app.main:app)
+#   - Postgres on :5432 with a `user_service` database
+#     (`createdb user_service`, then `make migrate-users` from the host)
+#     AND the mlflow backend database `${POSTGRES_DB:-agentic_runtime}`
+#     (`createdb ${POSTGRES_DB:-agentic_runtime}` — mlflow refuses to
+#     start without it; the main compose creates it via POSTGRES_DB,
+#     but here Postgres is host-run so the DB must exist already)
+#   - Redis on :6379, MinIO on :9000 (mlflow's artifact store)
+#   - repo-root .env with API_KEY, JWT_SECRET, USER_SERVICE_API_KEY,
+#     LARK_APP_ID, LARK_APP_SECRET, LARK_ALLOWLIST
+#   - if the host Postgres uses different credentials, set
+#     POSTGRES_USER / POSTGRES_PASSWORD in .env (defaults below are the
+#     main compose's dev defaults)
+#
+# Start order: host Postgres + MinIO first, then `up` below. mlflow
+# itself waits for minio-setup (depends_on service_completed_successfully)
+# so the artifact bucket exists before the server starts.
+#
+#   docker compose -f docker-compose.dev.yml up -d --build
+#   curl localhost:8002/healthz   # frame health (WS mode, own port)
+#   curl localhost:8001/health    # user service health
+#   curl localhost:8002/readyz    # 503 until the platform answers :8000
+#   curl localhost:5000/health    # mlflow health
+#   open http://localhost:5000    # mlflow UI — an experiment should
+#                                 # appear once the host platform logs a run
+#   # host platform/worker must point at this server:
+#   # MLFLOW_TRACKING_URI=http://localhost:5000 in .env (see .env.example)
+#
+# Do NOT run the main compose's user-service at the same time — both
+# publish host port 8001. Code changes: user-service reloads live
+# (volume mount + --reload); the frame needs a restart
+# (`docker compose -f docker-compose.dev.yml restart lark-frame`).
+services:
+  user-service:
+    build:
+      context: .
+      dockerfile: services/user_service/Dockerfile
+    # --reload + the volume mount below: edit code on the host, the
+    # service picks it up without a rebuild. Env still comes only from
+    # this file (cwd is /app, so services/user_service/.env is never read).
+    command: uvicorn services.user_service.main:app --host 0.0.0.0 --port 8001 --reload
+    environment:
+      # Host Postgres, reached through the host gateway — the container
+      # cannot see the host's localhost.
+      USER_SERVICE_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@host.docker.internal:5432/user_service
+      # Must match the platform API's JWT_SECRET, or Bearer tokens fail.
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set in .env}
+      # Must match the platform API's USER_SERVICE_API_KEY (X-Service-Key).
+      USER_SERVICE_API_KEY: ${USER_SERVICE_API_KEY:?USER_SERVICE_API_KEY must be set in .env}
+      REDIS_URL: redis://host.docker.internal:6379/2
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "8001:8001"
+    volumes:
+      - ./services/user_service:/app/services/user_service
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  lark-frame:
+    build:
+      context: .
+      dockerfile: services/lark_frame/Dockerfile
+    environment:
+      LARK_TRANSPORT: websocket
+      LARK_APP_ID: ${LARK_APP_ID:?LARK_APP_ID must be set in .env}
+      LARK_APP_SECRET: ${LARK_APP_SECRET:?LARK_APP_SECRET must be set in .env}
+      # The platform runs on the host, not in this compose network.
+      PLATFORM_BASE_URL: http://host.docker.internal:8000
+      # The frame's service key is the platform's API_KEY (D-LARK-10).
+      PLATFORM_API_KEY: ${API_KEY:?API_KEY must be set in .env}
+      # Empty allowlist refuses every sender — fail fast instead.
+      LARK_ALLOWLIST: ${LARK_ALLOWLIST:?LARK_ALLOWLIST must be set in .env}
+      REDIS_URL: redis://host.docker.internal:6379/2
+      FRAME_HEALTH_PORT: 8002
+    env_file:
+      - path: .env
+        required: false
+    ports:
+      - "8002:8002"
+    volumes:
+      # Read-only: the frame has no --reload; restart the service after
+      # editing code instead of rebuilding the image.
+      - ./services/lark_frame:/app/services/lark_frame:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/healthz')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Creates the mlflow artifact bucket on the HOST MinIO once, before
+  # mlflow starts (same pattern as the main compose's minio-setup, but
+  # against http://host.docker.internal:9000 and only the one bucket
+  # this dev flow needs — artifacts silently never land without it).
+  # No depends_on: the host MinIO is not a compose service, so it must
+  # already be up before `up` (see header prerequisites).
+  minio-setup:
+    image: bitnamilegacy/minio-client:latest
+    entrypoint: >
+      /bin/sh -c "
+      sleep 5;
+      mc alias set local http://host.docker.internal:9000 ${MINIO_ROOT_USER:-minioadmin} ${MINIO_ROOT_PASSWORD:-minioadmin};
+      mc mb --ignore-existing local/${MINIO_BUCKET:-agentic-runtime};
+      "
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # MLflow 3.x tracking server (GenAI tracing/eval). Same image as the
+  # main compose's `mlflow` service (profile `observability`), but the
+  # backend + artifact store point at the HOST Postgres (:5432) and
+  # MinIO (:9000) instead of the compose-network services. Do NOT run
+  # it together with the main compose's mlflow — both publish host
+  # port 5000 (and stop any host-run MLflow server on :5000 first).
+  mlflow:
+    build:
+      context: .
+      dockerfile: docker/mlflow/Dockerfile
+    environment:
+      # 3.x DNS-rebinding guard: allow the Host headers clients send —
+      # localhost (host tools) and host.docker.internal (the main
+      # compose's api container, if it points its tracking URI here).
+      MLFLOW_SERVER_ALLOWED_HOSTS: ${MLFLOW_SERVER_ALLOWED_HOSTS:-localhost,localhost:*,127.0.0.1,127.0.0.1:*,mlflow:5000,host.docker.internal:5000}
+      MLFLOW_S3_ENDPOINT_URL: http://host.docker.internal:9000
+      AWS_ACCESS_KEY_ID: ${MINIO_ROOT_USER:-minioadmin}
+      AWS_SECRET_ACCESS_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+    command: >
+      mlflow server --host 0.0.0.0 --port 5000
+      --backend-store-uri postgresql://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@host.docker.internal:5432/${POSTGRES_DB:-agentic_runtime}
+      --default-artifact-root s3://${MINIO_BUCKET:-agentic-runtime}
+    ports:
+      - "5000:5000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      minio-setup:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10

@@ -20,6 +20,7 @@ from app.routers import (
     documents,
     executions,
     guest,
+    lark,
     missions,
     models,
     ontology,
@@ -86,6 +87,7 @@ def create_app() -> FastAPI:
     app.include_router(permissions.router)
     app.include_router(documents.router)
     app.include_router(guest.router)
+    app.include_router(lark.router)
     return app
 
 

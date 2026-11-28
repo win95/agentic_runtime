@@ -67,13 +67,18 @@ def create_execution(
     # A plain JWT user may only run the guest mission; anything else is
     # 404 (never 403) so the API does not confirm the mission exists.
     require_mission_for_role(user, payload.mission_id)
+    # Owner: a JWT user's own sub always wins (a JWT user cannot assert
+    # someone else's id); a service-key call may assert an owner via
+    # payload.user_id (agent_lark_me sync, D-LARK-11) — None means the
+    # run stays a service-principal run, as before.
+    asserted_user_id = payload.user_id if user is None else None
     try:
         execution, problems = execution_service.create_execution(
             db,
             payload.mission_id,
             payload.input,
             session_id=payload.session_id,
-            user_id=user.get("sub") if user is not None else None,
+            user_id=user.get("sub") if user is not None else asserted_user_id,
         )
     except Exception as exc:  # dispatch failure (broker down, ...)
         raise HTTPException(status_code=502, detail=f"dispatch failed: {exc}") from exc
@@ -310,7 +315,9 @@ def resume_execution(
     execution.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)
     db.commit()
     try:
-        execution_service.dispatch_resume(execution_id, payload.decision)
+        execution_service.dispatch_resume(
+            execution_id, payload.decision, execution.mission_id
+        )
     except Exception as exc:  # noqa: BLE001 — broker down: keep the pause
         execution.status = "INTERRUPTED"
         execution.updated_at = datetime.now(timezone.utc).replace(tzinfo=None)

@@ -2,8 +2,9 @@
 
 JWT-only: guests register/login via the user service and call with a
 Bearer token. The mission is whichever mission has
-``harness.guest_channel.exposes_public_chat`` in the harness index (DB
-when ``HARNESS_SOURCE=db``). Guests use this route instead of
+``harness.guest_channel.exposes_public_chat`` (resolved by a light
+guest-routing scan — DB when ``HARNESS_SOURCE=db``, seed files
+otherwise — not the harness index). Guests use this route instead of
 ``POST /executions``, which is limited to missions with
 ``harness.security.user_runnable`` for JWT users.
 

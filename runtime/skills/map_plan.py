@@ -89,6 +89,10 @@ class SkillMap:
     nodes: list[MapNode] = field(default_factory=list)
     pipelines: list[WritePipeline] = field(default_factory=list)
     write_preconditions: dict[str, dict] = field(default_factory=dict)
+    # Tool names that constitute a guest-facing reply for this skill (map
+    # data — the flow compiler ends the turn after a terminal flow when
+    # one succeeds, instead of re-running the router).
+    reply_tools: list[str] = field(default_factory=list)
 
     @property
     def node_ids(self) -> list[str]:
@@ -124,7 +128,7 @@ def parse_skill_map(
         logger.warning("Skill %s: 'map' must be a mapping; ignoring", skill_name)
         return None
     for key in raw:
-        if key not in {"start", "nodes"}:
+        if key not in {"start", "nodes", "reply_tools", "pipelines", "write_preconditions"}:
             logger.debug("Skill %s: ignoring unknown map key %r", skill_name, key)
     nodes_raw = raw.get("nodes")
     if not isinstance(nodes_raw, list) or not nodes_raw:
@@ -266,6 +270,22 @@ def parse_skill_map(
         start = nodes[0].id
     else:
         start = start.strip()
+    reply_tools: list[str] = []
+    reply_raw = raw.get("reply_tools") or []
+    if isinstance(reply_raw, list):
+        for tool in reply_raw:
+            if not isinstance(tool, str) or not tool.strip():
+                continue
+            tool = tool.strip()
+            if known_tools is not None and tool not in known_tools:
+                logger.warning(
+                    "Skill %s: map reply_tools lists unknown tool %r; dropping",
+                    skill_name,
+                    tool,
+                )
+                continue
+            if tool not in reply_tools:
+                reply_tools.append(tool)
     pipelines = parse_pipelines(raw.get("pipelines"), skill_name)
     pre_raw = raw.get("write_preconditions")
     write_preconditions: dict[str, dict] = {}
@@ -279,6 +299,7 @@ def parse_skill_map(
         nodes=nodes,
         pipelines=pipelines,
         write_preconditions=write_preconditions,
+        reply_tools=reply_tools,
     )
 
 

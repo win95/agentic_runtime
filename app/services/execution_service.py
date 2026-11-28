@@ -37,23 +37,47 @@ def validate_execution_input(mission: models.Mission, input_data: dict) -> list[
     return validate_execution_input_data(mission_dict, input_data)
 
 
-def dispatch_execution(execution_id: str) -> None:
-    """Enqueue only the execution id. Imported lazily so the API process
-    does not need a live broker at import time. Tests monkeypatch this
-    function to assert the dispatch without a broker."""
+# Queue routing per mission (tách worker theo agent): chỉ agent_lark_me
+# có queue riêng; mission không có trong map chạy trên queue mặc định.
+# Một chỗ duy nhất — worker-lark consume queue "lark", worker chung
+# consume queue "celery" (xem docs/worker-per-agent.md).
+DEFAULT_QUEUE = "celery"
+MISSION_QUEUE_MAP: dict[str, str] = {"agent_lark_me_mission": "lark"}
+
+
+def queue_for_mission(mission_id: str | None) -> str:
+    """Celery queue for a mission id (None / unknown -> default queue)."""
+    if not mission_id:
+        return DEFAULT_QUEUE
+    return MISSION_QUEUE_MAP.get(mission_id, DEFAULT_QUEUE)
+
+
+def dispatch_execution(execution_id: str, mission_id: str | None = None) -> None:
+    """Enqueue only the execution id, on the queue for its mission.
+    Imported lazily so the API process does not need a live broker at
+    import time. Tests monkeypatch this function to assert the dispatch
+    without a broker."""
     from app.worker.tasks import run_execution
 
-    run_execution.delay(execution_id)
+    run_execution.apply_async(
+        args=[execution_id], queue=queue_for_mission(mission_id)
+    )
 
 
-def dispatch_resume(execution_id: str, decision: str) -> None:
+def dispatch_resume(
+    execution_id: str, decision: str, mission_id: str | None = None
+) -> None:
     """Enqueue a resume of an INTERRUPTED execution with a human decision
     (docs/interrupt.md). Same lazy-import pattern as dispatch_execution:
     tests monkeypatch this function to assert the dispatch without a broker.
     """
     from app.worker.tasks import run_execution
 
-    run_execution.delay(execution_id, resume_decision=decision)
+    run_execution.apply_async(
+        args=[execution_id],
+        kwargs={"resume_decision": decision},
+        queue=queue_for_mission(mission_id),
+    )
 
 
 def create_execution(
@@ -119,7 +143,7 @@ def create_execution(
     db.refresh(execution)
 
     try:
-        dispatch_execution(execution.id)
+        dispatch_execution(execution.id, mission.id)
     except Exception as exc:  # broker down etc. — do not leave a stuck QUEUED row
         execution.status = "FAILED"
         execution.error = f"dispatch failed: {exc}"

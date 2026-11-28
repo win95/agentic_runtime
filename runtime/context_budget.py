@@ -1,33 +1,34 @@
-"""Context window budget — Phương án A (32,000 tokens).
+"""Context window budget — Phương án A (16,384 tokens).
 
 One source of truth for how the window is split (approved 2026-11-10;
 revised 2026-11-15: retrieval and skills up, history down, plus a
-long-term-memory block carved out of history).
+long-term-memory block carved out of history; halved 2026-11-27 to
+fit the qwen3-8b window — 16,384 input tokens on the LiteLLM proxy).
 
 ========================  =========  ======
 Component                 Tokens     Share
 ========================  =========  ======
-System prompt             1,024      3.2%
-Tool definitions          2,048      6.4%
-Skills                    2,048      6.4%
-Retrieved context         8,024     25.1%
-Execution input           2,048      6.4%
-Conversation + tool out   9,640     30.1%
-Output reserve            5,120     16.0%
-KV cache / agent          2,048      6.4%
+System prompt             512        3%
+Tool definitions          1,024      6%
+Skills                    1,024      6%
+Retrieved context         4,096      25%
+Execution input           2,048      13%
+Conversation + tool out   4,096      25%
+Output reserve            2,560      16%
+KV cache / agent          1,024      6%
 ------------------------  ---------  ------
-TOTAL                     32,000     100%
+TOTAL                     16,384     100%
 ========================  =========  ======
 
-The history slice (9,640) is shared three ways: the session-history
-block (4,096 — prior turns, ``runtime/session_history.py``), the
-long-term-memory block (1,024 — keyword-retrieved trimmed turns,
+The history slice (4,096) is shared three ways: the session-history
+block (2,048 — prior turns, ``runtime/session_history.py``), the
+long-term-memory block (512 — keyword-retrieved trimmed turns,
 ``runtime/long_term_memory.py``), and the current run's own
-conversation + tool output (4,520 nominal). The trim enforces the
+conversation + tool output (1,536 nominal). The trim enforces the
 slice dynamically: ``HookMiddleware.before_model`` trims turns to
 ``HISTORY_TOKENS`` minus the history/LTM blocks actually rendered
 for the run (``reserved_history_tokens``), so a fresh session with no
-history keeps the full 9,640 for its own turns.
+history keeps the full 4,096 for its own turns.
 
 Enforcement (best-effort where noted, never crash a run):
 
@@ -36,7 +37,7 @@ Enforcement (best-effort where noted, never crash a run):
   execution — the run still proceeds (these are pinned config, failing
   the run would hide the real work).
 - Retrieved context: ``retrieval_max_chars()`` derives the hook's char
-  cap from RETRIEVAL_TOKENS (8,024 tok x 4 chars). The mission YAML
+  cap from RETRIEVAL_TOKENS (4,096 tok x 4 chars). The mission YAML
   may still override ``max_chars`` per mission.
 - Execution input: already capped upstream at 8,192 bytes
   (``MAX_INPUT_JSON_BYTES``) = 2,048 tokens — this table just names
@@ -53,7 +54,7 @@ Enforcement (best-effort where noted, never crash a run):
   than the reserve.
 - KV cache: a standalone reserve per agent. The prompt side
   (system + tools + skills + retrieval + input + history) must fit in
-  ``PROMPT_SIDE_TOKENS`` = 24,832; the reserve itself is never spent
+  ``PROMPT_SIDE_TOKENS`` = 12,800; the reserve itself is never spent
   by trimming.
 
 Token counting is an ESTIMATE (``ceil(chars / 4)``): the LiteLLM proxy
@@ -69,26 +70,32 @@ from __future__ import annotations
 
 import json
 import math
+from typing import TYPE_CHECKING
 
-MAX_CONTEXT_TOKENS = 32_000
-SYSTEM_PROMPT_TOKENS = 1_024
-TOOL_DEFINITIONS_TOKENS = 2_048
-SKILLS_TOKENS = 2_048
+if TYPE_CHECKING:
+    from runtime.harness.schema import MissionHarness
+
+MAX_CONTEXT_TOKENS = 16_384
+SYSTEM_PROMPT_TOKENS = 512
+TOOL_DEFINITIONS_TOKENS = 1_024
+SKILLS_TOKENS = 1_024
 # Flow router: the per-route human message (catalog + instructions). The
 # catalog is compiled from the skill map, not the full SKILL body.
+# NOT part of the window table above — it is a per-call cap, and the
+# flow router is the known weak point, so it stays at 2,048.
 ROUTE_INSTRUCTION_TOKENS = 2_048
-RETRIEVAL_TOKENS = 8_024
+RETRIEVAL_TOKENS = 4_096
 EXECUTION_INPUT_TOKENS = 2_048
-HISTORY_TOKENS = 9_640
+HISTORY_TOKENS = 4_096
 # The long-term-memory block (keyword-retrieved trimmed turns) is
 # carved out of the history slice, not added on top of it:
-# 9,640 = 4,096 session history + 1,024 LTM + 4,520 live turns.
-LTM_TOKENS = 1_024
-OUTPUT_RESERVE_TOKENS = 5_120
-KV_CACHE_TOKENS_PER_AGENT = 2_048
+# 4,096 = 2,048 session history + 512 LTM + 1,536 live turns.
+LTM_TOKENS = 512
+OUTPUT_RESERVE_TOKENS = 2_560
+KV_CACHE_TOKENS_PER_AGENT = 1_024
 
 # Prompt side: everything except the output reserve and the KV cache
-# reserve. 1,024 + 2,048 + 2,048 + 8,024 + 2,048 + 9,640 = 24,832.
+# reserve. 512 + 1,024 + 1,024 + 4,096 + 2,048 + 4,096 = 12,800.
 PROMPT_SIDE_TOKENS = (
     SYSTEM_PROMPT_TOKENS
     + TOOL_DEFINITIONS_TOKENS
@@ -112,23 +119,32 @@ COMPONENT_BUDGETS = {
 CHARS_PER_TOKEN = 4
 
 
-def effective_history_tokens(mission: dict | None) -> int:
+def effective_history_tokens(
+    mission: dict | None,
+    *,
+    harness: MissionHarness | None = None,
+) -> int:
     """History budget for one mission's run (tran 2026-11-19, harness opt-in).
 
-    Default: ``HISTORY_TOKENS`` (9,640) for every mission — same as before
+    Default: ``HISTORY_TOKENS`` (4,096) for every mission — same as before
     the agent-analytis history realloc.
 
     Opt-in: missions set ``harness.context_budget.reclaim_retrieval_for_history:
-    true`` to move the unused retrieval slice (8,024 tok) into history
-    instead (17,664 total history budget). Missions with
+    true`` to move the unused retrieval slice (4,096 tok) into history
+    instead (8,192 total history budget). Missions with
     ``execution.retrieval`` keep the default — their retrieval block consumes
     that slice at run time.
+
+    ``harness`` is the run's already-resolved model when the caller
+    has it (the mission graph resolves once per run); without one the
+    harness is loaded (cached per mission).
     """
     from runtime.harness.registry import effective_harness
 
     mission_id = (mission or {}).get("mission_id")
     execution = (mission or {}).get("execution") or {}
-    harness = effective_harness(mission_id, execution)
+    if harness is None:
+        harness = effective_harness(mission_id, execution)
     reclaim = harness.context_budget.reclaim_retrieval_for_history
     if reclaim and not execution.get("retrieval"):
         return HISTORY_TOKENS + RETRIEVAL_TOKENS
@@ -198,6 +214,42 @@ def group_turns(messages: list) -> list[list]:
 def _turns(messages: list) -> list[list]:
     """Backwards-compatible alias for ``group_turns``."""
     return group_turns(messages)
+
+
+def trim_text_to_token_budget(text: str, max_tokens: int) -> str:
+    """Drop whole lines from the start until ``text`` fits ``max_tokens``.
+
+    Used when a fixed block (e.g. the flow catalog) must stay intact and
+    a variable block (e.g. session history) yields. Preserves the most
+    recent lines at the end of the text.
+    """
+    if not text or max_tokens < 1:
+        return ""
+    if estimate_tokens(text) <= max_tokens:
+        return text
+    marker = "... (earlier session history omitted to fit route budget)"
+    marker_tok = estimate_tokens(marker)
+    lines = text.split("\n")
+    original_count = len(lines)
+    while (
+        lines
+        and estimate_tokens("\n".join(lines)) + marker_tok + (1 if lines else 0)
+        > max_tokens
+    ):
+        lines.pop(0)
+    if not lines:
+        return (
+            marker
+            if marker_tok <= max_tokens
+            else marker[: max(0, max_tokens * CHARS_PER_TOKEN)]
+        )
+    body = "\n".join(lines)
+    if len(lines) < original_count:
+        combined = f"{marker}\n{body}"
+        if estimate_tokens(combined) <= max_tokens:
+            return combined
+        return trim_text_to_token_budget(body, max_tokens)
+    return body
 
 
 def trim_history(messages: list, budget_tokens: int = HISTORY_TOKENS) -> list:

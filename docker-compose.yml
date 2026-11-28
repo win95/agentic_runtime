@@ -142,6 +142,11 @@ services:
       # Shared with the user service — must match its JWT_SECRET, or
       # Bearer tokens fail verification. Required (no dev default).
       JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set}
+      # The user service lives in this compose network as `user-service`
+      # — localhost here would be the api container itself (502 "user
+      # service unreachable", seen live 2026-11-26). The .env value
+      # (localhost:8001) is only for the host-run platform.
+      USER_SERVICE_URL: http://user-service:8001
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/1
       QDRANT_URL: http://qdrant:6333
@@ -158,11 +163,6 @@ services:
       MINIO_PRESIGN_SECURE: ${MINIO_PRESIGN_SECURE:-false}
       MINIO_ARTIFACTS_PRESIGN_TTL_SECONDS: ${MINIO_ARTIFACTS_PRESIGN_TTL_SECONDS:-86400}
       MLFLOW_TRACKING_URI: http://mlflow:5000
-      # The hotel mock MCP server runs on the host (127.0.0.1:8082) during
-      # manual testing; from inside the container that address is the
-      # container itself, so reach it through host-gateway instead. Set
-      # MCP_SERVER_URL_IN_CONTAINER to point at a real server.
-      MCP_SERVER_URL: ${MCP_SERVER_URL_IN_CONTAINER:-http://host.docker.internal:${MOCK_HOTEL_MCP_PORT:-8082}/mcp}
       NO_PROXY: 127.0.0.1,localhost,host.docker.internal
       no_proxy: 127.0.0.1,localhost,host.docker.internal
     extra_hosts:
@@ -212,7 +212,7 @@ services:
 
   worker:
     build: .
-    command: celery -A app.worker.celery_app worker --loglevel=info
+    command: celery -A app.worker.celery_app worker -Q celery --loglevel=info
     environment:
       # Required: compose fails fast without it, so the
       # platform never starts with API-key auth disabled.
@@ -236,6 +236,65 @@ services:
       MLFLOW_TRACKING_URI: http://mlflow:5000
       # See the api service: the mock MCP server lives on the host.
       MCP_SERVER_URL: ${MCP_SERVER_URL_IN_CONTAINER:-http://host.docker.internal:${MOCK_HOTEL_MCP_PORT:-8082}/mcp}
+      NO_PROXY: 127.0.0.1,localhost,host.docker.internal
+      no_proxy: 127.0.0.1,localhost,host.docker.internal
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file:
+      - path: .env
+        required: false  # optional: create from .env.example to inject secrets
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  # Dedicated worker for agent_lark_me only — consumes queue `lark`
+  # (see docs/worker-per-agent.md). Same image/env as the shared worker,
+  # except: no MCP_SERVER_URL (only hotel needs MCP; the MCP gate in
+  # mission_graph.py also skips the load for lark missions), plus the
+  # agent's own Lark credentials; it loads only its own mission's
+  # harness via load_mission_harness, so its log is not flooded by
+  # other missions' harness errors.
+  # NOTE: every service here also reads .env via env_file, so if the
+  # real .env sets MCP_SERVER_URL / MCP_TOOL_CAPABILITIES, worker-lark
+  # still sees them — harmless, the code gate blocks the MCP load.
+  worker-lark:
+    build: .
+    command: celery -A app.worker.celery_app worker -Q lark --loglevel=info
+    environment:
+      # Required: compose fails fast without it, so the
+      # platform never starts with API-key auth disabled.
+      API_KEY: ${API_KEY:?API_KEY must be set}
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-postgres}@postgres:5432/${POSTGRES_DB:-agentic_runtime}
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/1
+      QDRANT_URL: http://qdrant:6333
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USERNAME: neo4j
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD:-changeme}
+      GRAPH_DATABASE_BACKEND: neo4j
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-minioadmin}
+      MINIO_BUCKET: ${MINIO_BUCKET:-agentic-runtime}
+      MINIO_REPORTS_BUCKET: ${MINIO_REPORTS_BUCKET:-reports}
+      MINIO_PRESIGN_ENDPOINT: ${MINIO_PRESIGN_ENDPOINT:-localhost:9000}
+      MINIO_PRESIGN_SECURE: ${MINIO_PRESIGN_SECURE:-false}
+      MINIO_ARTIFACTS_PRESIGN_TTL_SECONDS: ${MINIO_ARTIFACTS_PRESIGN_TTL_SECONDS:-86400}
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      # Lark tools (runtime/integrations/lark_client.py) + failure
+      # notifier (runtime/integrations/lark_notify.py) run inside the
+      # worker, so it needs the agent's own Custom App credentials.
+      # Same values as the frame's LARK_APP_ID / LARK_APP_SECRET.
+      LARK_APP_ID: ${LARK_APP_ID:?}
+      LARK_APP_SECRET: ${LARK_APP_SECRET:?}
       NO_PROXY: 127.0.0.1,localhost,host.docker.internal
       no_proxy: 127.0.0.1,localhost,host.docker.internal
     extra_hosts:
@@ -284,8 +343,6 @@ services:
       MINIO_PRESIGN_SECURE: ${MINIO_PRESIGN_SECURE:-false}
       MINIO_ARTIFACTS_PRESIGN_TTL_SECONDS: ${MINIO_ARTIFACTS_PRESIGN_TTL_SECONDS:-86400}
       MLFLOW_TRACKING_URI: http://mlflow:5000
-      # See the api service: the mock MCP server lives on the host.
-      MCP_SERVER_URL: ${MCP_SERVER_URL_IN_CONTAINER:-http://host.docker.internal:${MOCK_HOTEL_MCP_PORT:-8082}/mcp}
       NO_PROXY: 127.0.0.1,localhost,host.docker.internal
       no_proxy: 127.0.0.1,localhost,host.docker.internal
     extra_hosts:

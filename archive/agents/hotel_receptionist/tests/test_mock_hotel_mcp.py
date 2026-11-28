@@ -20,14 +20,12 @@ import anyio
 import pytest
 import uvicorn
 from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
-from langchain_core.messages import AIMessage
 
 import scripts.mock_hotel_mcp_server as mock_server
 from app.config import settings
 from app.services import mission_service
-from runtime import deep_agent as deep_agent_module
-from runtime.subgraph import flow as flow_subgraph_module
 from runtime.mission_graph import run_mission
+from runtime.subgraph import flow as flow_subgraph_module
 from runtime.tools.registry import registry
 from seeds import load_missions
 
@@ -377,7 +375,9 @@ def test_load_mcp_tools_registers_hotel_tools(
         assert entry.permission == "mcp"
         assert entry.read_only is False
     # Capability gate: the hotel mission sees all 14; fault_analysis none.
-    guest_channel = {"reply_to_guest", "confirm_guest_booking"}
+    # The confirm tool is session-scoped now (Phase 3) — it is no
+    # longer a registry tool, so only reply_to_guest stays here.
+    guest_channel = {"reply_to_guest"}
     assert (
         {t.name for t in registry.get_langchain_tools(HOTEL_CONTEXT)}
         == HOTEL_TOOLS | guest_channel

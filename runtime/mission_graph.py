@@ -22,11 +22,11 @@ import logging
 import re
 import threading
 import time
+from typing import TYPE_CHECKING
 
 from langgraph.errors import GraphInterrupt
 from langgraph.graph import END, START, StateGraph
 
-import runtime.capabilities.fault_analysis  # noqa: F401 — self-registers the fault_analysis capability on import
 from app.config import settings
 from infra.mlflow_setup import setup_mlflow_tracing
 from runtime.agents.registry import (
@@ -40,6 +40,9 @@ from runtime.observability_resilience import (
 )
 from runtime.security import detect_injection_signals
 from runtime.state import MissionState
+
+if TYPE_CHECKING:
+    from runtime.harness.schema import MissionHarness
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +72,46 @@ def _substantive_evidence_count(evidence: list | None) -> int:
     return sum(
         1 for item in (evidence or []) if (item or {}).get("kind") in _SUBSTANTIVE_EVIDENCE_KINDS
     )
+
+
+# Tokens one lark_send_message costs the run's own-turns budget
+# (tool-call JSON + result JSON, measured with estimate_tokens,
+# ceil(chars / 4): 125 tok for a 1-task DM, 198 for a typical 3-task
+# DM, 434 for a long 8-task DM — 256 covers the typical send with
+# margin; a very long DM costs more, the history trim still guards
+# the run).
+TOKENS_PER_SEND = 256
+
+
+def _effective_tool_budget_max_calls(
+    harness: MissionHarness,
+    input_data: dict | None,
+    history_budget_tokens: int,
+    reserved_history_tokens: int,
+) -> dict[str, int]:
+    """Mission tool_budget.max_calls, with a context-derived send cap.
+
+    Only remind runs (input mode == "remind_tasks") get the derived
+    cap: the run's own-turns budget (history budget minus the reserved
+    history block) divided by TOKENS_PER_SEND, floored at 1 send — a
+    batch reminder may use the context it has, no more. All other
+    runs keep the mission's fixed caps (the anti-spam guard for
+    chat). On any unexpected input the harness default is returned
+    and the run never crashes on the cap computation.
+    """
+    merged = dict(harness.tool_budget.max_calls or {})
+    try:
+        if not isinstance(input_data, dict):
+            return merged
+        if input_data.get("mode") != "remind_tasks":
+            return merged
+        if "lark_send_message" not in set(harness.tool_budget.tools or []):
+            return merged
+        available = int(history_budget_tokens) - int(reserved_history_tokens)
+        merged["lark_send_message"] = max(1, available // TOKENS_PER_SEND)
+    except Exception:  # noqa: BLE001 — fall back to the harness default
+        logger.warning("Falling back to harness max_calls for the remind send cap")
+    return merged
 
 
 # --- Nodes ---
@@ -282,7 +325,7 @@ def deep_agent_node(state: MissionState) -> dict:
             select_hooks,
         )
         from runtime.middleware import TokenAuditCallbackHandler
-        from runtime.tools.mcp_adapter import load_mcp_tools
+        from runtime.tools.mcp_adapter import load_mcp_tools, mission_uses_mcp_tools
         from runtime.tools.registry import registry
 
         # Hooks: one registry per run (built-ins, narrowed to the
@@ -365,6 +408,11 @@ def deep_agent_node(state: MissionState) -> dict:
         # compile below).
         agent_obj = resolve_agent(agent_id, mission, agent_version)
         context["agent"] = agent_obj
+        # Lark scope (agent_lark_me): the agent instance carries this
+        # run's input so its scope policy (LarkAgent.scope_tool) can
+        # check tool calls against the input's chat_id. Fresh instance
+        # per run (resolve_agent), so no state leaks across runs.
+        agent_obj.execution_input = context.get("input") or {}
 
         # Layer 4: MCP tools go through the registry permission check
         # like built-in tools. load_mcp_tools() registers only the MCP
@@ -372,7 +420,12 @@ def deep_agent_node(state: MissionState) -> dict:
         # get_langchain_tools() then filters everything — built-in and
         # MCP — by the mission's capabilities. Previously MCP tools were
         # appended unfiltered (audit finding, now closed).
-        load_mcp_tools()
+        # Gate (tách worker theo agent): only connect to the MCP server
+        # when the mission declares a capability an MCP tool maps to.
+        # Missions that never use MCP skip the round-trip entirely, so
+        # a dead MCP server logs nothing on their runs.
+        if mission_uses_mcp_tools(mission.get("capabilities")):
+            load_mcp_tools()
         tools = registry.get_langchain_tools(context)
         # Middleware: one handler instance per run, carrying this run's
         # execution context — it logs token usage + tool calls to the DB
@@ -416,11 +469,25 @@ def deep_agent_node(state: MissionState) -> dict:
         # run through this node anymore — the flow branch always won
         # the condition, and the gate returned None for every mission
         # — so they were dead code, not a fallback.
+        from runtime.harness.registry import effective_harness
         from runtime.subgraph.flow import use_flow_subgraph
 
         execution_cfg = mission.get("execution") or {}
+        # Plan B step 2 — parse once per run: resolve the run's
+        # harness here, before the first use, and pass the model down
+        # (use_flow_subgraph, the hook middleware, the budget and
+        # exclusion helpers below) instead of re-resolving it at each
+        # call site. Stored on the context beside the agent object
+        # (same precedent: context["agent"] above) — the context was
+        # already validated, and validate_agent_context only checks
+        # the types of the keys it knows, so an extra key is safe.
+        _run_harness = effective_harness(state.get("mission_id"), execution_cfg)
+        context["harness"] = _run_harness
         use_flow = use_flow_subgraph(
-            state.get("mission_id"), mapped_skills, execution_cfg
+            state.get("mission_id"),
+            mapped_skills,
+            execution_cfg,
+            harness=_run_harness,
         )
         # Human-in-the-loop interrupts (docs/interrupt.md): the mission
         # may gate tools in execution.interrupt_on. Flow mode cannot
@@ -561,9 +628,14 @@ def deep_agent_node(state: MissionState) -> dict:
             effective_history_tokens,
             estimate_tokens,
         )
-        from runtime.harness.registry import effective_harness, harness_requires_output_files
+        from runtime.harness.registry import harness_requires_output_files
 
-        _run_harness = effective_harness(state.get("mission_id"), execution_cfg)
+        # The run's own-turns budget (history budget minus the reserved
+        # history block) — bound once so the middleware args and the
+        # remind send-cap derivation below read the same numbers.
+        _history_budget_tokens = effective_history_tokens(mission, harness=_run_harness)
+        _reserved_history_tokens = estimate_tokens(history_block)
+
         hook_middleware = HookMiddleware(
             hook_registry,
             execution_id=state.get("execution_id") or "",
@@ -577,15 +649,30 @@ def deep_agent_node(state: MissionState) -> dict:
             session_id=state.get("session_id") or "",
             allowed_tools=list(context.get("allowed_tools") or []),
             capabilities=list(context.get("capabilities") or []),
-            reserved_history_tokens=estimate_tokens(history_block),
-            history_budget_tokens=effective_history_tokens(mission),
+            reserved_history_tokens=_reserved_history_tokens,
+            history_budget_tokens=_history_budget_tokens,
             output_files_required=harness_requires_output_files(
-                state.get("mission_id"), execution_cfg
+                state.get("mission_id"), execution_cfg, harness=_run_harness
             ),
             sequential_tool_names=frozenset(_run_harness.tool_calls.sequential),
             tool_budget_tools=frozenset(_run_harness.tool_budget.tools),
             tool_budget_max_result_tokens=_run_harness.tool_budget.max_result_tokens,
-            tool_budget_max_calls=dict(_run_harness.tool_budget.max_calls),
+            tool_budget_max_calls=_effective_tool_budget_max_calls(
+                _run_harness,
+                input_data,
+                _history_budget_tokens,
+                _reserved_history_tokens,
+            ),
+            # The run's agent object, so hooks can read per-run agent
+            # state (e.g. the Lark agent's set of groups this run
+            # created — guard_destructive_target accepts those as
+            # targets). Resolved above, before this middleware.
+            agent=context.get("agent"),
+            # The run's resolved harness (see the parse-once resolve
+            # above): hooks read the model off it instead of
+            # re-resolving (deny_builtin_tools,
+            # limit_large_report_write).
+            harness=_run_harness,
         )
         # Part 1 (b): the per-run middleware list. For missions that
         # must not see any built-in tool (hotel only), append the
@@ -596,7 +683,7 @@ def deep_agent_node(state: MissionState) -> dict:
         # runtime/deep_agent.py::builtin_tools_exclusion.
         middleware = [hook_middleware]
         exclusion = builtin_tools_exclusion(
-            state.get("mission_id"), execution_cfg
+            state.get("mission_id"), execution_cfg, harness=_run_harness
         )
         if exclusion is not None:
             middleware.append(exclusion)
@@ -1184,10 +1271,20 @@ def _is_grounded(cause: str, evidence: list) -> bool:
     return not tokens
 
 
-def _allowed_tool_names(mission: dict, *, sandbox_enabled: bool = False) -> set[str] | None:
+def _allowed_tool_names(
+    mission: dict,
+    *,
+    sandbox_enabled: bool = False,
+    harness: MissionHarness | None = None,
+) -> set[str] | None:
     """Tool names this mission's capabilities allow (None = cannot tell,
     e.g. the tool modules failed to import — the trace check is then
-    skipped instead of flagging everything)."""
+    skipped instead of flagging everything).
+
+    ``harness`` is the run's already-resolved model when the caller
+    has it; without one the helper loads it (cached per mission) —
+    the validate node has no resolved model to pass, so it relies on
+    that cached load (0 extra parses in-run)."""
     try:
         import runtime.tools  # noqa: F401 — registers built-in tools
         from runtime.deep_agent import allowed_builtin_tool_names
@@ -1202,6 +1299,7 @@ def _allowed_tool_names(mission: dict, *, sandbox_enabled: bool = False) -> set[
         mission.get("mission_id"),
         mission.get("execution") or {},
         sandbox_enabled=sandbox_enabled,
+        harness=harness,
     )
     return allowed
 

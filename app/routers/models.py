@@ -1,10 +1,11 @@
 """Model Registry — which LLM models the runtime is configured to use.
 
-All models go through the user's LiteLLM proxy (OpenAI-compatible).
-The proxy URL, key and model names come from env (LLM_API_BASE /
-LLM_API_KEY / LLM_MODEL / EMBEDDING_MODEL). Anthropic is only a
-documented alternative: point the proxy at it and register the model
-name on the proxy — no code change is needed.
+Models go through the provider selected by LLM_PROVIDER (OpenAI-compatible):
+``litellm`` (default) is the user's LiteLLM proxy; ``cloudflare`` is
+Cloudflare Workers AI via its /ai/v1 endpoint. The provider, base URL, key
+and model names come from env (see docs/cloudflare-workers-ai.md).
+Anthropic is only a documented alternative: point the proxy at it and
+register the model name on the proxy — no code change is needed.
 """
 
 from __future__ import annotations
@@ -20,19 +21,39 @@ router = APIRouter(
 )
 
 
+def _provider_label() -> str:
+    """Provider name as configured (never hardcoded to one provider)."""
+    if settings.llm_provider == "cloudflare":
+        return "cloudflare (openai-compatible)"
+    return "litellm (openai-compatible)"
+
+
+def _chat_note() -> str:
+    if settings.llm_provider == "cloudflare":
+        return "Chat model, via Cloudflare Workers AI / LLM_MODEL."
+    return "Chat model, via LLM_API_BASE / LLM_MODEL."
+
+
+def _embedding_note() -> str:
+    if settings.llm_provider == "cloudflare":
+        return "Embedding model, via Cloudflare Workers AI / EMBEDDING_MODEL."
+    return "Embedding model, via EMBEDDING_MODEL."
+
+
 @router.get("", response_model=list[schemas.ModelInfo])
 def list_models():
+    provider = _provider_label()
     return [
         schemas.ModelInfo(
-            provider="litellm (openai-compatible)",
+            provider=provider,
             model=settings.llm_model,
             default=True,
-            note="Chat model, via LLM_API_BASE / LLM_MODEL.",
+            note=_chat_note(),
         ),
         schemas.ModelInfo(
-            provider="litellm (openai-compatible)",
+            provider=provider,
             model=settings.embedding_model,
             default=False,
-            note="Embedding model, via EMBEDDING_MODEL.",
+            note=_embedding_note(),
         ),
     ]

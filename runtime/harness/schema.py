@@ -76,11 +76,18 @@ class NotificationsHarness(BaseModel):
     when its output reports a non-empty ``actions_taken`` list — the
     "admin action" scope (tran's choice, 2026-11-11). Failures notify
     for every mission regardless of this flag.
+
+    ``lark_failure_notice`` is the same opt-in shape for the Lark
+    failure notice (D-LARK-16): when true, a FAILED execution of this
+    mission sends one short error message into the Lark chat it came
+    from. The notifier additionally checks the mission id, so the
+    flag alone on another mission cannot send Lark messages.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     notify_admin_actions: StrictBool = False
+    lark_failure_notice: StrictBool = False
 
 
 class ContextBudgetHarness(BaseModel):
@@ -168,11 +175,43 @@ class OutputArtifactsHarness(BaseModel):
     inline_fallback: StrictBool = True
 
 
-class MissionHarness(BaseModel):
-    """Effective harness for one mission (merged with defaults)."""
+class LoopHarness(BaseModel):
+    """One recurring activation of a mission, declared in its harness.
+
+    Each loop materializes into one ``Schedule`` row at seed time
+    (``id`` becomes ``Schedule.id``). The harness only declares WHEN
+    and WITH WHAT INPUT a mission re-runs; the loop's ``input`` is
+    what the agent reads at run time (``execution_input``) — the
+    harness itself is invisible to the agent.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
+    id: str
+    cron: str
+    input: dict = Field(default_factory=dict)
+    enabled: StrictBool = False
+    description: str | None = None
+
+
+class MissionHarness(BaseModel):
+    """Effective harness for one mission (merged with defaults).
+
+    ``version`` is the harness schema version this code understands
+    (current: 1). It travels YAML -> DB through ``model_dump`` at seed
+    time, so a stored row records which schema wrote it. Rows/YAML
+    without ``version`` are read as 1 (backward compatible, no
+    migration). The seed/load path is strict: an unknown version (or
+    unknown field) fails fast. The runtime read path is lenient
+    (see ``parse_mission_harness_lenient``): unknown fields are
+    ignored with a once-per-process warning and unknown versions are
+    warned about once, then the known version-1 fields are read —
+    a newer row must never kill a run on older code.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: int = 1
     security: SecurityHarness = Field(default_factory=SecurityHarness)
     guest_channel: GuestChannelHarness = Field(default_factory=GuestChannelHarness)
     builtin_tools: BuiltinToolsHarness = Field(default_factory=BuiltinToolsHarness)
@@ -187,6 +226,20 @@ class MissionHarness(BaseModel):
     tool_calls: ToolCallsHarness = Field(default_factory=ToolCallsHarness)
     tool_budget: ToolBudgetHarness = Field(default_factory=ToolBudgetHarness)
     sandbox: SandboxHarness = Field(default_factory=SandboxHarness)
+    loops: list[LoopHarness] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_loops(self) -> MissionHarness:
+        seen: set[str] = set()
+        for loop in self.loops:
+            if not loop.id.strip():
+                raise ValueError("harness.loops[].id must be non-empty")
+            if loop.id in seen:
+                raise ValueError(
+                    f"duplicate loop id {loop.id!r} in harness.loops"
+                )
+            seen.add(loop.id)
+        return self
 
 
 class AgentHarness(BaseModel):

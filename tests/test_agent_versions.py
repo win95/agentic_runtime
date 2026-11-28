@@ -79,7 +79,6 @@ def test_manifest_covers_all_built_in_tools():
     assert len(manifest) == len(registered) == _registry_tool_count()
     assert {e["name"] for e in manifest} == ADMIN_TOOLS | {
         "calculate_failure_rate",
-        "confirm_guest_booking",
         "get_maintenance_records",
         "get_sensor_data",
         "query_asset_relationships",
@@ -88,6 +87,14 @@ def test_manifest_covers_all_built_in_tools():
         "search_technical_documents",
         "tavily_search",
         "tavily_extract",
+        "lark_create_group",
+        "lark_send_message",
+        "lark_get_group",
+        "lark_upload_image",
+        "lark_add_members",
+        "lark_reply_message",
+        "lark_get_history",
+        "lark_update_group",
     }
     entry = next(e for e in manifest if e["name"] == "get_sensor_data")
     assert entry["capability"] == "sensor_data"

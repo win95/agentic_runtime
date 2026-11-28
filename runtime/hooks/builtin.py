@@ -94,7 +94,7 @@ DEFAULT_STOP_MAX_CONTINUES = 3
 # Pre-retrieval defaults (see retrieval_context): which stores to pull
 # when a mission declares `retrieval:` without listing sources, and
 # the char budget for the injected block — derived from the context
-# budget (RETRIEVAL_TOKENS = 8,024 tokens x ~4 chars).
+# budget (RETRIEVAL_TOKENS = 4,096 tokens x ~4 chars).
 DEFAULT_RETRIEVAL_SOURCES = ["faults", "documents", "relations"]
 DEFAULT_RETRIEVAL_MAX_CHARS = retrieval_max_chars()
 # One shared default with infra/qdrant_client.search_documents and
@@ -252,6 +252,21 @@ def _destructive_target_keys(tool_name: str) -> tuple[str, ...]:
     return entry.destructive_target_args if entry is not None else ()
 
 
+def _agent_created_ids(context: HookContext) -> frozenset:
+    """Ids this run created, per the run's agent object (if any).
+
+    The hook stays tool-agnostic: it only asks the agent for the set
+    of ids the run itself created. The set lives on the agent under
+    its own name (the Lark agent keeps ``_lark_created_chats``) —
+    an agent that exposes no such set contributes nothing.
+    """
+    agent = getattr(context, "agent", None)
+    created = getattr(agent, "_lark_created_chats", None) if agent is not None else None
+    if isinstance(created, (set, frozenset)):
+        return frozenset(created)
+    return frozenset()
+
+
 def guard_destructive_target(context: HookContext) -> HookDecision | None:
     """PreToolUse: a destructive call needs its target id in the input.
 
@@ -261,6 +276,13 @@ def guard_destructive_target(context: HookContext) -> HookDecision | None:
     (``context.input``). A target the request never named — e.g. one
     invented by the model or planted by an injected instruction — is
     denied before the tool runs, and the agent sees the reason.
+
+    One more source counts as "named": ids this run itself created
+    (``_agent_created_ids`` — e.g. a group the Lark agent created
+    earlier in the run). Those ids could never be in the input — the
+    run did not exist when the request was written — but they are
+    provably the run's own, not invented: they came back from a real
+    tool result in this run.
 
     Which arguments name the target is metadata on the tool's
     registry entry (``destructive_target_args``, declared at register
@@ -279,18 +301,20 @@ def guard_destructive_target(context: HookContext) -> HookDecision | None:
     if not id_keys:
         return None
     serialized_input = json.dumps(context.input, ensure_ascii=False, default=str)
+    created = _agent_created_ids(context)
     for key in id_keys:
         target = (context.tool_input or {}).get(key)
         if not isinstance(target, str) or not target:
             continue
-        if target not in serialized_input:
-            return HookDecision.deny(
-                f"Tool '{context.tool_name}' denied by hook "
-                f"'guard_destructive_target': target id {target!r} does "
-                "not appear in the execution input. Destructive actions "
-                "need the exact id named in the request — refuse the "
-                "action and ask for it."
-            )
+        if target in serialized_input or target in created:
+            continue
+        return HookDecision.deny(
+            f"Tool '{context.tool_name}' denied by hook "
+            f"'guard_destructive_target': target id {target!r} does "
+            "not appear in the execution input. Destructive actions "
+            "need the exact id named in the request — refuse the "
+            "action and ask for it."
+        )
     return None
 
 
@@ -303,9 +327,22 @@ def request_permission(context: HookContext) -> HookDecision | None:
     A missing/empty target id is not denied here — the tool itself
     reports the missing argument (same convention as
     ``guard_destructive_target``).
+
+    Opt-out: a tool may declare ``requires_approval=False`` on its
+    registry entry (``ToolEntry``). That is only for tools whose
+    approver can never reach the approval path at all — e.g.
+    ``lark_update_group``, where the operator is a Lark user with no
+    access to the platform's /permissions endpoint — and where the
+    guard + agent scope already authorize the call. The default is
+    True: every other destructive tool still needs approval.
     """
     id_keys = _destructive_target_keys(context.tool_name)
     if not id_keys:
+        return None
+    from runtime.tools.registry import registry
+
+    entry = registry.get(context.tool_name)
+    if entry is not None and not entry.requires_approval:
         return None
     target = None
     for key in id_keys:
@@ -383,7 +420,9 @@ def deny_builtin_tools(context: HookContext) -> HookDecision | None:
     )
 
     execution_config = (context.mission or {}).get("execution") or {}
-    if not mission_denies_builtin_tools(context.mission_id, execution_config):
+    if not mission_denies_builtin_tools(
+        context.mission_id, execution_config, harness=context.harness
+    ):
         return None
     if context.tool_name not in _BUILTIN_FILE_TOOLS:
         return None
@@ -391,6 +430,7 @@ def deny_builtin_tools(context: HookContext) -> HookDecision | None:
         context.mission_id,
         context.tool_name,
         execution_config,
+        harness=context.harness,
     )
     if not message:
         return None
@@ -426,7 +466,9 @@ def limit_large_report_write(context: HookContext) -> HookDecision | None:
     from runtime.harness.registry import harness_requires_output_files
 
     execution_config = (context.mission or {}).get("execution") or {}
-    if not harness_requires_output_files(context.mission_id, execution_config):
+    if not harness_requires_output_files(
+        context.mission_id, execution_config, harness=context.harness
+    ):
         return None
     if context.tool_name != "write_file":
         return None

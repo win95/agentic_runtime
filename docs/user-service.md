@@ -49,6 +49,27 @@ The platform's auth dependency is `require_api_key_or_user`
 is valid. An invalid Bearer token is a hard 401 — it never falls
 through to the API-key path.
 
+## Lark sync — one user across Lark apps (union_id)
+
+The agent (`agent_lark_me`) reaches users through Lark, not through
+password login. On every routed Lark message the frame resolves the
+sender lazily: `POST /lark/users/sync` on the platform (service API
+key) → `GET /admin/users/by-identity` here, or `POST /admin/users`
+to create the user with the synthetic email `lark-<open_id>@lark.local`
+and a random unusable password.
+
+The catch: a Lark `open_id` changes per app, so a user chatting via a
+new app would come back as a brand-new platform user. The
+`union_id` is stable across apps of the same tenant, so sync resolves
+by union first, then by open_id — and whichever identity resolved the
+user gets the other one linked to it. The union identity is stored as
+provider `"lark"`, external_id `"union:<union_id>"`, linked with
+`POST /admin/users/{user_id}/identities` (service-key only, 201 new /
+200 already linked / 409 if the identity belongs to a different user —
+never merge two accounts silently). The frame sends the union_id
+whenever the Lark event carries it; without it, sync is exactly the
+old open_id-only flow.
+
 ## What the base does NOT do
 
 - **Rate limiting on login and register.** `POST /auth/login` giới

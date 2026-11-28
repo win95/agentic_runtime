@@ -107,6 +107,36 @@ class ExecutionCreate(BaseModel):
     session_id: str | None = Field(
         default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$"
     )
+    # Admin-asserted owner (agent_lark_me, D-LARK-11): the Lark frame
+    # syncs the sender to a platform user and binds the run to them.
+    # Accepted ONLY for service-key calls (user is None) — a JWT user
+    # cannot assert someone else's id; their own sub always wins.
+    # Ignored when the caller is a JWT user.
+    user_id: str | None = None
+
+
+# --- Lark user sync (agent_lark_me, D-LARK-11) ---
+class LarkUserSyncCreate(BaseModel):
+    # Only "lark" is supported for now; the field exists so the
+    # endpoint stays generic if another provider is added later.
+    provider: str = "lark"
+    # The Lark open_id of the user chatting with the bot.
+    external_id: str = Field(min_length=1, max_length=255)
+    # The tenant-stable union_id (same human across Lark apps of the
+    # tenant). The open_id changes per app; the union_id is what keeps
+    # one platform user across an app switch. Optional — without it
+    # sync is exactly the old open_id-only flow.
+    union_id: str | None = None
+    # Email for a new user. Omitted -> the synthetic address
+    # lark-<open_id>@lark.local (D-LARK-12 default).
+    email: str | None = None
+
+
+class LarkUserSyncRead(BaseModel):
+    user_id: str
+    email: str
+    # False when the identity was already linked (idempotent re-sync).
+    created: bool
 
 
 class ExecutionResumeRequest(BaseModel):

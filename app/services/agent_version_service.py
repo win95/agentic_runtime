@@ -48,7 +48,6 @@ class AgentVersionNotFoundError(ValueError):
 def _ensure_tools_registered() -> None:
     # Importing the tool modules registers them. Idempotent.
     import runtime.tools.admin_tools  # noqa: F401
-    import runtime.tools.fault_tools  # noqa: F401
 
 
 def _tool_input_schema(entry) -> dict:

@@ -38,6 +38,12 @@ class ToolEntry:
     # named id does not appear in the execution input — declared here
     # at register time, not in a module-level map in the hook.
     destructive_target_args: tuple[str, ...] = ()
+    # Layer 2 (human approval): whether a destructive call needs a
+    # human approval before it runs. Default True — fail-closed.
+    # Opt out (False) only when no approver can ever reach the
+    # approval path and the guard + agent scope already authorize
+    # the call (see lark_update_group).
+    requires_approval: bool = True
 
 
 class ToolRegistry:
@@ -47,7 +53,8 @@ class ToolRegistry:
     def register(self, tool, capability: str, permission: str = "",
                  timeout_seconds: int = 60, retry_count: int = 1,
                  read_only: bool = True,
-                 destructive_target_args: tuple[str, ...] | str | None = None) -> ToolEntry:
+                 destructive_target_args: tuple[str, ...] | str | None = None,
+                 requires_approval: bool = True) -> ToolEntry:
         """Register a langchain @tool under a business capability."""
         if isinstance(destructive_target_args, str):
             destructive_target_args = (destructive_target_args,)
@@ -63,6 +70,7 @@ class ToolRegistry:
             input_schema=dict(getattr(tool, "args", {}) or {}),
             tool=tool,
             destructive_target_args=tuple(destructive_target_args or ()),
+            requires_approval=requires_approval,
         )
         self._tools[entry.name] = entry
         logger.debug("Registered tool %s (capability=%s)", entry.name, capability)

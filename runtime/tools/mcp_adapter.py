@@ -94,6 +94,18 @@ def _capability_map() -> dict[str, str]:
     return {str(k): str(v) for k, v in parsed.items()}
 
 
+def mission_uses_mcp_tools(capabilities: list[str] | None) -> bool:
+    """True when any of the mission's capabilities is backed by an MCP
+    tool mapping (values of ``_capability_map()``). The deep-agent node
+    gates ``load_mcp_tools()`` on this, so missions that never use MCP
+    (e.g. agent_lark_me) skip the round-trip to the MCP server entirely
+    — no warning when the server is down, no tools to filter out later.
+    """
+    if not capabilities:
+        return False
+    return bool(set(capabilities) & set(_capability_map().values()))
+
+
 async def aload_mcp_tools() -> list:
     """Load tools from the configured MCP server (async)."""
     url = settings.mcp_server_url

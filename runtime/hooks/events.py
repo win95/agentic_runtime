@@ -37,6 +37,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from runtime.harness.schema import MissionHarness
 
 
 class HookEvent(str, Enum):
@@ -102,6 +106,19 @@ class HookContext:
     session_id: str = ""
     allowed_tools: list = field(default_factory=list)
     capabilities: list = field(default_factory=list)
+    # The run's agent object, when the dispatcher has one (the
+    # mission graph sets it). Hooks read only generic attributes
+    # off it — e.g. the set of ids this run created, which
+    # guard_destructive_target accepts as a target. None for
+    # dispatches without an agent (schedules, session-end, tests).
+    agent: object | None = None
+    # The run's already-resolved harness model, when the dispatcher
+    # has one (the mission graph resolves once per run and passes it
+    # through HookMiddleware). Handlers that need a harness flag read
+    # it off here instead of re-resolving; None means "load it"
+    # (cached per mission) — dispatches without a resolved model
+    # (schedules, session-end, tests) keep working unchanged.
+    harness: MissionHarness | None = None
 
 
 @dataclass

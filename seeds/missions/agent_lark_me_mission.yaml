@@ -1,0 +1,150 @@
+# Mission agent_lark_me_mission — bot Lark: hỏi–đáp trong chat + cảnh báo
+# sự cố (tạo group → thêm người phụ trách → gửi card → retrospective →
+# đổi tên group). Theo tutorial message-development của Lark.
+# A Mission is CONFIG, not a LangGraph.
+mission_id: agent_lark_me_mission
+version: 1
+name: Agent Lark Me Mission
+objective: >
+  Làm bot Lark: trả lời người dùng trong DM/group đúng thread, và xử lý
+  cảnh báo sự cố — tạo group, thêm người phụ trách, gửi card cảnh báo,
+  rồi khi xong việc thì đọc history làm retrospective và đổi tên group
+  đánh dấu resolved. Mọi id (chat_id, message_id, user id) phải lấy từ
+  input hoặc kết quả tool — không bịa.
+
+input_schema:
+  type: object
+  properties:
+    message:
+      type: string
+    chat_id:
+      type: string
+    chat_type:
+      type: string
+    sender_id:
+      type: object
+      properties:
+        union_id:
+          type: string
+        user_id:
+          type: string
+        open_id:
+          type: string
+    message_id:
+      type: string
+    root_id:
+      type: string
+    # Scheduled form (harness loop input): mode is the constant that
+    # marks a run as a task reminder. The other mode fields are
+    # optional — the skill reads them from the input each run and
+    # falls back to its defaults when absent. recipients may be the
+    # string "task_assignees" or a {type: fixed_user|fixed_chat, ...}
+    # object (see the loops design doc §3.5).
+    mode:
+      type: string
+      const: remind_tasks
+    recipients:
+      type: [string, object]
+    task_filter:
+      type: object
+    scope:
+      type: string
+  # Two accepted input forms (Layer-1 validator enforces anyOf +
+  # const — runtime/security.py::validate_execution_input_data):
+  # interactive (message + chat_id) or scheduled (mode only). Neither
+  # form weakens the other: dropping message/chat_id from the
+  # interactive branch would let a chat-less run past Layer 1.
+  anyOf:
+    - required: [message, chat_id]
+    - required: [mode]
+
+execution:
+  mode: autonomous
+  agent_id: agent_lark_me
+  skills:
+    - agent-lark
+    - session-memory
+  # No sandbox (tran 2026-11-28): lark_me only calls the Lark API —
+  # it never runs code. Sandbox was briefly on (2026-11-27) and
+  # turned back off: the mission has no file output, so a sandbox
+  # buys nothing.
+  sandbox: false
+
+capabilities:
+  - lark_messaging
+  - lark_tasks
+
+# Harness: security.user_runnable: false (chỉ admin / API key chạy được
+# mission này — frame gọi bằng service API key; xem D-LARK-10),
+# flow_subgraph.enabled: true (skill map 3 flow trong
+# skills/agent-lark/SKILL.md — alert, answer, resolve; xem
+# docs/skill-maps.md). tool_budget caps chống spam: 1 run không tạo quá
+# 2 group / gửi quá 5 tin.
+harness:
+  flow_subgraph:
+    enabled: true
+  security:
+    user_runnable: false
+  # First harness loop (P1 — loops design doc §3.1/§4): remind users
+  # of their unfinished tasks each weekday morning. Seeded DISABLED —
+  # enable via the API only after a manual run with this exact input
+  # has been checked. Seed never deletes: removing this loop from the
+  # YAML does NOT delete its Schedule row — disable/delete it via the
+  # schedules API instead.
+  loops:
+    - id: loop_lark_me_remind_weekday
+      cron: "0 2 * * 1-5"
+      input:
+        mode: remind_tasks
+        recipients: task_assignees
+        task_filter:
+          status: todo
+          due: overdue_or_today
+        scope: all_tasklists
+      enabled: false
+      description: "Nhắc task đang làm dở mỗi sáng"
+  # Guest chat OFF (tran 2026-11-28): /guest/chat no longer routes
+  # here — it was a stopgap after the hotel disable, not a product
+  # decision. With no mission exposing public chat, /guest/chat
+  # answers 503. Re-enable by restoring guest_channel/guest_output
+  # (runtime/tools/guest_channel_tools.py is still in the tree).
+  # user_runnable stays false: plain JWT users still cannot call
+  # this mission via POST /executions.
+  # Failure notice (D-LARK-16): a FAILED run sends one short error
+  # message into the Lark chat it came from. Opt-in here (default
+  # false) — the worker reads it via effective_harness, like the
+  # Slack admin-action flag.
+  notifications:
+    lark_failure_notice: true
+  tool_budget:
+    tools:
+      - lark_send_message
+      - lark_reply_message
+      - lark_create_group
+      - lark_add_members
+      - lark_update_group
+      # P2 task reminder (2026-11-28): read-only Task API tools. Their
+      # results count toward max_result_tokens, but no max_calls cap —
+      # reads are uncapped in max_calls today (see the build notes,
+      # §3.7 open question on the 5-send cap for team-sized runs).
+      - lark_list_tasklists
+      - lark_list_tasklist_tasks
+      - lark_list_tasks
+      - lark_get_task
+    max_result_tokens: 6000
+    max_calls:
+      lark_send_message: 5
+      lark_reply_message: 3
+      lark_create_group: 2
+      lark_add_members: 3
+      lark_update_group: 2
+
+# Output: tin nhắn Lark đã gửi + hành động đã làm (không có file —
+# lark_me không xuất báo cáo). User lấy qua GET /executions/{id}/result.
+output_schema:
+  type: object
+  properties:
+    answer:
+      type: string
+    actions_taken:
+      type: array
